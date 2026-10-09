@@ -55,6 +55,7 @@ ninja manifest that samurai then executes incrementally.
   - [Compiler options](#compiler-options)
   - [Hardening](#hardening)
   - [Custom tasks](#custom-tasks)
+  - [Build hooks](#build-hooks)
 - [C++ modules](#c-modules)
 - [Dependencies](#dependencies)
   - [add_subdirectory](#add_subdirectory)
@@ -249,6 +250,38 @@ proj.task("hello", [](const truss::TaskContext& ctx) -> truss::Result<void> {
 ```
 
 `TaskContext` carries the project name, mode, build dir, cwd, and job count.
+
+### Build hooks
+
+`proj.pre_build(fn)` / `proj.post_build(fn)` wrap the compile step — codegen
+before, staging/notifications after:
+
+```cpp
+proj.pre_build([](const truss::TaskContext&) -> truss::Result<void> {
+    /* generate sources, bump a version file, ... */
+    return {};
+});
+proj.post_build([](const truss::TaskContext& ctx) -> truss::Result<void> {
+    std::printf("built into %s\n", ctx.build_dir.string().c_str());
+    return {};
+});
+```
+
+When things run, in order:
+
+```text
+./truss [debug|release] [--target X] <task>
+   │
+   ├─ configure: targets resolved, Config applied, manifest written
+   ├─ pre_build hooks   (registration order; a failure aborts)
+   ├─ samurai build     (the actual compile + link)
+   ├─ post_build hooks  (once, after the first successful build)
+   └─ task execution    (test binaries, run, named tasks)
+```
+
+Hooks fire once per invocation; `clean` and `compdb` never trigger them.
+Named tasks (`./truss <name>`) stay manual commands — hooks are for what must
+always run around the build itself.
 
 ## C++ modules
 

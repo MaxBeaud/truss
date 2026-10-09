@@ -2,7 +2,9 @@ module;
 #include <doctest/doctest.h>
 
 #include <filesystem>
+#include <expected>
 #include <string>
+#include <vector>
 
 #include <unistd.h>
 
@@ -172,4 +174,59 @@ TEST_CASE("config: configure() end-to-end (clang++ + libc++ scratch build)") {
     proj.configure(conf);
     auto r = proj.build();
     REQUIRE(r.has_value());
+}
+
+TEST_CASE("hooks: pre_build/post_build run in order around the build") {
+    ScratchDir scratch {"hooks-order"};
+    char prog[] = "truss-tests";
+    char* argv[] = {prog};
+    Project proj {"hooks-order", 1, argv};
+    REQUIRE(detail::write_file("hk/app.cpp", "int main() { return 0; }\n").has_value());
+    proj.add_executable("app").sources("hk/app.cpp");
+
+    std::vector<std::string> log;
+    proj.pre_build([&](const TaskContext&) { log.push_back("pre1"); return Result<void> {}; });
+    proj.pre_build([&](const TaskContext&) { log.push_back("pre2"); return Result<void> {}; });
+    proj.post_build([&](const TaskContext&) { log.push_back("post"); return Result<void> {}; });
+
+    auto r = proj.build();
+    REQUIRE(r.has_value());
+    CHECK(log == std::vector<std::string> {"pre1", "pre2", "post"});
+}
+
+TEST_CASE("hooks: failing pre_build aborts before compiling") {
+    ScratchDir scratch {"hooks-abort"};
+    char prog[] = "truss-tests";
+    char* argv[] = {prog};
+    Project proj {"hooks-abort", 1, argv};
+    REQUIRE(detail::write_file("hk2/app.cpp", "int main() { return 0; }\n").has_value());
+    proj.add_executable("app").sources("hk2/app.cpp");
+
+    bool post_ran = false;
+    proj.pre_build([](const TaskContext&) -> Result<void> {
+        return std::unexpected(Error {Error::Kind::Config, "pre_build hook said no"});
+    });
+    proj.post_build([&](const TaskContext&) { post_ran = true; return Result<void> {}; });
+
+    auto r = proj.build();
+    REQUIRE_FALSE(r.has_value());
+    CHECK(r.error().message.find("pre_build") != std::string::npos);
+    CHECK_FALSE(post_ran);
+    CHECK_FALSE(std::filesystem::exists("hk2-build-marker")); /* nothing compiled */
+}
+
+TEST_CASE("hooks: failing post_build aborts the build result") {
+    ScratchDir scratch {"hooks-post-fail"};
+    char prog[] = "truss-tests";
+    char* argv[] = {prog};
+    Project proj {"hooks-post-fail", 1, argv};
+    REQUIRE(detail::write_file("hk3/app.cpp", "int main() { return 0; }\n").has_value());
+    proj.add_executable("app").sources("hk3/app.cpp");
+
+    proj.post_build([](const TaskContext&) -> Result<void> {
+        return std::unexpected(Error {Error::Kind::Config, "post_build hook failed"});
+    });
+    auto r = proj.build();
+    REQUIRE_FALSE(r.has_value());
+    CHECK(r.error().message.find("post_build") != std::string::npos);
 }

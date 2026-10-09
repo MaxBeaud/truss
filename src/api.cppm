@@ -389,6 +389,13 @@ public:
     Interface& add_interface_library(std::string name);
     void task(std::string name, TaskFn fn);
 
+    /* Build hooks, run in registration order: pre_build fires once before the
+     * first compile step, post_build once after the first successful compile
+     * step (before test/run binaries execute). A failing hook aborts the
+     * build. clean/compdb never fire hooks. */
+    Project& pre_build(TaskFn fn) { pre_build_.push_back(std::move(fn)); return *this; }
+    Project& post_build(TaskFn fn) { post_build_.push_back(std::move(fn)); return *this; }
+
     /* Project-wide toolchain selection (compiler/linker/stdlib/archiver).
      * Per-target cross_target() still overrides it completely. */
     Project& configure(const Config& conf) { config_ = conf; return *this; }
@@ -435,6 +442,7 @@ private:
     std::filesystem::path cwd_;
     std::vector<std::unique_ptr<Target>> targets_;
     std::vector<std::pair<std::string, TaskFn>> user_tasks_;
+    std::vector<TaskFn> pre_build_, post_build_;
     Config config_;
 
     /* parsed CLI state */

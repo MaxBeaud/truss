@@ -737,13 +737,34 @@ Result<void> Project::build() {
     if (tasks.empty())
         tasks.push_back("build");
 
+    /* build hooks: pre_build once before the first compile step, post_build
+     * once after the first successful one; a failing hook aborts */
+    bool hooks_pre_done = false, hooks_post_done = false;
+    auto run_samu = [&](std::span<const std::string> targets) -> Result<void> {
+        if (!hooks_pre_done) {
+            for (auto& fn : pre_build_)
+                if (auto r = fn(ctx); !r)
+                    return r;
+            hooks_pre_done = true;
+        }
+        if (auto r = detail::samu_build(manifest.generic_string(), jobs_, verbose_, dry_run_, explain_, targets); !r)
+            return r;
+        if (!hooks_post_done) {
+            for (auto& fn : post_build_)
+                if (auto r = fn(ctx); !r)
+                    return r;
+            hooks_post_done = true;
+        }
+        return {};
+    };
+
     for (const auto& task : tasks) {
         Result<void> step = [&]() -> Result<void> {
             if (task == "clean")
                 return detail::remove_tree(bld);
 
             if (task == "build")
-                return detail::samu_build(manifest.generic_string(), jobs_, verbose_, dry_run_, explain_, {});
+                return run_samu({});
 
             if (task == "compdb") {
                 auto r = detail::samu_compdb(manifest.generic_string(), (bld / "compile_commands.json").generic_string());
@@ -760,7 +781,7 @@ Result<void> Project::build() {
                     detail::log_warn("no targets marked is_test(); nothing to run");
                     return {};
                 }
-                if (auto r = detail::samu_build(manifest.generic_string(), jobs_, verbose_, dry_run_, explain_, test_outputs); !r)
+                if (auto r = run_samu(test_outputs); !r)
                     return r;
                 int failures = 0;
                 for (const auto& exe : test_outputs) {
@@ -787,7 +808,7 @@ Result<void> Project::build() {
                         exe_outputs.push_back(r.output);
                 if (exe_outputs.empty())
                     return std::unexpected(Error {Error::Kind::Config, "no executable to run (test executables are excluded)"});
-                if (auto r = detail::samu_build(manifest.generic_string(), jobs_, verbose_, dry_run_, explain_, exe_outputs); !r)
+                if (auto r = run_samu(exe_outputs); !r)
                     return r;
                 const std::array argv {exe_outputs.front()};
                 auto outcome = detail::run_process(argv, false);
