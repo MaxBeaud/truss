@@ -102,3 +102,18 @@ TEST_CASE("flags: link flags order -L before -l") {
     CHECK(r->find("-L") < r->find("-lfoo"));
     CHECK(contains(*r, "-lm"));
 }
+
+TEST_CASE("flags: C variant uses gnu17, never a C++ -std") {
+    const auto t = clang_triple();
+    const std::array<std::string, 1> incs {"include"};
+    auto r = detail::build_flags(t, BuildMode::Debug, CppStandard::Cpp26, Warnings::Default,
+                                 DebugInfo::Default, Optimization::Default, Sanitizer::Default,
+                                 Lto::Default, true, std::array<std::string, 0> {}, incs, "");
+    REQUIRE(r.has_value());
+    CHECK(contains(r->compile, "-std=c++26"));
+    CHECK(contains(r->compile_c, "-std=gnu17"));
+    CHECK_FALSE(contains(r->compile_c, "-std=c++"));
+    /* shared flags still apply to the C variant */
+    CHECK(contains(r->compile_c, "-fPIC"));
+    CHECK(contains(r->compile_c, "-I\"include\""));
+}

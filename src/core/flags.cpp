@@ -106,28 +106,34 @@ Result<FlagSet> build_flags(const TargetTriple& triple, BuildMode mode,
         return std::unexpected(r.error());
 
     FlagSet fs;
+    /* C++ and C variants share everything except the -std flag */
     add(fs.compile, kStdFlags[static_cast<std::size_t>(std_opt == CppStandard::Default ? CppStandard::Cpp23 : std_opt)]);
-    add(fs.compile, kWarningFlags[static_cast<std::size_t>(warnings)]);
+    add(fs.compile_c, "-std=gnu17");
+    auto add_both = [&](std::string_view f) {
+        add(fs.compile, f);
+        add(fs.compile_c, f);
+    };
+    add_both(kWarningFlags[static_cast<std::size_t>(warnings)]);
 
     const DebugInfo dbg = debug == DebugInfo::Default
                               ? (mode == BuildMode::Debug ? DebugInfo::Full : DebugInfo::None)
                               : debug;
-    add(fs.compile, kDebugFlags[static_cast<std::size_t>(dbg)]);
+    add_both(kDebugFlags[static_cast<std::size_t>(dbg)]);
 
     const Optimization opt = optimization == Optimization::Default
                                  ? (mode == BuildMode::Debug ? Optimization::None : Optimization::O2)
                                  : optimization;
-    add(fs.compile, kOptimizationFlags[static_cast<std::size_t>(opt)]);
+    add_both(kOptimizationFlags[static_cast<std::size_t>(opt)]);
 
-    add(fs.compile, kSanitizerCompileFlags[static_cast<std::size_t>(sanitizer)]);
-    add(fs.compile, kLtoCompileFlags[static_cast<std::size_t>(lto)]);
-    if (pic) add(fs.compile, "-fPIC");
-    if (mode == BuildMode::Release) add(fs.compile, "-DNDEBUG");
+    add_both(kSanitizerCompileFlags[static_cast<std::size_t>(sanitizer)]);
+    add_both(kLtoCompileFlags[static_cast<std::size_t>(lto)]);
+    if (pic) add_both("-fPIC");
+    if (mode == BuildMode::Release) add_both("-DNDEBUG");
 
-    for (const auto& d : defines) add(fs.compile, "-D" + d);
-    for (const auto& i : includes) add(fs.compile, "-I\"" + i + "\"");
+    for (const auto& d : defines) add_both("-D" + d);
+    for (const auto& i : includes) add_both("-I\"" + i + "\"");
 
-    add(fs.compile, user_flags);
+    add_both(user_flags);
     return fs;
 }
 

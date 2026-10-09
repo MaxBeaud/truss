@@ -108,8 +108,9 @@ Read `PLAN.MD` first. This file is the rulebook for any agent/human modifying th
 
 ## 9. Open questions to resolve with the user before the relevant phase
 
-- Phase 5: exact `fetch` option surface (git-only vs tarball+sha256 both? lockfile format
-  ini vs json?).
+- ~~Phase 5: exact `fetch` option surface~~ — resolved with the plan's defaults: both
+  git+tag and tarball+sha256 are supported; lockfile is the tiny key=value `truss.lock`
+  (mate's ini equivalent).
 - Phase 6: conan 2 assumed (v1 EOL) — confirm; vcpkg manifest vs classic mode.
 - Phase 7: whether `import std;` becomes the default inside truss's own module once
   libc++ + clang trunk combination is verified stable with sanitizers + hardening.
@@ -157,3 +158,29 @@ Read `PLAN.MD` first. This file is the rulebook for any agent/human modifying th
   clang-scan-deps integration replaces this in a later phase.
 - C++ pitfall (caused an infinite loop): `for (...; std::getline(std::istringstream(s), p, ',');)`
   constructs a fresh stream every iteration and never advances. Build the stream once outside.
+
+## 12. Verified toolchain facts (learned during phase 5 — vendoring + fetch)
+
+- C sources must NOT get the C++ `-std=c++XX` flag (clang rejects it: "not allowed with
+  'C'"). `FlagSet` carries a separate `compile_c` (`-std=gnu17` + shared flags); the
+  `compile_c` ninja edge uses it.
+- `add_subdirectory` conventions (validated against real repos):
+  - `src/` present -> static lib, sources globbed recursively under `src/`;
+  - else top-level `*.{c,cpp,cc,cxx}` present -> static lib from top-level sources only
+    (recursive globbing pulls in `cli/`+`tests/` `main()`s, e.g. xxHash — don't do that);
+  - else -> `Interface` target (header-only, no artifact; include dirs still propagate).
+  - include dirs: `include/` when present, else the package root (root-layout libs).
+- `depends_on` now propagates include dirs transitively (`collect_include_dirs`), so
+  consumers of fetched/vendored packages get their headers automatically.
+- Interface targets: empty output path, no compile/link edges, excluded from `all` and
+  from link dep_outputs; must be skipped explicitly in the emitter.
+- fetch cache layout: `~/.cache/truss/git/<name>/<tag>` (shallow clone; 40-hex refs use
+  init+fetch+checkout FETCH_HEAD because `--branch` rejects commit SHAs) and
+  `~/.cache/truss/tarballs/<sha256>.<ext>`; materialized into `build/<mode>/packages/<name>`;
+  `truss.lock` (`pkg.<name> = <pin>`) makes re-materialization offline.
+- GitHub auto-tarballs (`.../archive/refs/tags/<tag>.tar.gz`) need `--strip-components=1`
+  (top dir is `<repo>-<version>/`).
+- Vendored git copies: copy the cache tree then delete `.git` (std::filesystem::copy has
+  no filter; fine for small deps).
+- Test-vector lesson: don't hardcode library constants from memory (XXH64/XXH32 vectors
+  were wrong); compute them against the real library first.

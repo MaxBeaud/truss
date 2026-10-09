@@ -30,6 +30,11 @@ Result<void> write_file(const std::filesystem::path& p, std::string_view data);
 Result<void> make_dirs(const std::filesystem::path& p);
 Result<void> remove_tree(const std::filesystem::path& p);
 
+/* --- lockfile (truss.lock): tiny key=value pin file ---------------------- */
+std::map<std::string, std::string> read_lockfile(const std::filesystem::path& file);
+Result<void> write_lockfile(const std::filesystem::path& file,
+                            const std::map<std::string, std::string>& entries);
+
 /* Glob relative to cwd. `*` within a component, `**` across components,
  * `?` one char, `{a,b}` alternation. Hidden entries are skipped. Sorted. */
 Result<std::vector<std::filesystem::path>> glob(std::string_view pattern);
@@ -66,8 +71,9 @@ resolve_module_imports(const ModuleUnitInfo& u, const std::map<std::string, std:
 
 /* --- compiler flags ------------------------------------------------------ */
 struct FlagSet {
-    std::string compile; /* flags for compile edges */
-    std::string link;    /* flags for link edges */
+    std::string compile;    /* flags for C++ compile edges */
+    std::string compile_c;  /* flags for C compile edges (gnu17 instead of c++XX) */
+    std::string link;       /* flags for link edges */
 };
 
 /* Returns std/warnings/debug/optimization/sanitizer/lto/pic/defines flags for

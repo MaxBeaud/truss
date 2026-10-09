@@ -135,6 +135,15 @@ target("modules-truss")
     set_basename("truss")
     set_targetdir("$(projectdir)/examples/modules")
 
+-- examples/fetch build script (fetched dependencies).
+target("fetch-truss")
+    set_kind("binary")
+    add_rules("c++.build.modules")
+    add_deps("truss-mod", "truss-lib")
+    add_files("examples/fetch/truss.cpp")
+    set_basename("truss")
+    set_targetdir("$(projectdir)/examples/fetch")
+
 -- Unit tests: test files are implementation units of truss (module truss;) so they
 -- can exercise the internal :impl partition (glob, fs, proc, flags, ninja emitter).
 target("truss-tests")

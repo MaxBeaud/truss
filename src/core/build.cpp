@@ -74,6 +74,23 @@ void collect_bmis(const ResolvedTarget& r, const std::vector<ResolvedTarget>& al
     }
 }
 
+/* Include dirs a target sees: its own plus those of depends_on (transitively),
+ * so vendored/fetched packages expose their headers to consumers automatically. */
+void collect_include_dirs(const ResolvedTarget& r, const std::vector<ResolvedTarget>& all,
+                          std::vector<std::string>& out, std::set<const Target*>& seen) {
+    if (!seen.insert(r.target).second)
+        return;
+    for (const auto& d : r.target->include_dirs())
+        if (std::ranges::find(out, d) == out.end())
+            out.push_back(d);
+    for (const Target* dep : r.target->deps()) {
+        const auto it = std::ranges::find(all, dep->name(),
+                                          [](const ResolvedTarget& x) -> const std::string& { return x.target->name(); });
+        if (it != all.end())
+            collect_include_dirs(*it, all, out, seen);
+    }
+}
+
 Result<std::vector<std::string>> resolve_sources(const Target& t) {
     std::vector<std::string> files;
     for (const auto& pattern : t.source_patterns()) {
@@ -140,6 +157,8 @@ std::string output_path_for(const Target& t, const std::filesystem::path& build_
         return (build_dir / "lib" / triple_dir / ("lib" + name + ".a")).generic_string();
     case TargetKind::SharedLibrary:
         return (build_dir / "lib" / triple_dir / ("lib" + name + ".so")).generic_string();
+    case TargetKind::Interface:
+        return {}; /* header-only: no artifact */
     }
     return name;
 }
@@ -183,11 +202,19 @@ Result<void> emit_manifest(const Project& proj, const std::vector<ResolvedTarget
     std::vector<std::string> all_outputs;
     for (const auto& r : resolved) {
         const Target& t = *r.target;
+        /* header-only targets contribute usage requirements (via collect_include_dirs)
+         * but produce no artifact and no edges */
+        if (t.kind() == TargetKind::Interface)
+            continue;
         const bool pic = t.pic() || t.kind() != TargetKind::Executable;
+
+        std::vector<std::string> includes;
+        std::set<const Target*> inc_seen;
+        collect_include_dirs(r, resolved, includes, inc_seen);
 
         auto cflags = detail::build_flags(r.triple, proj.mode(), t.cpp_standard(), t.warnings(),
                                           t.debug_info(), t.optimization(), t.sanitizer(), t.lto(),
-                                          pic, t.defines(), t.include_dirs(), t.flags());
+                                          pic, t.defines(), includes, t.flags());
         if (!cflags)
             return std::unexpected(cflags.error());
 
@@ -258,7 +285,7 @@ Result<void> emit_manifest(const Project& proj, const std::vector<ResolvedTarget
             e.inputs = {src};
             e.vars = {
                 {"cc", r.triple.compiler == "clang++" ? "clang" : r.triple.compiler == "g++" ? "gcc" : r.triple.compiler},
-                {"flags", cflags->compile},
+                {"flags", cflags->compile_c},
                 {"depfile", obj + ".d"},
             };
             w.build(std::move(e));
@@ -275,6 +302,8 @@ Result<void> emit_manifest(const Project& proj, const std::vector<ResolvedTarget
                     Error::Kind::Config,
                     "target '" + t.name() + "' depends on unknown target '" + dep->name() + "'",
                 });
+            if (dep->kind() == TargetKind::Interface)
+                continue; /* header-only: no artifact to link */
             dep_outputs.push_back(it->output);
             if (dep->kind() == TargetKind::SharedLibrary)
                 has_shared_dep = true;
@@ -432,6 +461,13 @@ SharedLib& Project::add_shared_library(std::string name) {
     return ref;
 }
 
+Interface& Project::add_interface_library(std::string name) {
+    auto t = std::make_unique<Interface>(std::move(name));
+    auto& ref = *t;
+    targets_.push_back(std::move(t));
+    return ref;
+}
+
 void Project::task(std::string name, TaskFn fn) {
     user_tasks_.emplace_back(std::move(name), std::move(fn));
 }
@@ -481,7 +517,7 @@ Result<void> Project::build() {
             detail::log_error(sources.error());
             return std::unexpected(sources.error());
         }
-        if (sources->empty())
+        if (sources->empty() && t->kind() != TargetKind::Interface)
             return std::unexpected(Error {
                 Error::Kind::Config,
                 "target '" + t->name() + "' has no sources; add some with .sources(...) or .sources_in(...)",

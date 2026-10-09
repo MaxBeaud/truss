@@ -43,7 +43,23 @@ enum class Lto { Default = 0, None, Full, Thin };
  * Manual: precise per-file BMI wiring — not implemented yet. */
 enum class ModulesMode { Default = 0, Off, Auto, Manual };
 
-enum class TargetKind { Executable, StaticLibrary, SharedLibrary };
+/* fetch() sources. Exactly one pair must be set:
+ *  - git + tag  : shallow clone pinned to a tag/branch/commit
+ *  - url + sha256: tarball (.tar.gz/.tar.xz) verified against the hash */
+struct FetchOptions {
+    std::string git;
+    std::string tag;
+    std::string url;
+    std::string sha256;
+};
+
+/* A fetched dependency materialized under build/<mode>/packages/<name>. */
+struct Package {
+    std::string name;
+    std::filesystem::path dir;
+};
+
+enum class TargetKind { Executable, StaticLibrary, SharedLibrary, Interface };
 
 /* A range whose elements can name a string (vector<string>, initializer_list
  * of const char*, spans...). Deliberately excludes a bare char literal/array
@@ -240,6 +256,12 @@ class SharedLib : public Target {
 public:
     explicit SharedLib(std::string name) : Target(std::move(name), TargetKind::SharedLibrary) {}
 };
+/* Header-only: no compiled artifact, only usage requirements (include dirs,
+ * defines) propagated to targets that depends_on() it. */
+class Interface : public Target {
+public:
+    explicit Interface(std::string name) : Target(std::move(name), TargetKind::Interface) {}
+};
 
 /* ---------------------------------------------------------------------------
  * Pipe composition: `target | with_sources({...}) | with_depends_on(core)`.
@@ -319,7 +341,20 @@ public:
     Executable& add_executable(std::string name);
     StaticLib& add_static_library(std::string name);
     SharedLib& add_shared_library(std::string name);
+    Interface& add_interface_library(std::string name);
     void task(std::string name, TaskFn fn);
+
+    /* --- packages (phase 5) ------------------------------------------------
+     * fetch(): git (shallow clone pinned to tag) or tarball (sha256-verified),
+     * cached in ~/.cache/truss, materialized into build/{mode}/packages/{name},
+     * pinned in ./truss.lock. Call before build(). */
+    Result<Package> fetch(std::string_view name, const FetchOptions& opts);
+
+    /* add_subdirectory(): convention-based vendored project — a static library
+     * named after the directory, sources from its src/ tree, includes from its
+     * include/ dir when present. Returns the target for depends_on(). */
+    Result<Target*> add_subdirectory(const std::filesystem::path& dir);
+    Result<Target*> add_subdirectory(const Package& pkg) { return add_subdirectory(pkg.dir); }
 
     /* Generates the ninja manifest, runs samurai, then the requested tasks.
      * Errors are logged and returned. */
@@ -348,6 +383,7 @@ private:
     std::vector<std::string> only_targets_;
     std::optional<std::filesystem::path> build_root_;
     std::optional<Error> cli_error_;
+    std::vector<std::string> subdir_target_names_; /* created by add_subdirectory */
 };
 
 } // namespace truss

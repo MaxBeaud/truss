@@ -2,13 +2,14 @@
 
 > Build your C++ using C++. mate.h API style + xmake-class features + samurai backend.
 
-**Status (2026-10-09):** Phases 0–4 complete. `xmake f -m debug && xmake` builds
-`truss-mod` (BMI) + `libtruss.a` + `./truss`; Catch2 unit tests green (35 cases: glob, fs,
-proc, triple, flags, golden ninja manifest, module scanner/resolver); `examples/hello`,
-`examples/shared` and `examples/modules` (primary + partition + impl unit) build/run/test/
-rebuild incrementally through the vendored samurai; shared libs + rpath + user tasks +
-`--target` verified; failing test fixtures exit 1. See AGENT.MD §10–11 for verified
-toolchain facts.
+**Status (2026-10-09):** Phases 0–5 complete. `xmake f -m debug && xmake` builds
+`truss-mod` (BMI) + `libtruss.a` + `./truss`; Catch2 unit tests green (39 cases: glob, fs,
+proc, triple, flags, golden ninja manifest, module scanner/resolver, lockfile, fetch
+validation); `examples/hello`, `examples/shared`, `examples/modules` (primary + partition +
+impl unit) and `examples/fetch` (git-tag header-only + sha256 tarball compiled lib, cached
+offline) build/run/test/rebuild incrementally through the vendored samurai; shared libs +
+rpath + user tasks + `--target` verified; failing test fixtures exit 1. See AGENT.MD
+§10–12 for verified toolchain facts.
 
 ## 0. Decisions (confirmed with user)
 
