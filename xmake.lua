@@ -53,7 +53,7 @@ end)
 -- Dependencies
 -- =============================================================================
 
--- add_requires("catch2 v3.16.0")
+add_requires("catch2")
 
 -- samurai (vendored ninja-compatible build backend, see vendor/samurai/TRUSS-VENDOR.txt).
 -- Compiled as plain C17; samu.c is excluded because src/samu/shim.c replaces its main().
@@ -116,6 +116,24 @@ target("hello-truss")
     add_files("examples/hello/truss.cpp")
     set_basename("truss")
     set_targetdir("$(projectdir)/examples/hello")
+
+-- examples/shared build script (shared libs + rpath + user tasks).
+target("shared-truss")
+    set_kind("binary")
+    add_rules("c++.build.modules")
+    add_deps("truss-mod", "truss-lib")
+    add_files("examples/shared/truss.cpp")
+    set_basename("truss")
+    set_targetdir("$(projectdir)/examples/shared")
+
+-- Unit tests: test files are implementation units of truss (module truss;) so they
+-- can exercise the internal :impl partition (glob, fs, proc, flags, ninja emitter).
+target("truss-tests")
+    set_kind("binary")
+    add_rules("c++.build.modules")
+    add_deps("truss-mod", "truss-lib")
+    add_packages("catch2")
+    add_files("tests/unit/*.cpp")
 
 if is_mode("debug") then
     add_defines("_LIBCPP_HARDENING_MODE=_LIBCPP_HARDENING_MODE_DEBUG")

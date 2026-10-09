@@ -42,7 +42,8 @@ Result<ProcOutcome> run_process(std::span<const std::string> argv, bool capture)
     }
 
     pid_t pid {};
-    const int rc = posix_spawn(&pid, cargv[0], have_actions ? &actions : nullptr, nullptr, cargv.data(), environ);
+    /* spawnp: search PATH like a shell, matching ninja/samu job semantics */
+    const int rc = posix_spawnp(&pid, cargv[0], have_actions ? &actions : nullptr, nullptr, cargv.data(), environ);
     if (have_actions)
         posix_spawn_file_actions_destroy(&actions);
 

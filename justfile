@@ -11,10 +11,13 @@ hello: build
     xmake -y hello-truss
     cd {{ROOT}}/examples/hello && ./truss debug && ./build/debug/bin/*/app
 
-# Run the example's tests through truss's `test` task.
+# Run truss's unit tests + the examples' tests through truss's `test` task.
 test: build
-    xmake -y hello-truss
+    xmake -y truss-tests
+    xmake run truss-tests
+    xmake -y hello-truss shared-truss
     cd {{ROOT}}/examples/hello && ./truss test
+    cd {{ROOT}}/examples/shared && ./truss test
 
 clean:
     rm -rf {{ROOT}}/build/ {{ROOT}}/.xmake/
