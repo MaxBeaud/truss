@@ -37,6 +37,12 @@ enum class Optimization { Default = 0, None, O1, O2, Size, O3 };
 enum class Sanitizer { Default = 0, None, Address, Ub, All };
 enum class Lto { Default = 0, None, Full, Thin };
 
+/* How .cppm sources in a user target get compiled and wired.
+ * Auto (the default): conservative v0.1 mode — every .cppm becomes a BMI edge and
+ * every other unit in the target (and its deps) imports all of them.
+ * Manual: precise per-file BMI wiring — not implemented yet. */
+enum class ModulesMode { Default = 0, Off, Auto, Manual };
+
 enum class TargetKind { Executable, StaticLibrary, SharedLibrary };
 
 /* A range whose elements can name a string (vector<string>, initializer_list
@@ -170,6 +176,7 @@ public:
     Target& optimization(Optimization o) { optimization_ = o; return *this; }
     Target& sanitizer(Sanitizer s) { sanitizer_ = s; return *this; }
     Target& lto(Lto l) { lto_ = l; return *this; }
+    Target& modules_mode(ModulesMode m) { modules_ = m; return *this; }
     Target& pic(bool v) { pic_ = v; return *this; }
     Target& cross_target(TargetTriple t) { triple_ = t; return *this; }
     Target& depends_on(const Target& dep);
@@ -194,6 +201,7 @@ public:
     Optimization optimization() const { return optimization_; }
     Sanitizer sanitizer() const { return sanitizer_; }
     Lto lto() const { return lto_; }
+    ModulesMode modules_mode() const { return modules_; }
     bool pic() const { return pic_; }
     const std::optional<TargetTriple>& triple_override() const { return triple_; }
     const std::vector<const Target*>& deps() const { return deps_; }
@@ -213,6 +221,7 @@ private:
     Optimization optimization_ {};
     Sanitizer sanitizer_ {};
     Lto lto_ {};
+    ModulesMode modules_ {};
     bool pic_ {false};
     bool test_ {false};
     std::optional<TargetTriple> triple_;

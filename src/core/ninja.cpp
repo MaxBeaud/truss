@@ -56,6 +56,11 @@ void NinjaWriter::build(Edge e) {
     buf_ += "build";
     for (const auto& out : e.outputs)
         buf_ += " " + esc_path(out);
+    if (!e.implicit_outs.empty()) {
+        buf_ += " |";
+        for (const auto& out : e.implicit_outs)
+            buf_ += " " + esc_path(out);
+    }
     buf_ += ": " + e.rule;
     for (const auto& in : e.inputs)
         buf_ += " " + esc_path(in);

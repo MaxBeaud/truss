@@ -3,6 +3,7 @@
  * they are invisible to `import truss;` consumers. */
 module;
 #include <filesystem>
+#include <map>
 #include <span>
 #include <string>
 #include <string_view>
@@ -45,6 +46,24 @@ struct ProcOutcome {
 Result<ProcOutcome> run_process(std::span<const std::string> argv, bool capture);
 bool program_exists(std::string_view name);
 
+/* --- C++ module scanning (v0.1: line-anchored regex, no preprocessor) ---- */
+struct ModuleUnitInfo {
+    std::string path;
+    std::string module_name;              /* "" for plain TUs; "math" or "math:part" */
+    bool is_bmi_source {};                /* true for .cppm interface/partition units */
+    std::vector<std::string> imports;     /* raw names: "math", ":part", "std"... */
+};
+
+/* Extract the module declaration + import list from a source file. */
+Result<ModuleUnitInfo> scan_module_unit(const std::string& path);
+
+/* Resolve a unit's imports against available BMIs (module name -> pcm path).
+ * Returns the -fmodule-file flags and the BMI files to order before the edge.
+ * Rules: a BMI source never consumes its own BMI; an implementation unit
+ * implicitly imports its primary; importing a primary pulls its partitions. */
+Result<std::pair<std::string, std::vector<std::string>>>
+resolve_module_imports(const ModuleUnitInfo& u, const std::map<std::string, std::string>& bmis);
+
 /* --- compiler flags ------------------------------------------------------ */
 struct FlagSet {
     std::string compile; /* flags for compile edges */
@@ -77,6 +96,7 @@ public:
     void rule(std::string_view name, std::vector<std::pair<std::string, std::string>> body);
     struct Edge {
         std::vector<std::string> outputs;
+        std::vector<std::string> implicit_outs; /* after | on the output side */
         std::string rule;
         std::vector<std::string> inputs;       /* explicit */
         std::vector<std::string> implicit_ins; /* after | */

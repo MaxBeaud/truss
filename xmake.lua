@@ -126,6 +126,15 @@ target("shared-truss")
     set_basename("truss")
     set_targetdir("$(projectdir)/examples/shared")
 
+-- examples/modules build script (C++ modules in user projects).
+target("modules-truss")
+    set_kind("binary")
+    add_rules("c++.build.modules")
+    add_deps("truss-mod", "truss-lib")
+    add_files("examples/modules/truss.cpp")
+    set_basename("truss")
+    set_targetdir("$(projectdir)/examples/modules")
+
 -- Unit tests: test files are implementation units of truss (module truss;) so they
 -- can exercise the internal :impl partition (glob, fs, proc, flags, ninja emitter).
 target("truss-tests")

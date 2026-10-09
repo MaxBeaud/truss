@@ -15,13 +15,16 @@ hello: build
 test: build
     xmake -y truss-tests
     xmake run truss-tests
-    xmake -y hello-truss shared-truss
+    xmake -y hello-truss shared-truss modules-truss
     cd {{ROOT}}/examples/hello && ./truss test
     cd {{ROOT}}/examples/shared && ./truss test
+    cd {{ROOT}}/examples/modules && ./truss test
 
 clean:
     rm -rf {{ROOT}}/build/ {{ROOT}}/.xmake/
     cd {{ROOT}}/examples/hello && rm -rf build/ truss
+    cd {{ROOT}}/examples/shared && rm -rf build/ truss
+    cd {{ROOT}}/examples/modules && rm -rf build/ truss
 
 add-packages:
     #!/usr/bin/env bash

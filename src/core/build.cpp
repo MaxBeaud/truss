@@ -7,9 +7,12 @@ module;
 #include <cstdlib>
 #include <expected>
 #include <filesystem>
+#include <map>
 #include <memory>
+#include <set>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 module truss;
@@ -38,13 +41,38 @@ bool path_is_safe(const std::filesystem::path& p) {
     return s.find_first_of(" \t:$") == std::string::npos;
 }
 
+/* A module unit (.cppm) compiled to a BMI + object. */
+struct BmiUnit {
+    std::string source;       /* relative path */
+    std::string module_name;  /* e.g. "math" or "math:part" */
+    std::string bmi_path;     /* objdir/bmi/<name>.pcm (':' -> '_') */
+    std::string object;       /* objdir/<source>.o */
+};
+
 /* A resolved target: everything the emitter needs. */
 struct ResolvedTarget {
     Target* target {};
     TargetTriple triple;
     std::vector<std::string> cxx_sources, c_sources; /* relative to cwd */
+    std::vector<BmiUnit> bmis;
+    std::vector<detail::ModuleUnitInfo> units;       /* all sources, scanned */
     std::string objdir, outdir, output;              /* relative to cwd */
 };
+
+/* BMIs visible to a target: its own plus those of depends_on (transitively). */
+void collect_bmis(const ResolvedTarget& r, const std::vector<ResolvedTarget>& all,
+                  std::map<std::string, std::string>& out, std::set<const Target*>& seen) {
+    if (!seen.insert(r.target).second)
+        return;
+    for (const auto& b : r.bmis)
+        out.emplace(b.module_name, b.bmi_path);
+    for (const Target* dep : r.target->deps()) {
+        const auto it = std::ranges::find(all, dep->name(),
+                                          [](const ResolvedTarget& x) -> const std::string& { return x.target->name(); });
+        if (it != all.end())
+            collect_bmis(*it, all, out, seen);
+    }
+}
 
 Result<std::vector<std::string>> resolve_sources(const Target& t) {
     std::vector<std::string> files;
@@ -134,6 +162,11 @@ Result<void> emit_manifest(const Project& proj, const std::vector<ResolvedTarget
         {"deps", "gcc"},
         {"description", "CC $out"},
     });
+    w.rule("compile_bmi", {
+        {"command", "$cxx $flags -fmodule-output=$bmi -MMD -MF $depfile -c $in -o $out"},
+        {"deps", "gcc"},
+        {"description", "BMI $out"},
+    });
     w.rule("archive", {
         {"command", "$ar rcs $out $in"},
         {"description", "AR $out"},
@@ -158,17 +191,60 @@ Result<void> emit_manifest(const Project& proj, const std::vector<ResolvedTarget
         if (!cflags)
             return std::unexpected(cflags.error());
 
+        /* BMIs visible to this target: own + transitive depends_on */
+        std::map<std::string, std::string> bmis;
+        std::set<const Target*> seen;
+        collect_bmis(r, resolved, bmis, seen);
+
+        const auto unit_for = [&r](const std::string& src) -> const detail::ModuleUnitInfo* {
+            for (const auto& u : r.units)
+                if (u.path == src)
+                    return &u;
+            return nullptr;
+        };
+
         /* compile edges */
         std::vector<std::string> objects;
+        for (const auto& b : r.bmis) {
+            auto imp = detail::resolve_module_imports(*unit_for(b.source), bmis);
+            if (!imp)
+                return std::unexpected(imp.error());
+            NinjaWriter::Edge e;
+            e.outputs = {b.object};
+            /* the .pcm is produced by -fmodule-output: declare it as an implicit
+             * output so samu can order consumers against it */
+            e.implicit_outs = {b.bmi_path};
+            e.rule = "compile_bmi";
+            e.inputs = {b.source};
+            e.implicit_ins = imp->second;
+            std::string flags = cflags->compile;
+            if (!imp->first.empty())
+                flags += " " + imp->first;
+            e.vars = {
+                {"cxx", r.triple.compiler},
+                {"flags", flags},
+                {"bmi", b.bmi_path},
+                {"depfile", b.object + ".d"},
+            };
+            w.build(std::move(e));
+            objects.push_back(b.object);
+        }
         for (const auto& src : r.cxx_sources) {
+            auto imp = detail::resolve_module_imports(*unit_for(src), bmis);
+            if (!imp)
+                return std::unexpected(imp.error());
             const std::string obj = r.objdir + "/" + src + ".o";
             NinjaWriter::Edge e;
             e.outputs = {obj};
             e.rule = "compile_cxx";
             e.inputs = {src};
+            e.implicit_ins = imp->second;
+            std::string flags = cflags->compile;
+            if (!imp->first.empty())
+                flags += " " + imp->first;
             e.vars = {
                 {"cxx", r.triple.compiler},
-                {"flags", cflags->compile},
+                {"flags", flags},
                 {"depfile", obj + ".d"},
             };
             w.build(std::move(e));
@@ -274,7 +350,9 @@ Target& Target::sources_in(std::string_view dir) {
         d.pop_back();
     source_patterns_.push_back(d + "/**.cpp");
     source_patterns_.push_back(d + "/**.cc");
+    source_patterns_.push_back(d + "/**.cxx");
     source_patterns_.push_back(d + "/**.c");
+    source_patterns_.push_back(d + "/**.cppm");
     return *this;
 }
 
@@ -408,21 +486,60 @@ Result<void> Project::build() {
                 Error::Kind::Config,
                 "target '" + t->name() + "' has no sources; add some with .sources(...) or .sources_in(...)",
             });
-        for (const auto& f : *sources) {
-            if (f.ends_with(".cppm") || f.ends_with(".ixx"))
-                return std::unexpected(Error {
-                    Error::Kind::Config,
-                    "module interface units (.cppm) are not supported yet — planned for PLAN.MD phase 4",
-                    std::filesystem::path(f),
-                });
-            if (f.ends_with(".cpp") || f.ends_with(".cc") || f.ends_with(".cxx")) r.cxx_sources.push_back(f);
-            else if (f.ends_with(".c")) r.c_sources.push_back(f);
-            else
-                return std::unexpected(Error {Error::Kind::Config, "unsupported source file '" + f + "'", std::filesystem::path(f)});
-        }
+
+        const ModulesMode mm =
+            t->modules_mode() == ModulesMode::Default ? ModulesMode::Auto : t->modules_mode();
+        if (mm == ModulesMode::Manual)
+            return std::unexpected(Error {
+                Error::Kind::Config,
+                "modules_mode(Manual) is not implemented yet — use Auto (conservative BMI wiring)",
+            });
 
         const std::string tdir = detail::triple_dir(r.triple);
         r.objdir = (bld / "obj" / tdir / t->name()).generic_string();
+
+        for (const auto& f : *sources) {
+            const bool is_bmi = f.ends_with(".cppm") || f.ends_with(".ixx");
+            if (is_bmi && mm == ModulesMode::Off)
+                return std::unexpected(Error {
+                    Error::Kind::Config,
+                    "'" + f + "' is a module interface unit, but target '" + t->name() +
+                        "' has modules_mode(Off)",
+                    std::filesystem::path(f),
+                });
+            if (is_bmi) {
+                auto info = detail::scan_module_unit(f);
+                if (!info)
+                    return std::unexpected(info.error());
+                if (info->module_name.empty())
+                    return std::unexpected(Error {
+                        Error::Kind::Config,
+                        "no 'export module <name>;' declaration found in '" + f + "'",
+                        std::filesystem::path(f),
+                    });
+                info->is_bmi_source = true;
+                std::string flat = info->module_name;
+                std::replace(flat.begin(), flat.end(), ':', '_');
+                BmiUnit b;
+                b.source = f;
+                b.module_name = info->module_name;
+                b.bmi_path = r.objdir + "/bmi/" + flat + ".pcm";
+                b.object = r.objdir + "/" + f + ".o";
+                r.units.push_back(std::move(*info));
+                r.bmis.push_back(std::move(b));
+            } else if (f.ends_with(".cpp") || f.ends_with(".cc") || f.ends_with(".cxx")) {
+                auto info = detail::scan_module_unit(f);
+                if (!info)
+                    return std::unexpected(info.error());
+                r.cxx_sources.push_back(f);
+                r.units.push_back(std::move(*info));
+            } else if (f.ends_with(".c")) {
+                r.c_sources.push_back(f);
+            } else {
+                return std::unexpected(Error {Error::Kind::Config, "unsupported source file '" + f + "'", std::filesystem::path(f)});
+            }
+        }
+
         r.output = output_path_for(*t, bld, tdir);
         r.outdir = std::filesystem::path(r.output).parent_path().generic_string();
         resolved.push_back(std::move(r));

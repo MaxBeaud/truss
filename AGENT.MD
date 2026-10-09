@@ -137,5 +137,23 @@ Read `PLAN.MD` first. This file is the rulebook for any agent/human modifying th
   without ASan).
 - Paths containing spaces, `:` or `$` are rejected with a Config error (partial ninja
   escaping); full support is a later hardening item.
-- `.cppm`/`.ixx` sources in user projects are rejected with an actionable error pointing to
-  phase 4.
+- `.cppm`/`.ixx` sources are supported since phase 4 (see §11); with `modules_mode(Off)`
+  they are rejected with an actionable Config error.
+
+## 11. Verified toolchain facts (learned during phase 4 — C++ modules for user projects)
+
+- clang 23 BMI flags: producer `clang++ ... -fmodule-output=<pcm> -c x.cppm -o x.o` (object
+  AND pcm from one invocation); consumer `-fmodule-file=<name>=<pcm>` — `<name>` may be a
+  partition (`math:part`).
+- samurai: any file a command produces beyond `$out` (e.g. the `$bmi` pcm) MUST be declared
+  as an **implicit output** (`build obj | pcm: rule ...`), else consumers fail with
+  "file is missing and not created by any action".
+- Consumers of a primary interface need BMIs for **all its partitions** too (the primary BMI
+  references them via `export import :part`); truss expands primary imports to partitions.
+- An implementation unit (`module m;` in a .cpp) implicitly imports its primary interface —
+  it always needs `-fmodule-file=m=...` even with no explicit import.
+- v0.1 module scanner (`detail::scan_module_unit`) is a line-anchored regex (no
+  preprocessor): `import`/`module` inside block comments or string literals can confuse it;
+  clang-scan-deps integration replaces this in a later phase.
+- C++ pitfall (caused an infinite loop): `for (...; std::getline(std::istringstream(s), p, ',');)`
+  constructs a fresh stream every iteration and never advances. Build the stream once outside.
