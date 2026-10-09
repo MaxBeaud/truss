@@ -53,7 +53,7 @@ ninja manifest that samurai then executes incrementally.
   - [Sources & globbing](#sources--globbing)
   - [Usage requirements & propagation](#usage-requirements--propagation)
   - [Compiler options](#compiler-options)
-  - [Pipe composition](#pipe-composition)
+  - [Custom tasks](#custom-tasks)
   - [Custom tasks](#custom-tasks)
 - [C++ modules](#c-modules)
 - [Dependencies](#dependencies)
@@ -213,21 +213,6 @@ This is what makes package managers ergonomic: `conan()`/`vcpkg()` return an
 `Default` enum values always resolve per mode (e.g. `DebugInfo::Default` →
 `Full` in debug, `None` in release), so a single build script does the right
 thing in both modes.
-
-### Pipe composition
-
-If you prefer mate.h-style pipes over chaining, every option has a `with_*`
-adapter and `operator|` applies it:
-
-```cpp
-auto& app = proj.add_executable("app")
-    | truss::with_sources_in("src/app")
-    | truss::with_depends_on(core)
-    | truss::with_warnings(truss::Warnings::All)
-    | truss::with_is_test();
-```
-
-Both styles mix freely; adapters keep the concrete target type.
 
 ### Custom tasks
 

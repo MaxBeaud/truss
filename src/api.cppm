@@ -301,60 +301,6 @@ public:
 };
 
 /* ---------------------------------------------------------------------------
- * Pipe composition: `target | with_sources({...}) | with_depends_on(core)`.
- * Adapters are callables; operator| applies them and keeps the concrete type.
- * ------------------------------------------------------------------------- */
-inline auto with_sources(std::vector<std::string> patterns) {
-    return [p = std::move(patterns)](Target& t) { t.sources(p); };
-}
-inline auto with_sources_in(std::string dir) {
-    return [d = std::move(dir)](Target& t) { t.sources_in(d); };
-}
-inline auto with_include_dirs(std::vector<std::string> dirs) {
-    return [d = std::move(dirs)](Target& t) { t.include_dirs(d); };
-}
-inline auto with_defines(std::vector<std::string> defs) {
-    return [d = std::move(defs)](Target& t) { t.defines(d); };
-}
-inline auto with_link_libs(std::vector<std::string> libs) {
-    return [l = std::move(libs)](Target& t) { t.link_libs(l); };
-}
-inline auto with_linker_flags(std::string f) {
-    return [f = std::move(f)](Target& t) { t.linker_flags(f); };
-}
-inline auto with_depends_on(const Target& dep) {
-    return [&dep](Target& t) { t.depends_on(dep); };
-}
-inline auto with_cpp_standard(CppStandard s) {
-    return [s](Target& t) { t.cpp_standard(s); };
-}
-inline auto with_warnings(Warnings w) {
-    return [w](Target& t) { t.warnings(w); };
-}
-inline auto with_optimization(Optimization o) {
-    return [o](Target& t) { t.optimization(o); };
-}
-inline auto with_debug_info(DebugInfo d) {
-    return [d](Target& t) { t.debug_info(d); };
-}
-inline auto with_sanitizer(Sanitizer s) {
-    return [s](Target& t) { t.sanitizer(s); };
-}
-inline auto with_pic(bool v) {
-    return [v](Target& t) { t.pic(v); };
-}
-inline auto with_is_test(bool v = true) {
-    return [v](Target& t) { t.is_test(v); };
-}
-
-template <class T, class F>
-    requires std::derived_from<T, Target> && std::invocable<F&, T&>
-T& operator|(T& target, F&& fn) {
-    std::forward<F>(fn)(target);
-    return target;
-}
-
-/* ---------------------------------------------------------------------------
  * Tasks: `./truss <name>` dispatch. Built-ins: test, run, clean, compdb.
  * ------------------------------------------------------------------------- */
 struct TaskContext {

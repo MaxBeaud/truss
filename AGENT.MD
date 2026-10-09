@@ -30,8 +30,8 @@ Read `PLAN.MD` first. This file is the rulebook for any agent/human modifying th
 - **No custom string/arena types** — std/STL covers it. Helper *functions* over std types
   are encouraged (e.g. `join_path`, `glob`, `starts_with` polyfills only if missing).
 - **API style**: classes + builder pattern. Every builder method returns `Self&` for
-  chaining AND a matching free-function pipe adapter (`with_*` + `operator|`) exists.
-  Both styles must stay in lockstep — adding an option means adding both forms.
+  chaining. (Pipe adapters (`with_*` + `operator|`) were removed in phase 11 — one
+  obvious way to configure a target.)
 - **Parallelism only where it pays**: glob scanning, `clang-scan-deps`, package fetches use
   the internal `parallel_for` (jthread pool). Do NOT parallelize what samurai already
   parallelizes (compilation). Do NOT use `std::execution` (not stable in libc++ yet).
