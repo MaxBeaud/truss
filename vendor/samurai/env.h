@@ -1,3 +1,5 @@
+#pragma once
+#include <stdbool.h>
 struct evalstring;
 struct string;
 
@@ -40,7 +42,7 @@ struct pool *mkpool(char *);
 struct pool *poolget(char *);
 
 /* evaluate and return an edge's variable, optionally shell-escaped */
-struct string *edgevar(struct edge *, char *, _Bool);
+struct string *edgevar(struct edge *, char *, bool);
 
 extern struct environment *rootenv;
 extern struct rule phonyrule;

@@ -199,7 +199,7 @@ addstringpart(struct evalstring ***end, bool var)
 {
 	struct evalstring *p;
 
-	p = xmalloc(sizeof(*p));
+	p = (struct evalstring *)xmalloc(sizeof(*p));
 	p->next = NULL;
 	**end = p;
 	if (var) {
@@ -298,7 +298,7 @@ scanpaths(struct scanner *s)
 	while ((str = scanstring(s, true))) {
 		if (npaths == max) {
 			max = max ? max * 2 : 32;
-			paths = xreallocarray(paths, max, sizeof(paths[0]));
+			paths = (struct evalstring **)xreallocarray(paths, max, sizeof(paths[0]));
 		}
 		paths[npaths++] = str;
 	}

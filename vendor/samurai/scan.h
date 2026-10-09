@@ -1,3 +1,5 @@
+#pragma once
+#include <stdbool.h>
 enum token {
 	BUILD,
 	DEFAULT,
@@ -23,9 +25,9 @@ void scanclose(struct scanner *);
 void scanerror(struct scanner *, const char *, ...);
 int scankeyword(struct scanner *, char **);
 char *scanname(struct scanner *);
-struct evalstring *scanstring(struct scanner *, _Bool);
+struct evalstring *scanstring(struct scanner *, bool);
 void scanpaths(struct scanner *);
 void scanchar(struct scanner *, int);
 int scanpipe(struct scanner *, int);
-_Bool scanindent(struct scanner *);
+bool scanindent(struct scanner *);
 void scannewline(struct scanner *);

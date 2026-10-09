@@ -1,3 +1,5 @@
+#pragma once
+#include <stdbool.h>
 #include <sys/types.h>
 
 struct string;
@@ -6,7 +8,7 @@ void osgetcwd(char *, size_t);
 /* changes the working directory to the given path */
 void oschdir(const char *);
 /* creates all the parent directories of the given path */
-int osmkdirs(struct string *, _Bool);
+int osmkdirs(struct string *, bool);
 /* queries the mtime of a file in nanoseconds since the UNIX epoch */
 int64_t osmtime(const char *);
 /* queries the number of online processors */

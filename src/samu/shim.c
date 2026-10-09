@@ -18,6 +18,7 @@
 #include "parse.h"
 #include "tool.h"
 #include "util.h"
+#include "truss_samu.h"
 
 /* samurai's warn()/fatal() print this; samu.c defines it, but we exclude samu.c */
 const char *argv0 = "truss-samu";
@@ -25,21 +26,17 @@ const char *argv0 = "truss-samu";
 /* samurai intentionally never frees its graph/log/deps state (it is sized for
  * the process lifetime). When truss is built with ASan, silence LSan. This
  * hook is inert when ASan is not linked in. */
+#ifdef __cplusplus
+extern "C"
+#endif
 const char *__lsan_default_options(void)
 {
 	return "detect_leaks=0";
 }
 
-/* Keep in sync with struct truss_samu_options in src/core/samu.cpp. */
-struct truss_samu_options {
-	const char *manifest;
-	const char *statusfmt; /* NULL => "[%s/%t] " */
-	long maxjobs;          /* <= 0 => auto (nproc + 2) */
-	long maxfail;          /* 0 => 1, < 0 => unlimited */
-	int verbose, dryrun, explain;
-	int ntargets;
-	const char *const *targets; /* explicit nodes; empty => default nodes */
-};
+/* struct truss_samu_options + entry points come from the shared shim header;
+ * the extern "C" linkage there also applies to shim.c's definitions when the
+ * amalgam compiles it as C++. */
 
 static char *
 getbuilddir(void)

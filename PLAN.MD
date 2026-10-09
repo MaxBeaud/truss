@@ -2,7 +2,7 @@
 
 > Build your C++ using C++. mate.h API style + xmake-class features + samurai backend.
 
-**Status (2026-10-09):** Phases 0–8 complete. `xmake f -m debug && xmake` builds
+**Status (2026-10-09):** Phases 0–9 complete. `xmake f -m debug && xmake` builds
 `truss-mod` (BMI) + `libtruss.a` + `./truss`; `./bootstrap.sh` builds the same
 `libtruss.a` + BMI with plain clang++ (no xmake); truss builds itself (`./truss debug`
 self-host, incremental verified); Catch2 unit tests green (42 cases: glob, fs,
@@ -13,8 +13,9 @@ header-only + sha256 tarball compiled lib, cached offline), `examples/conan` (co
 graph → Interface target, zlib) and `examples/vcpkg` (manifest mode, generated
 `vcpkg.json`, zlib) build/run/test/rebuild incrementally through the vendored samurai;
 `examples/installed` (no vendored truss) builds against bootstrap-staged artifacts
-(`just installed`); shared libs + rpath + user tasks + `--target` verified; failing test
-fixtures exit 1. See AGENT.MD §10–15 for verified toolchain facts.
+(`just installed`); `examples/amalgam` builds from the amalgamated single header
+`dist/truss_all.hpp` (`just amalgam`); shared libs + rpath + user tasks + `--target`
+verified; failing test fixtures exit 1. See AGENT.MD §10–16 for verified toolchain facts.
 
 ## 0. Decisions (confirmed with user)
 
@@ -323,10 +324,16 @@ without xmake installed. ✅
 **Done when:** `examples/installed` (no vendored truss source) builds against an installed
 truss. ✅
 
-### Phase 9 — Amalgamation (1 day)
+### Phase 9 — Amalgamation (1 day) ✅
 1. `tools/amalgamate` → `dist/truss_all.hpp`: mate.h-style single-header drop-in
-   (`#include "truss_all.hpp"` instead of `import truss;`).
-2. CI compiles the amalgamated header against an example to keep it honest.
+   (`#include "truss_all.hpp"` instead of `import truss;`). ✅ (C++ tool; inlines
+   samurai + shim + truss units, strips module directives, dedupes local includes,
+   hoists system includes, wraps the vendored section in diagnostic pragmas)
+2. CI compiles the amalgamated header against an example to keep it honest. ✅
+   (`just amalgam`: compiles `examples/amalgam/truss.cpp` with `-Wall -Wextra`
+   warning-free and runs its tests; part of `just test`)
+
+**Done when:** `examples/amalgam` (only `#include "truss_all.hpp"`) builds/runs/tests. ✅
 
 ### Phase 10 — Polish (ongoing)
 1. MSVC flag mapping + `/showIncludes` deps (design already reserved in `Target`).

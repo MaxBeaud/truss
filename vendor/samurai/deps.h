@@ -1,3 +1,4 @@
+#pragma once
 struct edge;
 
 void depsinit(const char *);

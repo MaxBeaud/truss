@@ -22,6 +22,13 @@ installed:
         -o {{ROOT}}/examples/installed/truss
     cd {{ROOT}}/examples/installed && ./truss test
 
+# Amalgamation: generate dist/truss_all.hpp and compile the fixture with it.
+amalgam:
+    clang++ -std=c++26 {{ROOT}}/tools/amalgamate.cpp -o {{ROOT}}/build-bootstrap/amalgamate
+    {{ROOT}}/build-bootstrap/amalgamate
+    clang++ -std=c++26 -Wall -Wextra -I{{ROOT}}/dist {{ROOT}}/examples/amalgam/truss.cpp -o {{ROOT}}/examples/amalgam/truss
+    cd {{ROOT}}/examples/amalgam && ./truss test
+
 # Build the example's build script, then run it end-to-end.
 hello: build
     xmake -y hello-truss
@@ -39,9 +46,10 @@ test: build
     cd {{ROOT}}/examples/conan && ./truss test
     cd {{ROOT}}/examples/vcpkg && VCPKG_ROOT={{home_directory()}}/vcpkg ./truss test
     just installed
+    just amalgam
 
 clean:
-    rm -rf {{ROOT}}/build/ {{ROOT}}/.xmake/
+    rm -rf {{ROOT}}/build/ {{ROOT}}/.xmake/ {{ROOT}}/build-bootstrap/ {{ROOT}}/dist/
     cd {{ROOT}}/examples/hello && rm -rf build/ truss
     cd {{ROOT}}/examples/shared && rm -rf build/ truss
     cd {{ROOT}}/examples/modules && rm -rf build/ truss
@@ -49,6 +57,7 @@ clean:
     cd {{ROOT}}/examples/conan && rm -rf build/ truss conan.lock
     cd {{ROOT}}/examples/vcpkg && rm -rf build/ truss vcpkg.json
     cd {{ROOT}}/examples/installed && rm -rf build/ truss
+    cd {{ROOT}}/examples/amalgam && rm -rf build/ truss
 
 add-packages:
     #!/usr/bin/env bash

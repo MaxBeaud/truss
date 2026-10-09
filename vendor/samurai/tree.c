@@ -117,12 +117,12 @@ treeinsert(struct treenode **rootp, char *key, void *value)
 		a[i++] = &n->child[c > 0];
 		n = n->child[c > 0];
 	}
-	r = xmalloc(sizeof(*r));
+	r = (struct treenode *)xmalloc(sizeof(*r));
 	r->key = key;
 	r->value = value;
 	r->child[0] = r->child[1] = NULL;
 	r->height = 1;
-	/* insert new node, rebalance ancestors.  */
+	/* insert new_ node, rebalance ancestors.  */
 	*a[--i] = r;
 	while (i && balance(a[--i]))
 		;

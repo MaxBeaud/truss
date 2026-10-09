@@ -62,7 +62,7 @@ loginit(const char *builddir)
 	for (;;) {
 		if (buf.cap - buf.len < BUFSIZ) {
 			buf.cap = buf.cap ? buf.cap * 2 : BUFSIZ;
-			buf.data = xreallocarray(buf.data, buf.cap, 1);
+			buf.data = (char *)xreallocarray(buf.data, buf.cap, 1);
 		}
 		buf.data[buf.cap - 2] = '\0';
 		if (!fgets(buf.data + buf.len, buf.cap - buf.len, logfile))

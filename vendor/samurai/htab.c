@@ -28,11 +28,11 @@ mkhtab(size_t cap)
 	size_t i;
 
 	assert(!(cap & (cap - 1)));
-	h = xmalloc(sizeof(*h));
+	h = (struct hashtable *)xmalloc(sizeof(*h));
 	h->len = 0;
 	h->cap = cap;
-	h->keys = xreallocarray(NULL, cap, sizeof(h->keys[0]));
-	h->vals = xreallocarray(NULL, cap, sizeof(h->vals[0]));
+	h->keys = (struct hashtablekey *)xreallocarray(NULL, cap, sizeof(h->keys[0]));
+	h->vals = (void **)xreallocarray(NULL, cap, sizeof(h->vals[0]));
 	for (i = 0; i < cap; ++i)
 		h->keys[i].str = NULL;
 
@@ -88,8 +88,8 @@ htabput(struct hashtable *h, struct hashtablekey *k)
 		oldvals = h->vals;
 		oldcap = h->cap;
 		h->cap *= 2;
-		h->keys = xreallocarray(NULL, h->cap, sizeof(h->keys[0]));
-		h->vals = xreallocarray(NULL, h->cap, sizeof(h->vals[0]));
+		h->keys = (struct hashtablekey *)xreallocarray(NULL, h->cap, sizeof(h->keys[0]));
+		h->vals = (void **)xreallocarray(NULL, h->cap, sizeof(h->vals[0]));
 		for (i = 0; i < h->cap; ++i)
 			h->keys[i].str = NULL;
 		for (i = 0; i < oldcap; ++i) {
@@ -124,7 +124,7 @@ htabget(struct hashtable *h, struct hashtablekey *k)
 static inline uint_least32_t
 getle32(const void *p)
 {
-	const unsigned char *b = p;
+	const unsigned char *b = (const unsigned char *)p;
 	uint_least32_t v;
 
 	v = b[0] & 0xfful;
@@ -137,7 +137,7 @@ getle32(const void *p)
 static inline uint_least64_t
 getle64(const void *p)
 {
-	const unsigned char *b = p;
+	const unsigned char *b = (const unsigned char *)p;
 	uint_least64_t v;
 
 	v = b[0] & 0xffull;
@@ -207,7 +207,7 @@ rapidhashv1(const void *ptr, size_t len)
 	const unsigned char *pos, *end;
 	int i;
 
-	pos = ptr;
+	pos = (const unsigned char *)ptr;
 	end = pos + len;
 	seed[0] = 0xbdd89aa982704029ull;
 	seed[0] ^= mix(seed[0] ^ secret[0], secret[1]) ^ len;

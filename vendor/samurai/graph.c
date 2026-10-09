@@ -14,7 +14,7 @@ struct edge *alledges;
 static void
 delnode(void *p)
 {
-	struct node *n = p;
+	struct node *n = (struct node *)p;
 
 	if (n->shellpath != n->path)
 		free(n->shellpath);
@@ -51,9 +51,9 @@ mknode(struct string *path)
 	v = htabput(allnodes, &k);
 	if (*v) {
 		free(path);
-		return *v;
+		return (struct node *)*v;
 	}
-	n = xmalloc(sizeof(*n));
+	n = (struct node *)xmalloc(sizeof(*n));
 	n->path = path;
 	n->shellpath = NULL;
 	n->gen = NULL;
@@ -76,7 +76,7 @@ nodeget(const char *path, size_t len)
 	if (!len)
 		len = strlen(path);
 	htabkey(&k, path, len);
-	return htabget(allnodes, &k);
+	return (struct node *)htabget(allnodes, &k);
 }
 
 void
@@ -127,7 +127,7 @@ nodeuse(struct node *n, struct edge *e)
 {
 	/* allocate in powers of two */
 	if (!(n->nuse & (n->nuse - 1)))
-		n->use = xreallocarray(n->use, n->nuse ? n->nuse * 2 : 1, sizeof(e));
+		n->use = (struct edge **)xreallocarray(n->use, n->nuse ? n->nuse * 2 : 1, sizeof(e));
 	n->use[n->nuse++] = e;
 }
 
@@ -136,7 +136,7 @@ mkedge(struct environment *parent)
 {
 	struct edge *e;
 
-	e = xmalloc(sizeof(*e));
+	e = (struct edge *)xmalloc(sizeof(*e));
 	e->env = mkenv(parent);
 	e->pool = NULL;
 	e->out = NULL;
@@ -187,7 +187,7 @@ mkphony(struct node *n)
 	e->inorderidx = 0;
 	e->outimpidx = 1;
 	e->nout = 1;
-	e->out = xmalloc(sizeof(n));
+	e->out = (struct node **)xmalloc(sizeof(n));
 	e->out[0] = n;
 
 	return e;
@@ -205,7 +205,7 @@ edgeadddeps(struct edge *e, struct node **deps, size_t ndeps)
 			n->gen = mkphony(n);
 		nodeuse(n, e);
 	}
-	e->in = xreallocarray(e->in, e->nin + ndeps, sizeof(e->in[0]));
+	e->in = (struct node **)xreallocarray(e->in, e->nin + ndeps, sizeof(e->in[0]));
 	order = e->in + e->inorderidx;
 	norder = e->nin - e->inorderidx;
 	memmove(order + ndeps, order, norder * sizeof(e->in[0]));

@@ -1,4 +1,6 @@
+#ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
+#endif
 #include <errno.h>
 #include <fcntl.h>
 #include <inttypes.h>
@@ -436,7 +438,7 @@ static void
 jobdone(struct job *j)
 {
 	int status;
-	struct edge *e, *new;
+	struct edge *e, *new_;
 	struct pool *p;
 
 	++nfinished;
@@ -468,10 +470,10 @@ jobdone(struct job *j)
 			consoleused = false;
 		/* move edge from pool queue to main work queue */
 		if (p->work) {
-			new = p->work;
+			new_ = p->work;
 			p->work = p->work->worknext;
-			new->worknext = work;
-			work = new;
+			new_->worknext = work;
+			work = new_;
 		} else {
 			--p->numjobs;
 		}
@@ -490,7 +492,7 @@ jobwork(struct job *j)
 
 	if (j->buf.cap - j->buf.len < BUFSIZ / 2) {
 		newcap = j->buf.cap + BUFSIZ;
-		newdata = realloc(j->buf.data, newcap);
+		newdata = (char *)realloc(j->buf.data, newcap);
 		if (!newdata) {
 			warn("realloc:");
 			goto kill;
@@ -600,8 +602,8 @@ build(void)
 				jobslen = jobslen ? jobslen * 2 : 8;
 				if (jobslen > buildopts.maxjobs)
 					jobslen = buildopts.maxjobs;
-				jobs = xreallocarray(jobs, jobslen, sizeof(jobs[0]));
-				fds = xreallocarray(fds, jobslen + 1, sizeof(fds[0]));
+				jobs = (struct job *)xreallocarray(jobs, jobslen, sizeof(jobs[0]));
+				fds = (struct pollfd *)xreallocarray(fds, jobslen + 1, sizeof(fds[0]));
 				for (i = next; i < jobslen; ++i) {
 					jobs[i].buf.data = NULL;
 					jobs[i].buf.len = 0;

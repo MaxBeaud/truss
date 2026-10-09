@@ -1,3 +1,4 @@
+#pragma once
 /* binary tree node, such that keys are sorted lexicographically for fast lookup */
 struct treenode {
 	char *key;

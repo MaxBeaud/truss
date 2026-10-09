@@ -79,7 +79,7 @@ xmemdup(const char *s, size_t n)
 {
 	char *p;
 
-	p = xmalloc(n);
+	p = (char *)xmalloc(n);
 	memcpy(p, s, n);
 
 	return p;
@@ -98,7 +98,7 @@ xasprintf(char **s, const char *fmt, ...)
 	if (ret < 0)
 		fatal("vsnprintf:");
 	n = ret + 1;
-	*s = xmalloc(n);
+	*s = (char *)xmalloc(n);
 	va_start(ap, fmt);
 	ret = vsnprintf(*s, n, fmt, ap);
 	va_end(ap);
@@ -113,7 +113,7 @@ bufadd(struct buffer *buf, char c)
 {
 	if (buf->len >= buf->cap) {
 		buf->cap = buf->cap ? buf->cap * 2 : 1 << 8;
-		buf->data = realloc(buf->data, buf->cap);
+		buf->data = (char *)realloc(buf->data, buf->cap);
 		if (!buf->data)
 			fatal("realloc:");
 	}
@@ -125,7 +125,7 @@ mkstr(size_t n)
 {
 	struct string *str;
 
-	str = xmalloc(sizeof(*str) + n + 1);
+	str = (struct string *)xmalloc(sizeof(*str) + n + 1);
 	str->n = n;
 
 	return str;
@@ -134,7 +134,7 @@ mkstr(size_t n)
 void
 delevalstr(void *ptr)
 {
-	struct evalstring *str = ptr, *p;
+	struct evalstring *str = (struct evalstring *)ptr, *p;
 
 	while (str) {
 		p = str;

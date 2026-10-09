@@ -6,22 +6,11 @@ module;
 #include <string_view>
 #include <vector>
 
+#include "../samu/truss_samu.h"
+
 module truss;
 import :api;
 import :impl;
-
-/* Mirrors struct truss_samu_options in src/samu/shim.c — keep in sync. */
-extern "C" struct truss_samu_options {
-    const char* manifest;
-    const char* statusfmt;
-    long maxjobs;
-    long maxfail;
-    int verbose, dryrun, explain;
-    int ntargets;
-    const char* const* targets;
-};
-extern "C" int truss_samu_build(const struct truss_samu_options*);
-extern "C" int truss_samu_compdb(const char* manifest, const char* outpath);
 
 namespace truss::detail {
 

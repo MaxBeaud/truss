@@ -1,3 +1,4 @@
+#pragma once
 struct buffer {
 	char *data;
 	size_t len, cap;

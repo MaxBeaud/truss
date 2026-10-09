@@ -49,7 +49,7 @@ addvar(struct treenode **tree, char *var, void *val)
 {
 	char *old;
 
-	old = treeinsert(tree, var, val);
+	old = (char *)treeinsert(tree, var, val);
 	if (old)
 		free(old);
 }
@@ -59,7 +59,7 @@ mkenv(struct environment *parent)
 {
 	struct environment *env;
 
-	env = xmalloc(sizeof(*env));
+	env = (struct environment *)xmalloc(sizeof(*env));
 	env->parent = parent;
 	env->bindings = NULL;
 	env->rules = NULL;
@@ -77,7 +77,7 @@ envvar(struct environment *env, char *var)
 	do {
 		n = treefind(env->bindings, var);
 		if (n)
-			return n->value;
+			return (struct string *)n->value;
 		env = env->parent;
 	} while (env);
 
@@ -145,7 +145,7 @@ envrule(struct environment *env, char *name)
 	do {
 		n = treefind(env->rules, name);
 		if (n)
-			return n->value;
+			return (struct rule *)n->value;
 		env = env->parent;
 	} while (env);
 
@@ -183,7 +183,7 @@ mkrule(char *name)
 {
 	struct rule *r;
 
-	r = xmalloc(sizeof(*r));
+	r = (struct rule *)xmalloc(sizeof(*r));
 	r->name = name;
 	r->bindings = NULL;
 
@@ -193,7 +193,7 @@ mkrule(char *name)
 static void
 delrule(void *ptr)
 {
-	struct rule *r = ptr;
+	struct rule *r = (struct rule *)ptr;
 
 	if (r == &phonyrule)
 		return;
@@ -224,13 +224,13 @@ edgevar(struct edge *e, char *var, bool escape)
 		return pathlist(e->out, e->outimpidx, ' ', escape);
 	n = treefind(e->env->bindings, var);
 	if (n)
-		return n->value;
+		return (struct string *)n->value;
 	n = treefind(e->rule->bindings, var);
 	if (!n)
 		return envvar(e->env->parent, var);
 	if (n->value == cycle)
 		fatal("cycle in rule variable involving '%s'", var);
-	str = n->value;
+	str = (struct evalstring *)n->value;
 	n->value = cycle;
 	len = 0;
 	for (p = str; p; p = p->next) {
@@ -255,7 +255,7 @@ mkpool(char *name)
 {
 	struct pool *p;
 
-	p = xmalloc(sizeof(*p));
+	p = (struct pool *)xmalloc(sizeof(*p));
 	p->name = name;
 	p->numjobs = 0;
 	p->maxjobs = 0;
@@ -268,7 +268,7 @@ mkpool(char *name)
 static void
 delpool(void *ptr)
 {
-	struct pool *p = ptr;
+	struct pool *p = (struct pool *)ptr;
 
 	if (p == &consolepool)
 		return;
@@ -285,5 +285,5 @@ poolget(char *name)
 	if (!n)
 		fatal("unknown pool '%s'", name);
 
-	return n->value;
+	return (struct pool *)n->value;
 }

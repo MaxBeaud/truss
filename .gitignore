@@ -11,6 +11,9 @@
 /examples/**/truss
 /examples/**/build/
 
+# generated amalgamation (regenerate: just amalgam)
+/dist/
+
 # package lockfile churn (phase 5)
 truss.lock
 

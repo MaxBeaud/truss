@@ -1,8 +1,10 @@
+#pragma once
+#include <stdbool.h>
 struct environment;
 struct node;
 
 struct parseoptions {
-	_Bool dupbuildwarn;
+	bool dupbuildwarn;
 };
 
 void parseinit(void);

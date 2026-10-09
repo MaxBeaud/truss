@@ -1,3 +1,5 @@
+#pragma once
+#include <stdbool.h>
 #include <stdint.h>  /* for uint64_t */
 
 /* set in the tv_nsec field of a node's mtime */
@@ -26,7 +28,7 @@ struct node {
 	int32_t id;
 
 	/* does the node need to be rebuilt */
-	_Bool dirty;
+	bool dirty;
 };
 
 /* build rule, i.e., edge between inputs and outputs */
@@ -52,20 +54,24 @@ struct edge {
 	/* how many inputs need to be pruned before all outputs can be pruned */
 	size_t nprune;
 
-	enum {
-		FLAG_WORK      = 1 << 0,  /* scheduled for build */
-		FLAG_HASH      = 1 << 1,  /* calculated the command hash */
-		FLAG_DIRTY_IN  = 1 << 3,  /* dirty input */
-		FLAG_DIRTY_OUT = 1 << 4,  /* missing or outdated output */
-		FLAG_DIRTY     = FLAG_DIRTY_IN | FLAG_DIRTY_OUT,
-		FLAG_CYCLE     = 1 << 5,  /* used for cycle detection */
-		FLAG_DEPS      = 1 << 6,  /* dependencies loaded */
-	} flags;
+	unsigned flags; /* truss patch: was an inline anonymous enum member */
 
 	/* used to coordinate ready work in build() */
 	struct edge *worknext;
 	/* used for alledges linked list */
 	struct edge *allnext;
+};
+
+/* truss patch: flags enum moved out of struct edge (C++ needs unqualified
+ * enumerators at file scope) and the member widened to unsigned (int ops) */
+enum {
+	FLAG_WORK      = 1 << 0,  /* scheduled for build */
+	FLAG_HASH      = 1 << 1,  /* calculated the command hash */
+	FLAG_DIRTY_IN  = 1 << 3,  /* dirty input */
+	FLAG_DIRTY_OUT = 1 << 4,  /* missing or outdated output */
+	FLAG_DIRTY     = FLAG_DIRTY_IN | FLAG_DIRTY_OUT,
+	FLAG_CYCLE     = 1 << 5,  /* used for cycle detection */
+	FLAG_DEPS      = 1 << 6,  /* dependencies loaded */
 };
 
 void graphinit(void);
@@ -77,7 +83,7 @@ struct node *nodeget(const char *, size_t);
 /* update the mtime field of a node */
 void nodestat(struct node *);
 /* get a node's path, possibly escaped for the shell */
-struct string *nodepath(struct node *, _Bool);
+struct string *nodepath(struct node *, bool);
 /* record the usage of a node by an edge */
 void nodeuse(struct node *, struct edge *);
 

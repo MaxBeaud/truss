@@ -259,3 +259,25 @@ Read `PLAN.MD` first. This file is the rulebook for any agent/human modifying th
   `<prefix>/lib/truss/{libtruss.a,truss.pcm,truss_api.pcm}`; a project compiles its
   script with both `-fmodule-file` flags (§14) — fixture `examples/installed`, recipe
   `just installed`.
+
+## 16. Verified toolchain facts (learned during phase 9 — amalgamation)
+
+- `tools/amalgamate.cpp` generates `dist/truss_all.hpp` (~188 KB): samurai .c +
+  shim + api/impl/core units concatenated; module directives/partition imports
+  stripped; `export namespace` -> `namespace`; local `#include "x.h"` inlined once
+  (samurai headers have no guards — the tool dedupes); system includes hoisted.
+  `dist/` is gitignored (regenerate: `just amalgam`).
+- samurai compiles as C++ after vendored patches (see TRUSS-VENDOR.txt): pragma
+  once, `_Bool`->`bool`, flags enum out of `struct edge` + `unsigned flags`,
+  ~50 void* casts, `new`->`new_`, `#ifndef _POSIX_C_SOURCE`. All valid C too, so
+  the normal C17 build is unaffected (verified: full suite + self-host green).
+- The amalgam wraps the samurai section in diagnostic pragmas
+  (-Wwritable-strings, -Wmissing-designated-field-initializers,
+  -Wmissing-field-initializers, -Wc99-extensions) so consumers compile it
+  warning-free even under `-Wall -Wextra -Wpedantic`.
+- Single-TU gotchas handled: shim/samu.cpp duplicated `struct truss_samu_options`
+  -> shared header `src/samu/truss_samu.h` (extern "C"-aware; the extern "C"
+  declaration also gives shim.c's definitions C linkage when compiled as C++);
+  `__lsan_default_options` guarded with `extern "C"`; no static/anon-namespace
+  name collisions across samurai or core files (verified).
+- Amalgam TU compiles in ~1s (clang++ -O0 default).

@@ -1,3 +1,4 @@
+#pragma once
 struct node;
 
 void loginit(const char *);
