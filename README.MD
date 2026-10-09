@@ -4,6 +4,9 @@
 [mate.h](https://github.com/ander000/mate)-style API, xmake-class features, and a
 [samurai](https://github.com/michaelforney/samurai) (ninja) backend.
 
+This README is the user guide; the in-depth API reference is generated with
+`./setup.sh docs` (Doxygen → `build/docs/html/`).
+
 Write your build script in C++ with truss's module API, compile it once to
 `./truss`, and run your builds from there:
 
@@ -470,7 +473,8 @@ truss builds itself (`truss.cpp` at the repo root is its own build script).
 
 Other useful commands: `./setup.sh unit` (doctest, ASan/UBSan), `./setup.sh
 examples`, `./setup.sh installed`, `./setup.sh amalgam`, `./setup.sh install
-[prefix]`, `./setup.sh clean`. All generated output lives under `build/`.
+[prefix]`, `./setup.sh docs` (Doxygen API reference → `build/docs/html/`),
+`./setup.sh clean`. All generated output lives under `build/`.
 
 ## Status & support matrix
 

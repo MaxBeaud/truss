@@ -375,3 +375,10 @@ Read `PLAN.MD` first. This file is the rulebook for any agent/human modifying th
   unit even with `<initializer_list>` included. Compare `size() == 0`.
 - doctest: `CHECK(a || b)` → "Expression Too Complex" — parenthesize:
   `CHECK((a || b))`.
+- Doxygen 1.18 parses C++20 module files (`module;`, `export module truss:api;`,
+  `import :api;`) natively — no PREDEFINED hacks; INPUT = src/api.cppm only.
+  Gotchas: `/*` sequences inside `/** */` blocks open *nested* comments (glob
+  examples like `src/*.c` silently swallow the rest of the file — use `///` line
+  comments for those); angle brackets in doc comments need `\<mode\>` escapes;
+  markdown anchors (`#getting-truss`) don't resolve as `\ref` — keep README.MD
+  out of INPUT.
