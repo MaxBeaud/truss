@@ -86,6 +86,7 @@ struct TargetTriple {
     CompilerFamily family {CompilerFamily::Unknown};
     std::string compiler; /* compiler driver, e.g. "clang++" */
     std::string ar;       /* archiver, e.g. "llvm-ar" */
+    std::string linker;   /* link driver override ("" = compiler default), passed via -fuse-ld= */
 };
 
 /* Triple of the machine truss itself runs on. */
@@ -425,6 +426,7 @@ private:
     int jobs_ {0};
     bool verbose_ {false};
     bool dry_run_ {false};
+    bool explain_ {false};
     std::vector<std::string> requested_tasks_;
     std::vector<std::string> only_targets_;
     std::optional<std::filesystem::path> build_root_;

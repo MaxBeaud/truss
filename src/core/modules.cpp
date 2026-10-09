@@ -2,6 +2,7 @@ module;
 #include <algorithm>
 #include <expected>
 #include <filesystem>
+#include <functional>
 #include <map>
 #include <regex>
 #include <sstream>
@@ -27,7 +28,11 @@ Result<ModuleUnitInfo> scan_module_unit(const std::string& path) {
 
     ModuleUnitInfo info;
     info.path = path;
-    const std::string s = *text;
+    std::string s = std::move(*text);
+    /* cheap pre-filter: no module/import keyword anywhere means a plain TU
+     * (the regexes are line-anchored, so this only skips a superset) */
+    if (s.find("module") == std::string::npos && s.find("import") == std::string::npos)
+        return info;
     std::smatch m;
     if (std::regex_search(s, m, module_re))
         info.module_name = m[2];
@@ -47,7 +52,7 @@ Result<ModuleUnitInfo> scan_module_unit(const std::string& path) {
 }
 
 Result<std::pair<std::string, std::vector<std::string>>>
-resolve_module_imports(const ModuleUnitInfo& u, const std::map<std::string, std::string>& bmis) {
+resolve_module_imports(const ModuleUnitInfo& u, const std::map<std::string, std::string, std::less<>>& bmis) {
     std::string flags;
     std::vector<std::string> order;
     std::vector<std::string> added; /* dedupe module names already wired in */
@@ -64,7 +69,7 @@ resolve_module_imports(const ModuleUnitInfo& u, const std::map<std::string, std:
     };
 
     auto add_bmi = [&](std::string_view name) {
-        const auto it = bmis.find(std::string(name));
+        const auto it = bmis.find(name);
         if (it == bmis.end())
             return false;
         /* A primary interface's BMI references its partitions (export import),

@@ -69,6 +69,8 @@ TargetTriple host_triple() {
 
     if (t.family == CompilerFamily::Clang && detail::program_exists("llvm-ar"))
         t.ar = "llvm-ar";
+    else if (t.family == CompilerFamily::Msvc)
+        t.ar = "lib.exe"; /* MSVC archiver (llvm-lib understands the same syntax) */
     else
         t.ar = "ar";
 

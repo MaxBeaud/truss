@@ -19,7 +19,7 @@ void add(std::string& out, std::string_view flag) {
     out += flag;
 }
 
-/* Tables indexed by the public enums (Default = 0 means "no flag"). */
+/* GCC/Clang tables, indexed by the public enums (Default = 0 means "no flag"). */
 constexpr std::array<std::string_view, 7> kStdFlags {
     "", "-std=c++11", "-std=c++14", "-std=c++17", "-std=c++20", "-std=c++23", "-std=c++26",
 };
@@ -41,6 +41,37 @@ constexpr std::array<std::string_view, 5> kSanitizerLinkFlags {
 };
 constexpr std::array<std::string_view, 4> kLtoCompileFlags {"", "", "-flto=full", "-flto=thin"};
 constexpr std::array<std::string_view, 4> kLtoLinkFlags {"", "", "-flto=full", "-flto=thin"};
+
+/* MSVC tables (validated against the clang-cl driver, which truss requires for
+ * MSVC targets — see build.cpp; the flags are also accepted by cl.exe).
+ * Notes: no C++11 mode exists (maps to C++14); C++23/26 spell /std:c++latest;
+ * /Z7 embeds debug info in the .obj so parallel ninja never races on a PDB;
+ * /O3 has no MSVC equivalent (maps to /O2); ThinLTO has no equivalent (/GL). */
+constexpr std::array<std::string_view, 7> kStdFlagsMsvc {
+    "/std:c++latest", "/std:c++14", "/std:c++14", "/std:c++17", "/std:c++20", "/std:c++latest",
+    "/std:c++latest",
+};
+constexpr std::array<std::string_view, 5> kWarningFlagsMsvc {
+    "", "/W0", "/W3", "/W4", "/W4",
+};
+constexpr std::array<std::string_view, 5> kDebugFlagsMsvc {
+    "", "", "/Z7", "/Z7", "/Z7",
+};
+constexpr std::array<std::string_view, 6> kOptimizationFlagsMsvc {
+    "", "/Od", "/O1", "/O2", "/Os", "/O2",
+};
+constexpr std::array<std::string_view, 5> kSanitizerCompileFlagsMsvc {
+    "", "", "/fsanitize=address", "/fsanitize=undefined", "/fsanitize=address,undefined",
+};
+/* driver-side (before /link) and linker-side (after /link) halves */
+constexpr std::array<std::string_view, 5> kSanitizerLinkDriverFlagsMsvc {
+    "", "", "/fsanitize=address", "/fsanitize=undefined", "/fsanitize=address,undefined",
+};
+constexpr std::array<std::string_view, 5> kSanitizerLinkerFlagsMsvc {
+    "", "", "/INCREMENTAL:NO", "", "/INCREMENTAL:NO",
+};
+constexpr std::array<std::string_view, 4> kLtoCompileFlagsMsvc {"", "", "/GL", "/GL"};
+constexpr std::array<std::string_view, 4> kLtoLinkerFlagsMsvc {"", "", "/LTCG", "/LTCG"};
 
 constexpr std::string_view os_name(Os os) {
     switch (os) {
@@ -79,13 +110,8 @@ constexpr std::string_view family_name(CompilerFamily f) {
 }
 
 Result<void> require_supported(const TargetTriple& t) {
-    if (t.family == CompilerFamily::Msvc)
-        return std::unexpected(Error {
-            Error::Kind::Toolchain,
-            "MSVC targets are not supported yet (GCC and Clang are implemented; "
-            "MSVC mapping is planned — see PLAN.MD phase 7)",
-        });
-    if (t.family != CompilerFamily::Gcc && t.family != CompilerFamily::Clang)
+    if (t.family != CompilerFamily::Gcc && t.family != CompilerFamily::Clang &&
+        t.family != CompilerFamily::Msvc)
         return std::unexpected(Error {Error::Kind::Toolchain, "unknown compiler family for target '" + t.compiler + "'"});
     return {};
 }
@@ -94,6 +120,12 @@ Result<void> require_supported(const TargetTriple& t) {
 
 std::string triple_dir(const TargetTriple& t) {
     return std::string(arch_name(t.arch)) + "-" + std::string(os_name(t.os)) + "-" + std::string(family_name(t.family));
+}
+
+DebugInfo resolve_debug(BuildMode mode, DebugInfo debug) {
+    return debug == DebugInfo::Default
+               ? (mode == BuildMode::Debug ? DebugInfo::Full : DebugInfo::None)
+               : debug;
 }
 
 Result<FlagSet> build_flags(const TargetTriple& triple, BuildMode mode,
@@ -105,56 +137,78 @@ Result<FlagSet> build_flags(const TargetTriple& triple, BuildMode mode,
     if (auto r = require_supported(triple); !r)
         return std::unexpected(r.error());
 
+    const bool msvc = triple.family == CompilerFamily::Msvc;
     FlagSet fs;
     /* C++ and C variants share everything except the -std flag */
-    add(fs.compile, kStdFlags[static_cast<std::size_t>(std_opt == CppStandard::Default ? CppStandard::Cpp23 : std_opt)]);
-    add(fs.compile_c, "-std=gnu17");
+    const auto stdi = static_cast<std::size_t>(std_opt == CppStandard::Default ? CppStandard::Cpp23 : std_opt);
+    add(fs.compile, msvc ? kStdFlagsMsvc[stdi] : kStdFlags[stdi]);
+    add(fs.compile_c, msvc ? "/std:c17" : "-std=gnu17");
     auto add_both = [&](std::string_view f) {
         add(fs.compile, f);
         add(fs.compile_c, f);
     };
-    add_both(kWarningFlags[static_cast<std::size_t>(warnings)]);
-
-    const DebugInfo dbg = debug == DebugInfo::Default
-                              ? (mode == BuildMode::Debug ? DebugInfo::Full : DebugInfo::None)
-                              : debug;
-    add_both(kDebugFlags[static_cast<std::size_t>(dbg)]);
+    if (msvc) add_both("/utf-8 /EHsc /nologo");
+    add_both(msvc ? kWarningFlagsMsvc[static_cast<std::size_t>(warnings)]
+                  : kWarningFlags[static_cast<std::size_t>(warnings)]);
+    add_both(msvc ? kDebugFlagsMsvc[static_cast<std::size_t>(resolve_debug(mode, debug))]
+                  : kDebugFlags[static_cast<std::size_t>(resolve_debug(mode, debug))]);
 
     const Optimization opt = optimization == Optimization::Default
                                  ? (mode == BuildMode::Debug ? Optimization::None : Optimization::O2)
                                  : optimization;
-    add_both(kOptimizationFlags[static_cast<std::size_t>(opt)]);
+    add_both(msvc ? kOptimizationFlagsMsvc[static_cast<std::size_t>(opt)]
+                  : kOptimizationFlags[static_cast<std::size_t>(opt)]);
 
-    add_both(kSanitizerCompileFlags[static_cast<std::size_t>(sanitizer)]);
-    add_both(kLtoCompileFlags[static_cast<std::size_t>(lto)]);
-    if (pic) add_both("-fPIC");
-    if (mode == BuildMode::Release) add_both("-DNDEBUG");
+    add_both(msvc ? kSanitizerCompileFlagsMsvc[static_cast<std::size_t>(sanitizer)]
+                  : kSanitizerCompileFlags[static_cast<std::size_t>(sanitizer)]);
+    add_both(msvc ? kLtoCompileFlagsMsvc[static_cast<std::size_t>(lto)]
+                  : kLtoCompileFlags[static_cast<std::size_t>(lto)]);
+    if (pic && !msvc) add_both("-fPIC"); /* Windows has no position-independent code */
+    if (mode == BuildMode::Release) add_both(msvc ? "/DNDEBUG" : "-DNDEBUG");
 
-    for (const auto& d : defines) add_both("-D" + d);
-    for (const auto& i : includes) add_both("-I\"" + i + "\"");
+    for (const auto& d : defines) add_both((msvc ? "/D" : "-D") + d);
+    for (const auto& i : includes) add_both(msvc ? "/I" + i : "-I\"" + i + "\"");
 
     add_both(user_flags);
     return fs;
 }
 
-Result<std::string> link_flags(const TargetTriple& triple, Sanitizer sanitizer, Lto lto,
-                               std::span<const std::string> link_paths,
-                               std::span<const std::string> libs,
-                               std::span<const std::string> frameworks,
-                               std::span<const std::string> framework_paths,
-                               std::string_view user_linker_flags) {
+Result<LinkFlags> link_flags(const TargetTriple& triple, BuildMode mode, DebugInfo debug,
+                             Sanitizer sanitizer, Lto lto,
+                             std::span<const std::string> link_paths,
+                             std::span<const std::string> libs,
+                             std::span<const std::string> frameworks,
+                             std::span<const std::string> framework_paths,
+                             std::string_view user_linker_flags) {
     if (auto r = require_supported(triple); !r)
         return std::unexpected(r.error());
 
-    std::string out;
-    add(out, kSanitizerLinkFlags[static_cast<std::size_t>(sanitizer)]);
-    add(out, kLtoLinkFlags[static_cast<std::size_t>(lto)]);
-    for (const auto& p : link_paths) add(out, "-L\"" + p + "\"");
-    for (const auto& p : framework_paths) add(out, "-F\"" + p + "\"");
-    for (const auto& l : libs) add(out, "-l" + l);
-    for (const auto& f : frameworks) add(out, "-framework " + f);
-    add(out, user_linker_flags);
-    return out;
+    LinkFlags lf;
+    if (!triple.linker.empty())
+        add(lf.driver, "-fuse-ld=" + triple.linker);
+    if (triple.family == CompilerFamily::Msvc) {
+        /* driver-side flags go before `/link`, linker-side after it */
+        add(lf.driver, kSanitizerLinkDriverFlagsMsvc[static_cast<std::size_t>(sanitizer)]);
+        add(lf.linker, kSanitizerLinkerFlagsMsvc[static_cast<std::size_t>(sanitizer)]);
+        add(lf.linker, kLtoLinkerFlagsMsvc[static_cast<std::size_t>(lto)]);
+        if (resolve_debug(mode, debug) != DebugInfo::None)
+            add(lf.linker, "/DEBUG");
+        for (const auto& p : link_paths) add(lf.linker, "/LIBPATH:" + p);
+        for (const auto& l : libs) add(lf.linker, l + ".lib");
+        if (!frameworks.empty() || !framework_paths.empty())
+            return std::unexpected(Error {
+                Error::Kind::Config, "link_frameworks/framework_paths are Apple-only and cannot be used on MSVC targets",
+            });
+    } else {
+        add(lf.driver, kSanitizerLinkFlags[static_cast<std::size_t>(sanitizer)]);
+        add(lf.driver, kLtoLinkFlags[static_cast<std::size_t>(lto)]);
+        for (const auto& p : link_paths) add(lf.linker, "-L\"" + p + "\"");
+        for (const auto& p : framework_paths) add(lf.linker, "-F\"" + p + "\"");
+        for (const auto& l : libs) add(lf.linker, "-l" + l);
+        for (const auto& f : frameworks) add(lf.linker, "-framework " + f);
+    }
+    add(lf.linker, user_linker_flags);
+    return lf;
 }
 
 } // namespace truss::detail

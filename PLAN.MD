@@ -336,10 +336,16 @@ truss. ✅
 **Done when:** `examples/amalgam` (only `#include "truss_all.hpp"`) builds/runs/tests. ✅
 
 ### Phase 10 — Polish (ongoing)
-1. MSVC flag mapping + `/showIncludes` deps (design already reserved in `Target`).
-2. rsp files for long lines; `--explain` passthrough to samu debug flags.
-3. Docs: README with mate-style guide; `examples/` per feature.
-4. Benchmarks: clean + incremental build times vs xmake on a fixture.
+1. MSVC flag mapping + `/showIncludes` deps (design already reserved in `Target`). ✅
+   (full MSVC tables in `flags.cpp`; `deps = msvc` implemented as a documented
+   samurai feature patch — `/showIncludes` lines parsed from captured job stdout;
+   end-to-end tested with clang-cl + llvm-lib + lld-link, exe produced but not run)
+2. rsp files for long lines ✅ (MSVC archive/link rules use rule-level `rspfile`);
+   `--explain` passthrough to samu debug flags ✅ (`./truss debug --explain`).
+3. Docs: README with mate-style guide; `examples/` per feature. ✅ (README.MD is the
+   front-page user manual; `examples/` covers hello, shared, modules, fetch, conan,
+   vcpkg, installed, amalgam)
+4. Benchmarks: clean + incremental build times vs xmake on a fixture. ⏳ (open)
 
 ## 6. Risks & mitigations
 

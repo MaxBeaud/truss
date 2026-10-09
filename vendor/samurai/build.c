@@ -440,6 +440,7 @@ jobdone(struct job *j)
 	int status;
 	struct edge *e, *new_;
 	struct pool *p;
+	struct string *deptype;
 
 	++nfinished;
 	if (waitpid(j->pid, &status, 0) < 0) {
@@ -459,10 +460,15 @@ jobdone(struct job *j)
 		j->failed = true;
 	}
 	close(j->fd);
+	e = j->edge;
+	if (!j->failed) {
+		deptype = edgevar(e, "deps", true);
+		if (deptype && strcmp(deptype->s, "msvc") == 0)
+			depsrecord_msvc(e, &j->buf);
+	}
 	if (j->buf.len && (!consoleused || j->failed))
 		fwrite(j->buf.data, 1, j->buf.len, stdout);
 	j->buf.len = 0;
-	e = j->edge;
 	if (e->pool) {
 		p = e->pool;
 

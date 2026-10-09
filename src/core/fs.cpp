@@ -1,11 +1,13 @@
 module;
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <expected>
 #include <filesystem>
 #include <fstream>
 #include <map>
 #include <regex>
+#include <span>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -120,58 +122,87 @@ bool has_glob_magic(std::string_view pattern) {
 }
 
 Result<std::vector<std::filesystem::path>> glob(std::string_view pattern) {
+    const std::array<std::string, 1> single {std::string(pattern)};
+    return glob_multi(single);
+}
+
+Result<std::vector<std::filesystem::path>> glob_multi(std::span<const std::string> patterns) {
+    /* brace-expand every pattern, then compile one regex per alternative */
     std::vector<std::string> expanded;
-    expand_braces(pattern, expanded);
+    for (const auto& p : patterns)
+        expand_braces(p, expanded);
 
     std::vector<std::regex> regexes;
     regexes.reserve(expanded.size());
-    for (const auto& p : expanded)
+    std::vector<std::filesystem::path> roots;
+    for (const auto& p : expanded) {
         regexes.emplace_back(glob_to_regex(p));
+        /* scan from the magic-free prefix, not from the whole tree; a fully
+         * literal pattern scans its parent directory instead of itself */
+        std::filesystem::path base = literal_prefix(p);
+        if (base == p)
+            base = base.parent_path();
+        if (base.empty())
+            base = ".";
+        if (std::ranges::find(roots, base) == roots.end())
+            roots.push_back(base);
+    }
 
-    const std::filesystem::path base = literal_prefix(pattern).empty() ? std::filesystem::path(".") : literal_prefix(pattern);
     std::vector<std::filesystem::path> matches;
-
     std::error_code ec;
-    if (!std::filesystem::exists(base, ec))
-        return matches; // a missing base simply matches nothing
-
-    auto it = std::filesystem::recursive_directory_iterator(
-        base, std::filesystem::directory_options::skip_permission_denied, ec);
-    const std::filesystem::recursive_directory_iterator end {};
-    for (; it != end; it.increment(ec)) {
-        if (ec) break;
-        const std::filesystem::path rel = std::filesystem::relative(it->path(), ".", ec);
-        if (ec) continue;
-        if (is_hidden(rel)) {
-            if (it->is_directory(ec))
-                it.disable_recursion_pending();
-            continue;
-        }
-        if (!it->is_regular_file(ec) && !it->is_symlink(ec)) continue;
-        const std::string rel_str = path_str(rel);
-        for (const auto& re : regexes) {
-            if (std::regex_match(rel_str, re)) {
-                matches.push_back(rel);
-                break;
+    for (const auto& base : roots) {
+        if (!std::filesystem::exists(base, ec))
+            continue; // a missing base simply matches nothing
+        ec.clear();
+        auto it = std::filesystem::recursive_directory_iterator(
+            base, std::filesystem::directory_options::skip_permission_denied, ec);
+        const std::filesystem::recursive_directory_iterator end {};
+        for (; it != end; it.increment(ec)) {
+            if (ec) break;
+            const std::filesystem::path rel = std::filesystem::relative(it->path(), ".", ec);
+            if (ec) continue;
+            if (is_hidden(rel)) {
+                if (it->is_directory(ec))
+                    it.disable_recursion_pending();
+                continue;
+            }
+            if (!it->is_regular_file(ec) && !it->is_symlink(ec)) continue;
+            const std::string rel_str = path_str(rel);
+            for (const auto& re : regexes) {
+                if (std::regex_match(rel_str, re)) {
+                    matches.push_back(rel);
+                    break;
+                }
             }
         }
+        if (ec)
+            return std::unexpected(io_error(ec, base));
     }
-    if (ec)
-        return std::unexpected(io_error(ec, base));
 
     std::ranges::sort(matches);
+    matches.erase(std::ranges::unique(matches).begin(), matches.end()); /* overlapping roots */
     return matches;
 }
 
 Result<std::string> read_file(const std::filesystem::path& p) {
-    std::ifstream in(p, std::ios::binary);
+    std::ifstream in(p, std::ios::binary | std::ios::ate);
     if (!in)
         return std::unexpected(Error {Error::Kind::Io, "failed to open file for reading", p});
-    std::ostringstream ss;
-    ss << in.rdbuf();
+    const std::streamoff size = in.tellg();
+    in.seekg(0);
+    std::string s;
+    if (size > 0) { // regular file: one allocation, one read
+        s.resize(static_cast<std::size_t>(size));
+        in.read(s.data(), size);
+        s.resize(static_cast<std::size_t>(in.gcount()));
+    } else { // unseekable or empty: stream it out
+        std::ostringstream ss;
+        ss << in.rdbuf();
+        s = ss.str();
+    }
     if (in.bad())
         return std::unexpected(Error {Error::Kind::Io, "failed to read file", p});
-    return ss.str();
+    return s;
 }
 
 Result<void> write_file(const std::filesystem::path& p, std::string_view data) {

@@ -74,7 +74,7 @@ TEST_CASE("scan: header imports and comments are ignored") {
 }
 
 TEST_CASE("resolve: importing a primary pulls its partitions") {
-    const std::map<std::string, std::string> bmis {
+    const std::map<std::string, std::string, std::less<>> bmis {
         {"math", "/b/math.pcm"},
         {"math:part", "/b/math_part.pcm"},
     };
@@ -89,7 +89,7 @@ TEST_CASE("resolve: importing a primary pulls its partitions") {
 }
 
 TEST_CASE("resolve: implementation unit gets implicit primary") {
-    const std::map<std::string, std::string> bmis {
+    const std::map<std::string, std::string, std::less<>> bmis {
         {"math", "/b/math.pcm"},
         {"math:part", "/b/math_part.pcm"},
     };
@@ -102,7 +102,7 @@ TEST_CASE("resolve: implementation unit gets implicit primary") {
 }
 
 TEST_CASE("resolve: BMI source never consumes its own BMI") {
-    const std::map<std::string, std::string> bmis {
+    const std::map<std::string, std::string, std::less<>> bmis {
         {"math", "/b/math.pcm"},
         {"math:part", "/b/math_part.pcm"},
     };
@@ -118,7 +118,7 @@ TEST_CASE("resolve: BMI source never consumes its own BMI") {
 }
 
 TEST_CASE("resolve: import std is skipped, unknown import is a Config error") {
-    const std::map<std::string, std::string> bmis {{"math", "/b/math.pcm"}};
+    const std::map<std::string, std::string, std::less<>> bmis {{"math", "/b/math.pcm"}};
     detail::ModuleUnitInfo u;
     u.path = "app.cpp";
     u.imports = {"std"};
@@ -133,7 +133,7 @@ TEST_CASE("resolve: import std is skipped, unknown import is a Config error") {
 }
 
 TEST_CASE("resolve: partition import without module declaration is an error") {
-    const std::map<std::string, std::string> bmis {{"m:p", "/b/p.pcm"}};
+    const std::map<std::string, std::string, std::less<>> bmis {{"m:p", "/b/p.pcm"}};
     detail::ModuleUnitInfo u;
     u.path = "weird.cpp";
     u.imports = {":p"};

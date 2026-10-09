@@ -144,7 +144,8 @@ truss_samu_compdb(const char *manifest, const char *outpath)
 {
 	FILE *f;
 	int saved, rc;
-	char *argv[] = {"compdb", "compile_cxx", "compile_c", "compile_bmi"};
+	char *argv[] = {"compdb", "compile_cxx", "compile_c", "compile_bmi",
+	                "compile_cxx_msvc", "compile_c_msvc"};
 
 	graphinit();
 	envinit();

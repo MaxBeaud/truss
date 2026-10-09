@@ -3,6 +3,7 @@
  * they are invisible to `import truss;` consumers. */
 module;
 #include <filesystem>
+#include <functional>
 #include <map>
 #include <span>
 #include <string>
@@ -36,8 +37,10 @@ Result<void> write_lockfile(const std::filesystem::path& file,
                             const std::map<std::string, std::string>& entries);
 
 /* Glob relative to cwd. `*` within a component, `**` across components,
- * `?` one char, `{a,b}` alternation. Hidden entries are skipped. Sorted. */
+ * `?` one char, `{a,b}` alternation. Hidden entries are skipped. Sorted.
+ * glob_multi walks each distinct literal prefix once for all patterns. */
 Result<std::vector<std::filesystem::path>> glob(std::string_view pattern);
+Result<std::vector<std::filesystem::path>> glob_multi(std::span<const std::string> patterns);
 bool has_glob_magic(std::string_view pattern);
 
 /* path -> std::string with native separators (forward slashes on unix). */
@@ -70,7 +73,7 @@ Result<ModuleUnitInfo> scan_module_unit(const std::string& path);
  * Rules: a BMI source never consumes its own BMI; an implementation unit
  * implicitly imports its primary; importing a primary pulls its partitions. */
 Result<std::pair<std::string, std::vector<std::string>>>
-resolve_module_imports(const ModuleUnitInfo& u, const std::map<std::string, std::string>& bmis);
+resolve_module_imports(const ModuleUnitInfo& u, const std::map<std::string, std::string, std::less<>>& bmis);
 
 /* --- compiler flags ------------------------------------------------------ */
 struct FlagSet {
@@ -79,20 +82,32 @@ struct FlagSet {
     std::string link;       /* flags for link edges */
 };
 
+/* Link flags split by where they belong: driver-side flags go before the
+ * compiler driver's input list, linker-side flags go after `/link` on MSVC
+ * (for GCC/Clang the distinction is cosmetic — the driver takes everything). */
+struct LinkFlags {
+    std::string driver;
+    std::string linker;
+};
+
+/* DebugInfo::Default resolves to Full in debug mode, None otherwise. */
+DebugInfo resolve_debug(BuildMode mode, DebugInfo debug);
+
 /* Returns std/warnings/debug/optimization/sanitizer/lto/pic/defines flags for
- * GCC and Clang. MSVC returns a Toolchain error (not implemented yet). */
+ * GCC, Clang, and MSVC (cl.exe / clang-cl flag syntax). */
 Result<FlagSet> build_flags(const TargetTriple& triple, BuildMode mode,
                             CppStandard std, Warnings warnings, DebugInfo debug,
                             Optimization optimization, Sanitizer sanitizer, Lto lto,
                             bool pic, std::span<const std::string> defines,
                             std::span<const std::string> includes,
                             std::string_view user_flags);
-Result<std::string> link_flags(const TargetTriple& triple, Sanitizer sanitizer,
-                               Lto lto, std::span<const std::string> link_paths,
-                               std::span<const std::string> libs,
-                               std::span<const std::string> frameworks,
-                               std::span<const std::string> framework_paths,
-                               std::string_view user_linker_flags);
+Result<LinkFlags> link_flags(const TargetTriple& triple, BuildMode mode, DebugInfo debug,
+                             Sanitizer sanitizer, Lto lto,
+                             std::span<const std::string> link_paths,
+                             std::span<const std::string> libs,
+                             std::span<const std::string> frameworks,
+                             std::span<const std::string> framework_paths,
+                             std::string_view user_linker_flags);
 
 /* "<arch>-<os>-<family>" e.g. "x64-linux-clang" */
 std::string triple_dir(const TargetTriple& t);
@@ -127,7 +142,7 @@ std::string esc_path(std::string_view p);    /* $ -> $$, : -> $:, ' ' -> $ */
 /* --- samurai bridge -------------------------------------------------------
  * Implemented in src/core/samu.cpp over the C shim (src/samu/shim.c). */
 Result<void> samu_build(std::string_view manifest, int jobs, bool verbose,
-                        bool dry_run, std::span<const std::string> targets);
+                        bool dry_run, bool explain, std::span<const std::string> targets);
 Result<void> samu_compdb(std::string_view manifest, std::string_view outpath);
 
 } // namespace truss::detail

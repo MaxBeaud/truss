@@ -450,34 +450,15 @@ depsload(struct edge *e)
 	}
 }
 
-void
-depsrecord(struct edge *e)
+/* record the dependency list for `out` into .ninja_deps when it changed */
+static void
+recorddeps_ifchanged(struct node *out, struct nodearray *deps)
 {
-	struct string *deptype, *depfile;
-	struct nodearray *deps;
-	struct node *out, *n;
 	struct entry *entry;
+	struct node *n;
 	size_t i;
 	bool update;
 
-	deptype = edgevar(e, "deps", true);
-	if (!deptype || deptype->n == 0)
-		return;
-	if (strcmp(deptype->s, "gcc") != 0) {
-		warn("unsuported deps type: %s", deptype->s);
-		return;
-	}
-	depfile = edgevar(e, "depfile", false);
-	if (!depfile || depfile->n == 0) {
-		warn("deps but no depfile");
-		return;
-	}
-	out = e->out[0];
-	deps = depsparse(depfile->s, true);
-	if (!buildopts.keepdepfile)
-		remove(depfile->s);
-	if (!deps)
-		return;
 	update = false;
 	entry = NULL;
 	if (recordid(out)) {
@@ -501,4 +482,103 @@ depsrecord(struct edge *e)
 		if (fflush(depsfile) < 0)
 			fatal("deps log flush:");
 	}
+}
+
+void
+depsrecord(struct edge *e)
+{
+	struct string *deptype, *depfile;
+	struct nodearray *deps;
+
+	deptype = edgevar(e, "deps", true);
+	if (!deptype || deptype->n == 0)
+		return;
+	if (strcmp(deptype->s, "msvc") == 0)
+		return; /* recorded by depsrecord_msvc from the captured /showIncludes output */
+	if (strcmp(deptype->s, "gcc") != 0) {
+		warn("unsuported deps type: %s", deptype->s);
+		return;
+	}
+	depfile = edgevar(e, "depfile", false);
+	if (!depfile || depfile->n == 0) {
+		warn("deps but no depfile");
+		return;
+	}
+	deps = depsparse(depfile->s, true);
+	if (!buildopts.keepdepfile)
+		remove(depfile->s);
+	if (!deps)
+		return;
+	recorddeps_ifchanged(e->out[0], deps);
+}
+
+/* deps = msvc: MSVC-style compilers (/showIncludes) print one line per
+ * included header to stdout. Parse those lines out of the captured job
+ * output (stripping them so they are not echoed), then record the headers
+ * like a gcc depfile would. An empty list is still recorded, so a TU with
+ * no includes does not stay dirty forever. */
+void
+depsrecord_msvc(struct edge *e, struct buffer *buf)
+{
+	static struct node **depnodes;
+	static size_t depcap;
+	struct nodearray deps;
+	struct string *prefix;
+	const char *pfx, *r0;
+	char *r, *w, *end;
+	size_t prefixlen, linelen, plen, adv;
+
+	prefix = envvar(rootenv, "msvc_deps_prefix");
+	if (prefix && prefix->n > 0) {
+		pfx = prefix->s;
+		prefixlen = prefix->n;
+	} else {
+		static const char defprefix[] = "Note: including file:";
+		pfx = defprefix;
+		prefixlen = sizeof(defprefix) - 1;
+	}
+
+	deps.node = depnodes;
+	deps.len = 0;
+	r = w = buf->data;
+	end = buf->data + buf->len;
+	/* jobdone calls us before edgedone, so the output is not stat'ed yet:
+	 * recorddeps must store the real post-build mtime or the record reads
+	 * as outdated on the next build and the edge rebuilds forever */
+	nodestat(e->out[0]);
+	while (r < end) {
+		char *nl = (char *)memchr(r, '\n', end - r);
+		linelen = nl ? (size_t)(nl - r) : (size_t)(end - r);
+		adv = linelen + (nl ? 1 : 0);
+		if (linelen >= prefixlen && memcmp(r, pfx, prefixlen) == 0) {
+			r0 = r + prefixlen;
+			plen = linelen - prefixlen;
+			while (plen && (*r0 == ' ' || *r0 == '\t')) {
+				++r0;
+				--plen;
+			}
+			while (plen && (r0[plen - 1] == '\r' || r0[plen - 1] == '\n'))
+				--plen;
+			if (plen > 0) {
+				struct string *name = mkstr(plen);
+				memcpy(name->s, r0, plen);
+				name->s[plen] = '\0';
+				if (deps.len == depcap) {
+					depcap = depcap ? depcap * 2 : 64;
+					depnodes = (struct node **)xreallocarray(depnodes, depcap, sizeof(depnodes[0]));
+					deps.node = depnodes;
+				}
+				deps.node[deps.len++] = mknode(name);
+			}
+			/* dep line consumed: drop it from the echoed output */
+		} else {
+			if (w != r)
+				memmove(w, r, adv);
+			w += adv;
+		}
+		r += adv;
+	}
+	buf->len = (size_t)(w - buf->data);
+
+	recorddeps_ifchanged(e->out[0], &deps);
 }

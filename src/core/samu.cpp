@@ -15,7 +15,7 @@ import :impl;
 namespace truss::detail {
 
 Result<void> samu_build(std::string_view manifest, int jobs, bool verbose,
-                        bool dry_run, std::span<const std::string> targets) {
+                        bool dry_run, bool explain, std::span<const std::string> targets) {
     std::vector<const char*> ctargets;
     ctargets.reserve(targets.size());
     for (const auto& t : targets)
@@ -29,7 +29,7 @@ Result<void> samu_build(std::string_view manifest, int jobs, bool verbose,
     opts.maxfail = 0; /* samu default: stop at first failure */
     opts.verbose = verbose ? 1 : 0;
     opts.dryrun = dry_run ? 1 : 0;
-    opts.explain = 0;
+    opts.explain = explain ? 1 : 0;
     opts.ntargets = static_cast<int>(ctargets.size());
     opts.targets = ctargets.empty() ? nullptr : ctargets.data();
 

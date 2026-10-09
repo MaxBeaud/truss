@@ -281,3 +281,48 @@ Read `PLAN.MD` first. This file is the rulebook for any agent/human modifying th
   `__lsan_default_options` guarded with `extern "C"`; no static/anon-namespace
   name collisions across samurai or core files (verified).
 - Amalgam TU compiles in ~1s (clang++ -O0 default).
+
+## 17. Verified toolchain facts (learned during phase 10 — MSVC + samurai deps=msvc)
+
+- MSVC flag mapping lives in `flags.cpp` (`k*FlagsMsvc` tables), cl.exe/clang-cl
+  syntax: no C++11 mode (maps to `/std:c++14`), C++23/26 spell `/std:c++latest`,
+  `O3` maps to `/O2`, ThinLTO maps to `/GL`+`/LTCG`, debug info is `/Z7` (embedded
+  in .obj — no PDB contention under parallel ninja) with `/DEBUG` at link, C is
+  `/std:c17`, always-on `/utf-8 /EHsc /nologo`, no `-fPIC` (Windows has no PIC).
+- `link_flags` returns `LinkFlags {driver, linker}`: driver-side flags go before
+  the compiler driver's `/link`, linker-side after. For MSVC: `/fsanitize=...` is
+  driver-side; `/INCREMENTAL:NO` (ASan), `/LTCG`, `/DEBUG`, `/LIBPATH:` and
+  `name.lib` are linker-side. clang-cl treats unknown `/FLAGS` *before* `/link`
+  as input files — user `linker_flags()` must land after `/link`.
+- samurai feature patch (TRUSS-VENDOR.txt item 3): `deps = msvc`.
+  `depsrecord_msvc()` parses `/showIncludes` lines (prefix from the
+  `msvc_deps_prefix` manifest var, default `Note: including file:`) out of the
+  job's captured stdout, strips them from the echoed output, records into
+  .ninja_deps like a gcc depfile. GOTCHA: it runs in `jobdone` *before*
+  `edgedone`, so it must `nodestat(e->out[0])` first — recording the pre-build
+  (missing) mtime makes the record read as outdated and the edge rebuilds forever.
+- samurai supports rule-level `rspfile`/`rspfile_content` (edgevar falls back to
+  rule bindings; `$in`/`$out` expand inside them). truss uses them on MSVC
+  archive/link rules (`@$out.rsp`) for Windows command-line length.
+- `TargetTriple.linker` (new field): link-driver override passed as
+  `-fuse-ld=<name>` (driver-side, works for gcc/clang/clang-cl). Needed on Linux:
+  clang-cl cannot find `link.exe` without a VS installation and does NOT fall
+  back to PATH; `-fuse-ld=lld-link` works. `lld-link` accepts `/OUT:` `/SUBSYSTEM:`
+  `/ENTRY:` `/NODEFAULTLIB` `/LIBPATH:` `/DEBUG` `/LTCG` `/INCREMENTAL:NO`.
+- clang-cl specifics: `/Fo$out` must be attached (space form makes the path an
+  input); `-MF` is rejected; `-MD` is an alias for `/MD` (CRT selection), NOT a
+  depfile flag; `/EHsc /utf-8 /nologo` accepted silently; `/showIncludes` prints
+  `Note: including file: ./header.h` (cwd-relative, English locale).
+- MSVC emitter specifics: objects `.obj`, exe `name.exe`, static `name.lib`,
+  shared `name.dll` + implicit-output import lib `name.lib`; consumers link the
+  import lib, never the dll; no rpath on Windows (skip `$ORIGIN` rpath);
+  archive via `lib.exe`/`llvm-lib` (`/NOLOGO /OUT:`).
+- Modules + MSVC: hard Config error (BMI wiring relies on clang's
+  `-fmodule-output`/`-fmodule-file`).
+- `glob_multi(patterns)`: one tree walk per distinct scan root (sources_in adds
+  6 patterns → 1 walk, not 6). GOTCHA: a fully literal pattern's literal prefix
+  is the file itself — clamp the scan root to its parent directory.
+- `just test` includes `tests/unit/msvc_test.cpp`: end-to-end clang-cl compile +
+  /showIncludes dep tracking + llvm-lib archive + lld-link freestanding link
+  (`/NODEFAULTLIB /SUBSYSTEM:CONSOLE /ENTRY:main`), incremental + no-op checks;
+  self-skips when clang-cl/lld-link/llvm-lib are absent. 49 cases / 202 assertions.
