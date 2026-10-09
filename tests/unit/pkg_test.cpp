@@ -75,3 +75,25 @@ TEST_CASE("fetch: option validation errors before any network access") {
     REQUIRE_FALSE(r4.has_value());
     CHECK(r4.error().kind == Error::Kind::Config);
 }
+
+TEST_CASE("conan list overload: refs must be versioned") {
+    char prog[] = "truss-tests";
+    char* argv[] = {prog};
+    Project proj {"conan-list", 1, argv};
+
+    auto bad = proj.conan({"zlib"}); /* missing /version */
+    REQUIRE_FALSE(bad.has_value());
+    CHECK(bad.error().kind == Error::Kind::Config);
+    CHECK(bad.error().message.find("zlib") != std::string::npos);
+}
+
+TEST_CASE("conan path overload: missing conanfile is a Config error") {
+    char prog[] = "truss-tests";
+    char* argv[] = {prog};
+    Project proj {"conan-path", 1, argv};
+    auto r = proj.conan("definitely-not-here.txt");
+    if (!r) /* conan absent: toolchain error is fine too */
+        CHECK((r.error().kind == Error::Kind::Config || r.error().kind == Error::Kind::Toolchain));
+    else
+        FAIL("expected failure");
+}

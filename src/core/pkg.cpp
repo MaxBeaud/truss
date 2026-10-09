@@ -3,6 +3,7 @@ module;
 #include <cctype>
 #include <expected>
 #include <filesystem>
+#include <initializer_list>
 #include <map>
 #include <span>
 #include <string>
@@ -249,7 +250,7 @@ Result<Package> Project::fetch(std::string_view name, const FetchOptions& opts) 
 /* --- Project::add_subdirectory ---------------------------------------------
  * Convention: static library named after the directory, sources from its src/
  * tree (recursively), includes from its include/ dir when present. */
-Result<Target*> Project::add_subdirectory(const std::filesystem::path& dir) {
+Result<TargetRef> Project::add_subdirectory(const std::filesystem::path& dir) {
     const std::filesystem::path abs = dir.is_absolute() ? dir : cwd_ / dir;
     std::error_code ec;
     if (!std::filesystem::is_directory(abs, ec))
@@ -263,7 +264,7 @@ Result<Target*> Project::add_subdirectory(const std::filesystem::path& dir) {
     for (const auto& t : targets_) {
         if (t->name() == name) {
             if (is_subdir)
-                return t.get(); /* idempotent re-registration */
+                return TargetRef{*t}; /* idempotent re-registration */
             return std::unexpected(Error {
                 Error::Kind::Config,
                 "add_subdirectory: a target named '" + name + "' already exists (pick a distinct directory name)",
@@ -293,16 +294,16 @@ Result<Target*> Project::add_subdirectory(const std::filesystem::path& dir) {
     else
         target->include_dirs(rel);
     subdir_target_names_.push_back(name);
-    return target;
+    return TargetRef{*target};
 }
 
 /* --- Project::conan ---------------------------------------------------------
  * Runs conan 2, parses the --format=json dependency graph, and returns one
  * Interface target ("conan") carrying the whole graph's usage requirements. */
-Result<Target*> Project::conan(std::string_view conanfile) {
+Result<TargetRef> Project::conan(std::string_view conanfile) {
     for (const auto& t : targets_)
         if (t->name() == "conan")
-            return t.get(); /* idempotent */
+            return TargetRef{*t}; /* idempotent */
     if (!detail::program_exists("conan"))
         return std::unexpected(Error {Error::Kind::Toolchain, "conan not found on PATH (conan 2 required)"});
 
@@ -377,17 +378,45 @@ Result<Target*> Project::conan(std::string_view conanfile) {
         for (const auto& d : str_array(root, "defines"))
             iface.defines(d);
     }
-    return &iface;
+    return TargetRef{iface};
+}
+
+/* conan({"zlib/1.3.1", "fmt/11.0.2"}): generates a conanfile.txt under
+ * build/{mode}/packages/conan_generated/ and runs the path overload on it.
+ * conan refs must be versioned (unlike vcpkg names). */
+Result<TargetRef> Project::conan(std::initializer_list<std::string_view> refs) {
+    if (refs.size() == 0) /* module purview: initializer_list::empty is not found, size() is builtin */
+        return std::unexpected(Error {
+            Error::Kind::Config, "conan: empty require list (refs must be versioned, e.g. \"zlib/1.3.1\")",
+        });
+    for (const auto& r : refs)
+        if (r.find('/') == std::string_view::npos)
+            return std::unexpected(Error {
+                Error::Kind::Config,
+                "conan: ref '" + std::string(r) + "' is missing a version (conan refs are versioned, e.g. \"zlib/1.3.1\")",
+            });
+
+    const std::filesystem::path dir = build_dir() / "packages" / "conan_generated";
+    if (auto r = detail::make_dirs(dir); !r)
+        return std::unexpected(r.error());
+
+    std::string body = "[requires]\n";
+    for (const auto& r : refs)
+        body += std::string(r) + "\n";
+    if (auto r = detail::write_file((dir / "conanfile.txt").generic_string(), body + "\n"); !r)
+        return std::unexpected(r.error());
+
+    return conan((dir / "conanfile.txt").generic_string());
 }
 
 /* --- Project::vcpkg ---------------------------------------------------------
  * Manifest mode: uses the project's vcpkg.json (generating one from `packages`
  * when absent), installs under build/{mode}/vcpkg_installed, and returns one
  * Interface target ("vcpkg") for the triplet's include/ + lib/ trees. */
-Result<Target*> Project::vcpkg(std::vector<std::string> packages) {
+Result<TargetRef> Project::vcpkg(std::vector<std::string> packages) {
     for (const auto& t : targets_)
         if (t->name() == "vcpkg")
-            return t.get(); /* idempotent */
+            return TargetRef{*t}; /* idempotent */
 
     std::string exe = "vcpkg";
     if (const char* root = std::getenv("VCPKG_ROOT"); root && *root) {
@@ -472,7 +501,7 @@ Result<Target*> Project::vcpkg(std::vector<std::string> packages) {
         for (const auto& n : names)
             iface.link_libs(n);
     }
-    return &iface;
+    return TargetRef{iface};
 }
 
 } // namespace truss

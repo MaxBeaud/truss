@@ -37,13 +37,13 @@ int main(int argc, char** argv) {
 
     proj.add_executable("app")
         .sources("app/main.cpp")
-        .depends_on(**xxh_t)
-        .depends_on(**expected_t);
+        .depends_on(*xxh_t)
+        .depends_on(*expected_t);
 
     proj.add_executable("test_fetch")
         .sources("tests/test_fetch.cpp")
-        .depends_on(**xxh_t)
-        .depends_on(**expected_t)
+        .depends_on(*xxh_t)
+        .depends_on(*expected_t)
         .is_test();
 
     auto result = proj.build();

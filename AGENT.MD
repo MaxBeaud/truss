@@ -366,3 +366,12 @@ Read `PLAN.MD` first. This file is the rulebook for any agent/human modifying th
   field; `-stdlib=` emitted compile + link (never MSVC — validated away:
   g++ + libc++ and MSVC + stdlib() are Config errors). Implementation units using
   `std::unexpected` need `#include <expected>` in their GMF (reachable ≠ visible).
+- **`std::expected` cannot hold `T&`** (reference types are ill-formed — libc++
+  asserts via a reference-typed union member). Package returns use
+  `Result<TargetRef>`: a tiny non-owning handle (`operator*`, `operator->`,
+  implicit `operator Target&`) — never null, `depends_on(*r)` reads naturally.
+- Module-purview quirk: `std::initializer_list` parameters only get the builtin
+  `size()`/`begin()`/`end()` — `empty()` is "no member named" inside a module
+  unit even with `<initializer_list>` included. Compare `size() == 0`.
+- doctest: `CHECK(a || b)` → "Expression Too Complex" — parenthesize:
+  `CHECK((a || b))`.

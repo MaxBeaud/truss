@@ -276,8 +276,9 @@ targets with `.cppm` sources get a clear config error.
 Convention-based vendoring — point it at a directory in your tree:
 
 ```cpp
-auto& zlib = *proj.add_subdirectory("vendor/zlib");
-proj.add_executable("app").sources_in("src").depends_on(zlib);
+auto zlib = proj.add_subdirectory("vendor/zlib");   // Result<TargetRef>
+if (!zlib) return 1;
+proj.add_executable("app").sources_in("src").depends_on(*zlib);
 ```
 
 It creates a static library named after the directory, with sources from
@@ -293,7 +294,8 @@ auto pkg = proj.fetch("fmt", {
     .git = "https://github.com/fmtlib/fmt",
     .tag = "11.0.2",
 });
-auto& fmt = *proj.add_subdirectory(pkg->dir);
+auto fmt = proj.add_subdirectory(pkg->dir);
+proj.add_executable("app").depends_on(*fmt);
 ```
 
 Exactly one of `git+tag` (shallow clone pinned to a tag/branch/commit) or
@@ -307,11 +309,14 @@ build script — so CI gets the same tree without a network round trip.
 Conan 2 graphs, consumed as one `Interface` target:
 
 ```cpp
-auto& deps = *proj.conan("conanfile.txt");   // or "conanfile.py", or "."
-proj.add_executable("app").sources_in("src").depends_on(deps);
+auto deps = proj.conan({"zlib/1.3.1", "fmt/11.0.2"}); // list form (refs are versioned)
+// or: proj.conan("conanfile.txt") / "conanfile.py" / "."
+proj.add_executable("app").sources_in("src").depends_on(*deps);
 ```
 
-Runs `conan install --build=missing` (JSON graph parsed from stdout), installs
+The list form generates a `conanfile.txt` under
+`build/<mode>/packages/conan_generated/` for you. Either way truss runs
+`conan install --build=missing` (JSON graph parsed from stdout), installs
 under `build/<mode>/packages/conan/`, and propagates every package's include dirs,
 defines, link libs and link paths.
 
@@ -320,8 +325,8 @@ defines, link libs and link paths.
 Manifest mode, same consumption model:
 
 ```cpp
-auto& deps = *proj.vcpkg({"zlib", "fmt"});   // or proj.vcpkg({}) with your own vcpkg.json
-proj.add_executable("app").sources_in("src").depends_on(deps);
+auto deps = proj.vcpkg({"zlib", "fmt"});   // or proj.vcpkg({}) with your own vcpkg.json
+proj.add_executable("app").sources_in("src").depends_on(*deps);
 ```
 
 Installs into `build/<mode>/vcpkg_installed/` and returns an `Interface`

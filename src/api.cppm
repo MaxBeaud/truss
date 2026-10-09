@@ -347,6 +347,21 @@ public:
     explicit Interface(std::string name) : Target(std::move(name), TargetKind::Interface) {}
 };
 
+/* Non-owning handle to a target created by add_subdirectory()/conan()/vcpkg().
+ * std::expected cannot hold T&, so this is the reference-shaped stand-in:
+ * never null, dereferenceable, and converts implicitly to Target& —
+ * `depends_on(*proj.conan({"zlib/1.3.1"}))` just works. */
+class TargetRef {
+public:
+    explicit TargetRef(Target& t) : target_(&t) {}
+    Target& operator*() const { return *target_; }
+    Target* operator->() const { return target_; }
+    operator Target&() const { return *target_; }
+
+private:
+    Target* target_;
+};
+
 /* ---------------------------------------------------------------------------
  * Tasks: `./truss <name>` dispatch. Built-ins: test, run, clean, compdb.
  * ------------------------------------------------------------------------- */
@@ -388,18 +403,20 @@ public:
     /* add_subdirectory(): convention-based vendored project — a static library
      * named after the directory, sources from its src/ tree, includes from its
      * include/ dir when present. Returns the target for depends_on(). */
-    Result<Target*> add_subdirectory(const std::filesystem::path& dir);
-    Result<Target*> add_subdirectory(const Package& pkg) { return add_subdirectory(pkg.dir); }
+    Result<TargetRef> add_subdirectory(const std::filesystem::path& dir);
+    Result<TargetRef> add_subdirectory(const Package& pkg) { return add_subdirectory(pkg.dir); }
 
     /* conan 2: runs `conan install` on the conanfile (path to conanfile.txt/.py
-     * or its directory). Returns an Interface target carrying the whole graph's
-     * includes/libs/defines — depends_on() it. */
-    Result<Target*> conan(std::string_view conanfile = ".");
+     * or its directory), or generates one from versioned refs —
+     * conan({"zlib/1.3.1", "fmt/11.0.2"}). Returns an Interface target carrying
+     * the whole graph's includes/libs/defines — depends_on() it. */
+    Result<TargetRef> conan(std::string_view conanfile = ".");
+    Result<TargetRef> conan(std::initializer_list<std::string_view> refs);
 
     /* vcpkg manifest mode: uses the project's vcpkg.json, or generates one from
      * `packages`. Installs under build/{mode}/vcpkg_installed and returns an
      * Interface target for depends_on(). */
-    Result<Target*> vcpkg(std::vector<std::string> packages);
+    Result<TargetRef> vcpkg(std::vector<std::string> packages);
 
     /* Generates the ninja manifest, runs samurai, then the requested tasks.
      * Errors are logged and returned. */
