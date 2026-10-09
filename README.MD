@@ -72,29 +72,28 @@ ninja manifest that samurai then executes incrementally.
 ## Getting truss
 
 Everything is built **on your machine** — truss ships no prebuilt binaries.
-Pick whichever style fits your project (all three are exercised by `just test`):
+Pick whichever style fits your project (all three are exercised by `./setup.sh test`):
 
 **1. Vendored source (easiest).** Drop this repo into `vendor/truss/`, then
 build truss's library + BMI with plain `clang++` (no build system needed):
 
 ```sh
-./vendor/truss/bootstrap.sh            # -> build-bootstrap/libtruss.a + BMIs
-clang++ -std=c++26 -fmodule-file=truss=build-bootstrap/bmi/truss.pcm \
-        truss.cpp build-bootstrap/libtruss.a -o truss
+./vendor/truss/setup.sh bootstrap      # -> build/bootstrap/libtruss.a + BMIs
+clang++ -std=c++26 -fmodule-file=truss=build/bootstrap/bmi/truss.pcm \
+        -fmodule-file=truss:api=build/bootstrap/bmi/truss_api.pcm \
+        truss.cpp build/bootstrap/libtruss.a -o truss
 ```
 
-**2. Installed tool.** `./bootstrap.sh --install /usr/local` stages
+**2. Installed tool.** `./setup.sh install /usr/local` stages
 `libtruss.a` + module BMIs; compile your project's `truss.cpp` against them
 (see `examples/installed/`, which contains only a `truss.cpp`).
 
 **3. Single header (mate.h-style drop-in).** No modules, no link step:
 
 ```sh
-just amalgam                   # generates dist/truss_all.hpp
-clang++ -std=c++26 -Idist truss.cpp -o truss   # #include "truss_all.hpp"
+./setup.sh amalgam               # generates build/dist/truss_all.hpp
+clang++ -std=c++26 -Ibuild/dist truss.cpp -o truss   # #include "truss_all.hpp"
 ```
-
-(For hacking on truss itself, `xmake` also works: `xmake f -m debug && xmake`.)
 
 Requirements: a C++26 compiler (clang 19+ or GCC 15+; clang is the reference)
 and a POSIX-ish OS. truss currently builds and runs its test suite on Linux;
@@ -393,16 +392,18 @@ is all you need. truss itself is built with exceptions disabled.
 
 ## Building truss itself
 
-truss builds itself (`truss.cpp` at the repo root is its own build script):
+truss builds itself (`truss.cpp` at the repo root is its own build script).
+`setup.sh` is the single entry point — plain `clang++`, no build system:
 
 ```sh
-xmake f -m debug && xmake        # bootstrap: builds ./truss
-./truss debug                    # truss, built by truss
-just test                        # unit tests + all example flows
+./setup.sh build               # bootstrap libtruss.a + BMI, compile ./truss
+./truss debug                  # truss, built by truss
+./setup.sh test                # unit tests + all example flows
 ```
 
-Other useful recipes: `just bootstrap` (plain clang++), `just installed`,
-`just amalgam`, `just test` (everything), `just clean`.
+Other useful commands: `./setup.sh unit` (doctest, ASan/UBSan), `./setup.sh
+examples`, `./setup.sh installed`, `./setup.sh amalgam`, `./setup.sh install
+[prefix]`, `./setup.sh clean`. All generated output lives under `build/`.
 
 ## Status & support matrix
 

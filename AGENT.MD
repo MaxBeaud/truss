@@ -6,8 +6,9 @@ Read `PLAN.MD` first. This file is the rulebook for any agent/human modifying th
 
 - truss = a C++26 build-system library ("build your C++ using C++"), mate.h API style,
   xmake-class features, samurai backend.
-- truss itself: **clang (trunk-pinned) + libc++ + `-std=c++26`**, built by **xmake**
-  (debug/release modes). Never introduce CMake or another build system for truss itself.
+- truss itself: **clang (trunk-pinned) + libc++ + `-std=c++26`**, built by **`./setup.sh`**
+  (plain clang++, no build system). Never introduce CMake or another build system for
+  truss itself.
 - Dogfood target: truss's own build script is `truss.cpp` at repo root (phase 7).
 
 ## 2. Language & style constraints
@@ -39,7 +40,7 @@ Read `PLAN.MD` first. This file is the rulebook for any agent/human modifying th
   friendliness), constants `kPascalCase` or `UPPER_SNAKE` for enum values matching the
   public enums in PLAN.MD. Namespaces: everything under `truss::`, internals in
   `truss::detail` or unnamed namespaces in implementation units.
-- **Warnings are errors-adjacent**: the xmake.lua warning set (`-Wall -Wextra -Wpedantic
+- **Warnings are errors-adjacent**: the setup.sh warning set (`-Wall -Wextra -Wpedantic
   -Wshadow -Wconversion -Wsign-conversion -Wold-style-cast ...`) must stay clean. No C-style
   casts (use `static_cast`/`reinterpret_cast` with comment). No `using namespace std;`.
 
@@ -59,8 +60,9 @@ Read `PLAN.MD` first. This file is the rulebook for any agent/human modifying th
 
 ## 4. Vendoring & packages
 
-- Third-party code truss itself needs → `vendor/` (justfile `add-package` symlink flow or
-  git clone pinned to a tag). Currently allowed: `samurai` (ISC), `catch2` (BSL).
+- Third-party code truss itself needs → `vendor/` (setup.sh `add-package` symlink flow or
+  git clone pinned to a tag). Currently allowed: `samurai` (ISC); tests use vendored
+  `doctest` (MIT, single header in `tests/doctest/`).
   Anything else needs a justification comment in the vendor note file.
 - Do not vendor a JSON parser until phase 6 actually needs it.
 - Generated/fetched artifacts for USER projects go under `build/<mode>/packages/` — never
@@ -68,8 +70,9 @@ Read `PLAN.MD` first. This file is the rulebook for any agent/human modifying th
 
 ## 5. Build & workflow
 
-- Build truss: `xmake f -m debug && xmake` (or `just build debug`). Release: `-m release`.
-- Run tests: `just test` (Catch2 target, ASan/UBSan active in debug).
+- Build truss: `./setup.sh build` (bootstrap + self-host `./truss`). Everything generated
+  lives under `build/` (`build/bootstrap` = libtruss.a + BMIs, `build/dist` = amalgamation).
+- Run tests: `./setup.sh test` (doctest unit tests with ASan/UBSan + all example flows).
 - Never commit `build/`, `compile_commands.json`, `truss.lock` churn (gitignore covers).
 - **Phase discipline**: implement PLAN.MD phases in order; each phase ends with its
   "Done when" criterion demonstrably passing before starting the next. Small commits,
@@ -78,12 +81,12 @@ Read `PLAN.MD` first. This file is the rulebook for any agent/human modifying th
 
 ## 6. Testing rules
 
-- New utility (glob, flag table, ninja emitter, triple detection) ⇒ Catch2 unit test in the
+- New utility (glob, flag table, ninja emitter, triple detection) ⇒ doctest unit test in the
   same commit. Ninja emitter tests assert on **golden manifest strings**.
 - Rebuild-minimality is a tested property: integration fixtures assert that touching file X
   recompiles exactly the expected object set (via samu `-d explain` output or mtimes).
 - Integration harness invokes the real `./truss` binary; no mocking of samurai.
-- Keep ASan/UBSan green in debug CI-equivalent (`just test`).
+- Keep ASan/UBSan green in debug CI-equivalent (`./setup.sh test`).
 
 ## 7. Public API invariants (do not break casually)
 
@@ -119,7 +122,8 @@ Read `PLAN.MD` first. This file is the rulebook for any agent/human modifying th
 
 ## 10. Verified toolchain facts (learned during phases 0–2 — do not re-derive)
 
-- xmake 3.1 + clang 23: cross-target named-module consumption requires a
+- (Historical — xmake was removed in phase 11; truss now builds with plain clang++ via
+  `setup.sh`.) xmake 3.1 + clang 23: cross-target named-module consumption requires a
   `set_kind("moduleonly")` target providing the BMIs (`truss-mod`), consumers `add_deps` it.
   Plain `add_deps` on a static lib does NOT propagate the BMI.
 - Module units: `#include` must live in the global module fragment (`module;` … includes …
@@ -128,8 +132,8 @@ Read `PLAN.MD` first. This file is the rulebook for any agent/human modifying th
   `export import :api;`) + `truss:impl` (internal helpers, NOT re-exported). Implementation
   units cannot import the primary interface of their own module — that is why all public
   types (incl. `Project`) live in `:api`.
-- xmake: `set_config("builddir", ".xmake")` (the `buildir` key is deprecated). File
-  exclusion syntax: `add_files("dir/**.c|samu.c")`.
+- (Historical, xmake removed.) xmake: `set_config("builddir", ".xmake")` (the `buildir` key
+  is deprecated). File exclusion syntax: `add_files("dir/**.c|samu.c")`.
 - samurai: `$in` expands to **explicit inputs only** — dependency artifacts (archives,
   shared libs) must be explicit inputs of link edges, ordered after the objects.
 - Ninja manifest emission: rule bodies carry `$placeholder` verbatim (never escape them);
@@ -215,10 +219,10 @@ Read `PLAN.MD` first. This file is the rulebook for any agent/human modifying th
 - Usage semantics (CMake INTERFACE-style, `collect_usage` in build.cpp): include dirs
   propagate from ALL deps transitively; defines/link_paths/link_libs propagate only from
   `Interface` deps, so user static libs never leak private defines. Integration-tested
-  by `tests/unit/usage_test.cpp` (scratch dir + chdir + real `proj.build()`; Catch2
+  by `tests/unit/usage_test.cpp` (scratch dir + chdir + real `proj.build()`; doctest
   `INFO` needs the ternary parenthesized: `<<` binds tighter than `?:`).
 
-## 14. Verified toolchain facts (learned during phase 7 — bootstrap.sh)
+## 14. Verified toolchain facts (learned during phase 7 — bootstrap; now `setup.sh bootstrap`)
 
 - Plain clang++ can build truss's module without xmake: compile each interface unit once
   with `-c -fmodule-output=<pcm>` (object + BMI in a single pass — no `--precompile`
@@ -227,7 +231,7 @@ Read `PLAN.MD` first. This file is the rulebook for any agent/human modifying th
 - **Consumers of `import truss;` need TWO flags**: `-fmodule-file=truss=...` AND
   `-fmodule-file=truss:api=...`. clang does not embed imported BMIs into the emitted
   BMI; the primary re-exports :api but references it by name. `:impl` is NOT needed by
-  consumers (the primary never imports it). `--install` stages both pcms.
+  consumers (the primary never imports it). `setup.sh install` stages both pcms.
 - truss is built against libc++ (`-stdlib=libc++`); the staged BMI + libtruss.a ABI must
   match the stdlib used to compile the consumer TU.
 - samurai C files compile with `-std=gnu17 -w -D_DEFAULT_SOURCE -D_POSIX_C_SOURCE=200809L`;
@@ -253,20 +257,21 @@ Read `PLAN.MD` first. This file is the rulebook for any agent/human modifying th
   `samu.c`), `truss-lib` (`sources_in("src")` picks up .cppm/.cpp/.c), `truss`
   (this file; `import truss;` resolved cross-target via `collect_bmis` + depends_on).
   Must set `.cpp_standard(CppStandard::Cpp26)` explicitly — `Default` maps to c++23.
-  The self-build uses clang's default stdlib (libstdc++) consistently; the xmake build
-  uses libc++ — the two graphs are independent and each is internally consistent.
-- Installed-tool flow: `bootstrap.sh --install <prefix>` stages
+  The self-build uses clang's default stdlib (libstdc++) consistently; `setup.sh`
+  builds against libc++ — the two graphs are independent and each is internally
+  consistent.
+- Installed-tool flow: `setup.sh install <prefix>` stages
   `<prefix>/lib/truss/{libtruss.a,truss.pcm,truss_api.pcm}`; a project compiles its
-  script with both `-fmodule-file` flags (§14) — fixture `examples/installed`, recipe
-  `just installed`.
+  script with both `-fmodule-file` flags (§14) — fixture `examples/installed`, command
+  `./setup.sh installed`.
 
 ## 16. Verified toolchain facts (learned during phase 9 — amalgamation)
 
-- `tools/amalgamate.cpp` generates `dist/truss_all.hpp` (~188 KB): samurai .c +
+- `tools/amalgamate.cpp` generates `build/dist/truss_all.hpp` (~188 KB): samurai .c +
   shim + api/impl/core units concatenated; module directives/partition imports
   stripped; `export namespace` -> `namespace`; local `#include "x.h"` inlined once
   (samurai headers have no guards — the tool dedupes); system includes hoisted.
-  `dist/` is gitignored (regenerate: `just amalgam`).
+  `build/dist/` is gitignored (regenerate: `./setup.sh amalgam`).
 - samurai compiles as C++ after vendored patches (see TRUSS-VENDOR.txt): pragma
   once, `_Bool`->`bool`, flags enum out of `struct edge` + `unsigned flags`,
   ~50 void* casts, `new`->`new_`, `#ifndef _POSIX_C_SOURCE`. All valid C too, so
@@ -322,7 +327,26 @@ Read `PLAN.MD` first. This file is the rulebook for any agent/human modifying th
 - `glob_multi(patterns)`: one tree walk per distinct scan root (sources_in adds
   6 patterns → 1 walk, not 6). GOTCHA: a fully literal pattern's literal prefix
   is the file itself — clamp the scan root to its parent directory.
-- `just test` includes `tests/unit/msvc_test.cpp`: end-to-end clang-cl compile +
+- `./setup.sh unit` includes `tests/unit/msvc_test.cpp`: end-to-end clang-cl compile +
   /showIncludes dep tracking + llvm-lib archive + lld-link freestanding link
   (`/NODEFAULTLIB /SUBSYSTEM:CONSOLE /ENTRY:main`), incremental + no-op checks;
   self-skips when clang-cl/lld-link/llvm-lib are absent. 49 cases / 202 assertions.
+
+## 18. Verified toolchain facts (learned during phase 11 — consolidation + doctest)
+
+- doctest works inside C++20 modules: test units keep `module truss;` and include
+  `<doctest/doctest.h>` in the global module fragment; the main TU (`tests/unit/main.cpp`)
+  is a plain (non-module) TU defining `DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN`. TEST_CASE
+  registrars in module implementation units register into the main TU's registry at
+  static-init time — same mechanics Catch2 used. Macros map 1:1 (TEST_CASE, CHECK,
+  CHECK_FALSE, REQUIRE, REQUIRE_FALSE, INFO, WARN).
+- **Inline member functions defined in a module *interface* are emitted once into the
+  interface unit's object** — implementation units reference them, they are NOT re-emitted
+  locally. So any link of the implementation-unit objects must also link `api.o`/
+  `impl.o`/`truss.o` (setup.sh unit links them from the bootstrap obj dir).
+- `-stdlib=libc++` must appear on the **link** line too, not just compiles — clang
+  defaults to libstdc++ at link time otherwise (undefined `std::__1::` refs).
+- ASan/UBSan coexist with the module path: BMIs are stdlib/codegen-agnostic, so the
+  bootstrap BMIs are shared and only the implementation/test TUs are recompiled with
+  `-fsanitize=address,undefined -fno-sanitize-recover=all`; vendored samurai stays
+  unsanitized (shim's `__lsan_default_options` suppresses its leak noise).

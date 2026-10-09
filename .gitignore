@@ -1,18 +1,13 @@
-# truss's own build artifacts
+# all generated output lives under build/ (setup.sh: bootstrap, unit, dist, docs)
 /build/
-/.xmake/
-/build-bootstrap/
 /compile_commands.json
 
-# self-hosted CLI binary (built by xmake target truss-cli)
+# self-hosted CLI binary (built by ./setup.sh build)
 /truss
 
 # example build scripts compiled in place
 /examples/**/truss
 /examples/**/build/
-
-# generated amalgamation (regenerate: just amalgam)
-/dist/
 
 # package lockfile churn (phase 5)
 truss.lock

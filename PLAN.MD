@@ -2,20 +2,21 @@
 
 > Build your C++ using C++. mate.h API style + xmake-class features + samurai backend.
 
-**Status (2026-10-09):** Phases 0–9 complete. `xmake f -m debug && xmake` builds
-`truss-mod` (BMI) + `libtruss.a` + `./truss`; `./bootstrap.sh` builds the same
-`libtruss.a` + BMI with plain clang++ (no xmake); truss builds itself (`./truss debug`
-self-host, incremental verified); Catch2 unit tests green (42 cases: glob, fs,
-proc, triple, flags, golden ninja manifest, module scanner/resolver, lockfile, fetch
-validation, usage-requirement propagation); `examples/hello`, `examples/shared`,
-`examples/modules` (primary + partition + impl unit), `examples/fetch` (git-tag
-header-only + sha256 tarball compiled lib, cached offline), `examples/conan` (conan 2
-graph → Interface target, zlib) and `examples/vcpkg` (manifest mode, generated
+**Status (2026-10-09):** Phases 0–10 complete. `./setup.sh build` bootstraps
+`libtruss.a` + BMIs with plain clang++ and compiles `./truss`; truss builds itself
+(`./truss debug` self-host, incremental verified); doctest unit tests green (49 cases:
+glob, fs, proc, triple, flags, golden ninja manifest, module scanner/resolver, lockfile,
+fetch validation, usage-requirement propagation, MSVC end-to-end); `examples/hello`,
+`examples/shared`, `examples/modules` (primary + partition + impl unit), `examples/fetch`
+(git-tag header-only + sha256 tarball compiled lib, cached offline), `examples/conan`
+(conan 2 graph → Interface target, zlib) and `examples/vcpkg` (manifest mode, generated
 `vcpkg.json`, zlib) build/run/test/rebuild incrementally through the vendored samurai;
-`examples/installed` (no vendored truss) builds against bootstrap-staged artifacts
-(`just installed`); `examples/amalgam` builds from the amalgamated single header
-`dist/truss_all.hpp` (`just amalgam`); shared libs + rpath + user tasks + `--target`
-verified; failing test fixtures exit 1. See AGENT.MD §10–16 for verified toolchain facts.
+`examples/installed` (no vendored truss) builds against staged artifacts
+(`./setup.sh installed`); `examples/amalgam` builds from the amalgamated single header
+`build/dist/truss_all.hpp` (`./setup.sh amalgam`); shared libs + rpath + user tasks +
+`--target` verified; MSVC-family flag mapping + COFF emitter verified via clang-cl
+cross-build; failing test fixtures exit 1. See AGENT.MD §10–17 for verified toolchain
+facts.
 
 ## 0. Decisions (confirmed with user)
 
@@ -346,6 +347,26 @@ truss. ✅
    front-page user manual; `examples/` covers hello, shared, modules, fetch, conan,
    vcpkg, installed, amalgam)
 4. Benchmarks: clean + incremental build times vs xmake on a fixture. ⏳ (open)
+
+### Phase 11 — Hardening, toolchain Config, API ergonomics (planned)
+
+0. Repo consolidation: single `setup.sh` entry point (replaces justfile + bootstrap.sh +
+   xmake.lua); doctest (MIT, vendored) replaces Catch2; all generated output under
+   `build/` (`build/bootstrap`, `build/dist`, `build/docs`). ✅
+1. Scrape pipe composition (`with_*` adapters + `operator|`) — builder chaining only.
+2. `Target& harden(Hardening)` — Light/Medium/Max tiers: GCC/Clang
+   (`-fstack-protector-strong`, var-init pattern, cf-protection/stack-clash x86-64-gated,
+   relro/now/noexecstack links) + MSVC (`/NXCOMPAT /DYNAMICBASE`, `/guard:cf`,
+   `/sdl /CETCOMPAT`); libc++ hardening mode tiered by stdlib.
+3. `Config` + `proj.configure(conf)` — `compiler()/linker()` (name or path), `stdlib()`
+   (`StdLib` enum), `toolchain()` (`Toolchain` enum: LLVM/GCC expands compiler+stdlib+ar);
+   `TargetTriple` gains `stdlib`; project-wide default, `cross_target()` overrides.
+4. `Result<Target&>` for `add_subdirectory`/`conan`/`vcpkg` (no raw pointers);
+   `conan({"zlib/1.3.1", ...})` list overload generating a `conanfile.txt`.
+5. Build hooks: `proj.pre_build(fn)` / `proj.post_build(fn)` (ordered, error aborts);
+   named tasks stay manual `./truss <name>`.
+6. Doxygen reference (`./setup.sh docs` → `build/docs/`), `///` on the public API;
+   README stays the user guide.
 
 ## 6. Risks & mitigations
 

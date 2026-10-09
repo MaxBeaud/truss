@@ -3,7 +3,7 @@
  * lld-link links a freestanding PE (no Windows CRT on this Linux box, so the
  * exe is produced but never run). Skips cleanly when the tools are absent. */
 module;
-#include <catch2/catch_test_macros.hpp>
+#include <doctest/doctest.h>
 
 #include <chrono>
 #include <filesystem>

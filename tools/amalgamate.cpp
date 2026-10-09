@@ -1,9 +1,9 @@
-// tools/amalgamate — generate dist/truss_all.hpp: a mate.h-style single-header
+// tools/amalgamate — generate build/dist/truss_all.hpp: a mate.h-style single-header
 // drop-in of truss (library + vendored samurai + shim in one C++ TU).
 //
 // Build & run from the repo root:
 //   clang++ -std=c++26 tools/amalgamate.cpp -o build-bootstrap/amalgamate
-//   ./build-bootstrap/amalgamate            # writes dist/truss_all.hpp
+//   ./build/bootstrap/amalgamate            # writes build/dist/truss_all.hpp
 //
 // The tool concatenates, in order: vendored samurai (C sources, already
 // C++-compatible via the truss patches), the samu shim, then truss's module
@@ -145,10 +145,10 @@ int main() {
         process(f);
 
     std::error_code ec;
-    std::filesystem::create_directories(root / "dist", ec);
-    std::ofstream out(root / "dist/truss_all.hpp", std::ios::binary);
+    std::filesystem::create_directories(root / "build/dist", ec);
+    std::ofstream out(root / "build/dist/truss_all.hpp", std::ios::binary);
     if (!out) {
-        std::fprintf(stderr, "amalgamate: cannot write dist/truss_all.hpp\n");
+        std::fprintf(stderr, "amalgamate: cannot write build/dist/truss_all.hpp\n");
         return 1;
     }
     out << "// truss_all.hpp — amalgamated truss (library + samurai + shim).\n"
@@ -159,7 +159,7 @@ int main() {
     for (const auto& inc : system_includes)
         out << inc << '\n';
     out << '\n' << body << "#endif // TRUSS_ALL_HPP\n";
-    std::printf("amalgamate: wrote dist/truss_all.hpp (%zu bytes)\n",
+    std::printf("amalgamate: wrote build/dist/truss_all.hpp (%zu bytes)\n",
                 body.size() + system_includes.size() * 30);
     return 0;
 }
