@@ -53,7 +53,7 @@ ninja manifest that samurai then executes incrementally.
   - [Sources & globbing](#sources--globbing)
   - [Usage requirements & propagation](#usage-requirements--propagation)
   - [Compiler options](#compiler-options)
-  - [Custom tasks](#custom-tasks)
+  - [Hardening](#hardening)
   - [Custom tasks](#custom-tasks)
 - [C++ modules](#c-modules)
 - [Dependencies](#dependencies)
@@ -203,6 +203,7 @@ This is what makes package managers ergonomic: `conan()`/`vcpkg()` return an
 | `optimization(...)` | `None, O1, O2, Size, O3` | `-O0` debug, `-O2` release |
 | `sanitizer(...)` | `None, Address, Ub, All` | off |
 | `lto(...)` | `None, Full, Thin` | off |
+| `harden(...)` | `None, Light, Medium, Max` | **Light** (see below) |
 | `pic(bool)` | position-independent code | on for libs |
 | `modules_mode(...)` | `Off, Auto` (`Manual` reserved) | `Auto` |
 | `cross_target(triple)` | see [Cross-compiling](#cross-compiling--msvc) | host |
@@ -213,6 +214,25 @@ This is what makes package managers ergonomic: `conan()`/`vcpkg()` return an
 `Default` enum values always resolve per mode (e.g. `DebugInfo::Default` →
 `Full` in debug, `None` in release), so a single build script does the right
 thing in both modes.
+
+### Hardening
+
+Every target gets truss's **default hardening stack** (`Hardening::Light`)
+unless you opt out with `harden(Hardening::None)`:
+
+| Tier | GCC / Clang | MSVC |
+|---|---|---|
+| `Light` (default) | `-fstack-protector-strong`; link `-Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack -Wl,--as-needed` | `/NXCOMPAT /DYNAMICBASE` |
+| `Medium` | + `-ftrivial-auto-var-init=pattern`, `-fcf-protection=full -fstack-clash-protection` (x86-64), libc++ `_LIBCPP_HARDENING_MODE_HARDENED` | + `/guard:cf` (compile + link, x86-64) |
+| `Max` | Medium + libc++ `_LIBCPP_HARDENING_MODE_DEBUG` + `-D_GLIBCXX_ASSERTIONS` | + `/sdl`, `/CETCOMPAT` (x86-64) |
+
+The stdlib hardening modes are emitted as defines, so they apply whichever
+stdlib you link (each stdlib ignores the other's macro).
+
+```cpp
+proj.add_executable("app").sources_in("src")
+   .harden(truss::Hardening::Max);   // maximum paranoia
+```
 
 ### Custom tasks
 

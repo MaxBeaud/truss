@@ -42,6 +42,34 @@ constexpr std::array<std::string_view, 5> kSanitizerLinkFlags {
 constexpr std::array<std::string_view, 4> kLtoCompileFlags {"", "", "-flto=full", "-flto=thin"};
 constexpr std::array<std::string_view, 4> kLtoLinkFlags {"", "", "-flto=full", "-flto=thin"};
 
+/* Hardening tiers (index = resolved Hardening: None, Light, Medium, Max).
+ * Default resolves to Light — truss's default hardening stack.
+ * - Light: stack protector + hardened link (relro/full-bind/non-exec stack).
+ * - Medium: + pattern-filled uninitialised locals, CFI + stack-clash probing
+ *   (x86-64 only — clang errors elsewhere), libc++ hardened hardening mode.
+ * - Max: Medium + libc++ debug hardening mode + libstdc++ assertions.
+ * The stdlib defines are C++-only and inert against the other stdlib, so they
+ * are emitted without knowing which one the target links. */
+constexpr std::array<std::string_view, 5> kHardeningCompileFlags {
+    "", "", "-fstack-protector-strong",
+    "-fstack-protector-strong -ftrivial-auto-var-init=pattern",
+    "-fstack-protector-strong -ftrivial-auto-var-init=pattern",
+};
+constexpr std::array<std::string_view, 5> kHardeningArchCompileFlags {
+    "", "", "", "-fcf-protection=full -fstack-clash-protection",
+    "-fcf-protection=full -fstack-clash-protection",
+};
+constexpr std::array<std::string_view, 5> kHardeningStdlibDefines {
+    "", "", "",
+    "-D_LIBCPP_HARDENING_MODE=_LIBCPP_HARDENING_MODE_HARDENED",
+    "-D_LIBCPP_HARDENING_MODE=_LIBCPP_HARDENING_MODE_DEBUG -D_GLIBCXX_ASSERTIONS",
+};
+constexpr std::array<std::string_view, 5> kHardeningLinkFlags {
+    "", "", "-Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack -Wl,--as-needed",
+    "-Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack -Wl,--as-needed",
+    "-Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack -Wl,--as-needed",
+};
+
 /* MSVC tables (validated against the clang-cl driver, which truss requires for
  * MSVC targets — see build.cpp; the flags are also accepted by cl.exe).
  * Notes: no C++11 mode exists (maps to C++14); C++23/26 spell /std:c++latest;
@@ -72,6 +100,14 @@ constexpr std::array<std::string_view, 5> kSanitizerLinkerFlagsMsvc {
 };
 constexpr std::array<std::string_view, 4> kLtoCompileFlagsMsvc {"", "", "/GL", "/GL"};
 constexpr std::array<std::string_view, 4> kLtoLinkerFlagsMsvc {"", "", "/LTCG", "/LTCG"};
+/* MSVC hardening: Light = ASLR + non-exec stack (linker, any arch);
+ * Medium/Max add CFI (/guard:cf compile+link) and /sdl — /guard:cf and
+ * /CETCOMPAT are x86-64, so that half is arch-gated like GCC/Clang's. */
+constexpr std::string_view kHardeningCompileCfMsvc {"/guard:cf"};
+constexpr std::string_view kHardeningCompileSdlMsvc {"/sdl"};
+constexpr std::string_view kHardeningLinkBaseMsvc {"/NXCOMPAT /DYNAMICBASE"};
+constexpr std::string_view kHardeningLinkCfMsvc {"/guard:cf"};
+constexpr std::string_view kHardeningLinkCetMsvc {"/CETCOMPAT"};
 
 constexpr std::string_view os_name(Os os) {
     switch (os) {
@@ -128,9 +164,15 @@ DebugInfo resolve_debug(BuildMode mode, DebugInfo debug) {
                : debug;
 }
 
+Hardening resolve_hardening(Hardening h) {
+    /* the default hardening stack is Light */
+    return h == Hardening::Default ? Hardening::Light : h;
+}
+
 Result<FlagSet> build_flags(const TargetTriple& triple, BuildMode mode,
                             CppStandard std_opt, Warnings warnings, DebugInfo debug,
                             Optimization optimization, Sanitizer sanitizer, Lto lto,
+                            Hardening hardening,
                             bool pic, std::span<const std::string> defines,
                             std::span<const std::string> includes,
                             std::string_view user_flags) {
@@ -163,6 +205,21 @@ Result<FlagSet> build_flags(const TargetTriple& triple, BuildMode mode,
                   : kSanitizerCompileFlags[static_cast<std::size_t>(sanitizer)]);
     add_both(msvc ? kLtoCompileFlagsMsvc[static_cast<std::size_t>(lto)]
                   : kLtoCompileFlags[static_cast<std::size_t>(lto)]);
+
+    const Hardening hard = resolve_hardening(hardening);
+    const auto hi = static_cast<std::size_t>(hard);
+    const bool x64 = triple.arch == Arch::X64;
+    if (msvc) {
+        if (hi >= static_cast<std::size_t>(Hardening::Medium) && x64)
+            add_both(kHardeningCompileCfMsvc);
+        if (hard == Hardening::Max) add_both(kHardeningCompileSdlMsvc);
+    } else {
+        add_both(kHardeningCompileFlags[hi]);
+        if (x64) add_both(kHardeningArchCompileFlags[hi]);
+        /* stdlib hardening modes are C++-only defines (inert on the other stdlib) */
+        if (hi >= static_cast<std::size_t>(Hardening::Medium))
+            add(fs.compile, kHardeningStdlibDefines[hi]);
+    }
     if (pic && !msvc) add_both("-fPIC"); /* Windows has no position-independent code */
     if (mode == BuildMode::Release) add_both(msvc ? "/DNDEBUG" : "-DNDEBUG");
 
@@ -174,7 +231,7 @@ Result<FlagSet> build_flags(const TargetTriple& triple, BuildMode mode,
 }
 
 Result<LinkFlags> link_flags(const TargetTriple& triple, BuildMode mode, DebugInfo debug,
-                             Sanitizer sanitizer, Lto lto,
+                             Sanitizer sanitizer, Lto lto, Hardening hardening,
                              std::span<const std::string> link_paths,
                              std::span<const std::string> libs,
                              std::span<const std::string> frameworks,
@@ -186,11 +243,18 @@ Result<LinkFlags> link_flags(const TargetTriple& triple, BuildMode mode, DebugIn
     LinkFlags lf;
     if (!triple.linker.empty())
         add(lf.driver, "-fuse-ld=" + triple.linker);
+    const Hardening hard = resolve_hardening(hardening);
+    const auto hi = static_cast<std::size_t>(hard);
     if (triple.family == CompilerFamily::Msvc) {
         /* driver-side flags go before `/link`, linker-side after it */
         add(lf.driver, kSanitizerLinkDriverFlagsMsvc[static_cast<std::size_t>(sanitizer)]);
         add(lf.linker, kSanitizerLinkerFlagsMsvc[static_cast<std::size_t>(sanitizer)]);
         add(lf.linker, kLtoLinkerFlagsMsvc[static_cast<std::size_t>(lto)]);
+        if (hard != Hardening::None) add(lf.linker, kHardeningLinkBaseMsvc);
+        if (triple.arch == Arch::X64) {
+            if (hard >= Hardening::Medium) add(lf.linker, kHardeningLinkCfMsvc);
+            if (hard == Hardening::Max) add(lf.linker, kHardeningLinkCetMsvc);
+        }
         if (resolve_debug(mode, debug) != DebugInfo::None)
             add(lf.linker, "/DEBUG");
         for (const auto& p : link_paths) add(lf.linker, "/LIBPATH:" + p);
@@ -202,6 +266,7 @@ Result<LinkFlags> link_flags(const TargetTriple& triple, BuildMode mode, DebugIn
     } else {
         add(lf.driver, kSanitizerLinkFlags[static_cast<std::size_t>(sanitizer)]);
         add(lf.driver, kLtoLinkFlags[static_cast<std::size_t>(lto)]);
+        add(lf.driver, kHardeningLinkFlags[hi]);
         for (const auto& p : link_paths) add(lf.linker, "-L\"" + p + "\"");
         for (const auto& p : framework_paths) add(lf.linker, "-F\"" + p + "\"");
         for (const auto& l : libs) add(lf.linker, "-l" + l);

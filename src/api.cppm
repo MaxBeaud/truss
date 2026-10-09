@@ -37,6 +37,9 @@ enum class DebugInfo { Default = 0, None, Minimal, Medium, Full };
 enum class Optimization { Default = 0, None, O1, O2, Size, O3 };
 enum class Sanitizer { Default = 0, None, Address, Ub, All };
 enum class Lto { Default = 0, None, Full, Thin };
+/* Compiler/linker hardening tiers. Default resolves to Light (truss's default
+ * hardening stack); None opts out explicitly. */
+enum class Hardening { Default = 0, None, Light, Medium, Max };
 
 /* How .cppm sources in a user target get compiled and wired.
  * Auto (the default): conservative v0.1 mode — every .cppm becomes a BMI edge and
@@ -229,6 +232,7 @@ public:
     Target& optimization(Optimization o) { optimization_ = o; return *this; }
     Target& sanitizer(Sanitizer s) { sanitizer_ = s; return *this; }
     Target& lto(Lto l) { lto_ = l; return *this; }
+    Target& harden(Hardening h) { hardening_ = h; return *this; }
     Target& modules_mode(ModulesMode m) { modules_ = m; return *this; }
     Target& pic(bool v) { pic_ = v; return *this; }
     Target& cross_target(TargetTriple t) { triple_ = t; return *this; }
@@ -254,6 +258,7 @@ public:
     Optimization optimization() const { return optimization_; }
     Sanitizer sanitizer() const { return sanitizer_; }
     Lto lto() const { return lto_; }
+    Hardening hardening() const { return hardening_; }
     ModulesMode modules_mode() const { return modules_; }
     bool pic() const { return pic_; }
     const std::optional<TargetTriple>& triple_override() const { return triple_; }
@@ -274,6 +279,7 @@ private:
     Optimization optimization_ {};
     Sanitizer sanitizer_ {};
     Lto lto_ {};
+    Hardening hardening_ {};
     ModulesMode modules_ {};
     bool pic_ {false};
     bool test_ {false};

@@ -93,16 +93,17 @@ struct LinkFlags {
 /* DebugInfo::Default resolves to Full in debug mode, None otherwise. */
 DebugInfo resolve_debug(BuildMode mode, DebugInfo debug);
 
-/* Returns std/warnings/debug/optimization/sanitizer/lto/pic/defines flags for
- * GCC, Clang, and MSVC (cl.exe / clang-cl flag syntax). */
+/* Returns std/warnings/debug/optimization/sanitizer/lto/hardening/pic/defines
+ * flags for GCC, Clang, and MSVC (cl.exe / clang-cl flag syntax). */
 Result<FlagSet> build_flags(const TargetTriple& triple, BuildMode mode,
                             CppStandard std, Warnings warnings, DebugInfo debug,
                             Optimization optimization, Sanitizer sanitizer, Lto lto,
+                            Hardening hardening,
                             bool pic, std::span<const std::string> defines,
                             std::span<const std::string> includes,
                             std::string_view user_flags);
 Result<LinkFlags> link_flags(const TargetTriple& triple, BuildMode mode, DebugInfo debug,
-                             Sanitizer sanitizer, Lto lto,
+                             Sanitizer sanitizer, Lto lto, Hardening hardening,
                              std::span<const std::string> link_paths,
                              std::span<const std::string> libs,
                              std::span<const std::string> frameworks,

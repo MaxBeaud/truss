@@ -350,3 +350,12 @@ Read `PLAN.MD` first. This file is the rulebook for any agent/human modifying th
   bootstrap BMIs are shared and only the implementation/test TUs are recompiled with
   `-fsanitize=address,undefined -fno-sanitize-recover=all`; vendored samurai stays
   unsanitized (shim's `__lsan_default_options` suppresses its leak noise).
+- Hardening tiers (`harden(Hardening)`): `Default` resolves to **Light**, so every
+  target gets `-fstack-protector-strong` + `-Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack
+  -Wl,--as-needed` unless `harden(None)`. Golden flag tests pass `Hardening::None` to
+  keep the unhardened baselines. `-fcf-protection`/`-fstack-clash-protection` (GCC/
+  Clang) and `/guard:cf`//`/CETCOMPAT` (MSVC) are x86-64-only — gated on
+  `triple.arch == X64`; `/sdl` and `/NXCOMPAT /DYNAMICBASE` are arch-independent.
+  libc++/libstdc++ hardening modes are emitted as plain defines
+  (`_LIBCPP_HARDENING_MODE=…`, `_GLIBCXX_ASSERTIONS`) — inert against the other
+  stdlib, so no stdlib detection is needed (compile-side only, never `compile_c`).

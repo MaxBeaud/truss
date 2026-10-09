@@ -301,7 +301,7 @@ Result<void> emit_manifest(const Project& proj, const std::vector<ResolvedTarget
 
         auto cflags = detail::build_flags(r.triple, proj.mode(), t.cpp_standard(), t.warnings(),
                                           t.debug_info(), t.optimization(), t.sanitizer(), t.lto(),
-                                          pic, defines, usage.includes, t.flags());
+                                          t.hardening(), pic, defines, usage.includes, t.flags());
         if (!cflags)
             return std::unexpected(cflags.error());
 
@@ -436,7 +436,8 @@ Result<void> emit_manifest(const Project& proj, const std::vector<ResolvedTarget
             std::vector<std::string> link_libs = t.link_libs();
             link_libs.insert(link_libs.end(), usage.link_libs.begin(), usage.link_libs.end());
             auto link_res = detail::link_flags(r.triple, proj.mode(), t.debug_info(), t.sanitizer(),
-                                               t.lto(), link_paths, link_libs, t.frameworks(),
+                                               t.lto(), t.hardening(), link_paths, link_libs,
+                                               t.frameworks(),
                                                t.framework_paths(), t.linker_flags());
             if (!link_res)
                 return std::unexpected(link_res.error());
