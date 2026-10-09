@@ -2,7 +2,7 @@
 
 > Build your C++ using C++. mate.h API style + xmake-class features + samurai backend.
 
-**Status (2026-10-09):** Phases 0–10 complete. `./setup.sh build` bootstraps
+**Status (2026-10-09):** Phases 0–11 complete (benchmarks still open). `./setup.sh build` bootstraps
 `libtruss.a` + BMIs with plain clang++ and compiles `./truss`; truss builds itself
 (`./truss debug` self-host, incremental verified); doctest unit tests green (49 cases:
 glob, fs, proc, triple, flags, golden ninja manifest, module scanner/resolver, lockfile,
@@ -124,19 +124,18 @@ public:
 }
 ```
 
-Builder + pipe composition (both styles, same semantics):
+Builder chaining (pipe composition was part of the original design but was
+removed in phase 11 — one obvious way to configure a target):
 
 ```cpp
-// chaining (mate-style fluent)
 auto& core = proj.add_static_library("core")
-                 .include_dirs("include")
-                 .sources_in("src/core");
+                   .include_dirs("include")
+                   .sources_in("src/core");
 
-// pipe (free-function adapters, operator| on builders)
 auto& app = proj.add_executable("app")
-              | truss::with_sources("src/app/**.cpp")
-              | truss::with_depends_on(core)
-              | truss::with_cpp_standard(truss::CppStandard::cpp23);
+                  .sources("src/app/**.cpp")
+                  .depends_on(core)
+                  .cpp_standard(truss::CppStandard::Cpp23);
 ```
 
 Key builder methods (on every target): `sources(...)`, `sources_in(dir)`, `remove_source(...)`,
@@ -348,25 +347,27 @@ truss. ✅
    vcpkg, installed, amalgam)
 4. Benchmarks: clean + incremental build times vs xmake on a fixture. ⏳ (open)
 
-### Phase 11 — Hardening, toolchain Config, API ergonomics (planned)
+### Phase 11 — Hardening, toolchain Config, API ergonomics ✅
 
 0. Repo consolidation: single `setup.sh` entry point (replaces justfile + bootstrap.sh +
    xmake.lua); doctest (MIT, vendored) replaces Catch2; all generated output under
    `build/` (`build/bootstrap`, `build/dist`, `build/docs`). ✅
-1. Scrape pipe composition (`with_*` adapters + `operator|`) — builder chaining only.
+1. Scrape pipe composition (`with_*` adapters + `operator|`) — builder chaining only. ✅
 2. `Target& harden(Hardening)` — Light/Medium/Max tiers: GCC/Clang
    (`-fstack-protector-strong`, var-init pattern, cf-protection/stack-clash x86-64-gated,
    relro/now/noexecstack links) + MSVC (`/NXCOMPAT /DYNAMICBASE`, `/guard:cf`,
-   `/sdl /CETCOMPAT`); libc++ hardening mode tiered by stdlib.
+   `/sdl /CETCOMPAT`); libc++ hardening mode tiered by stdlib. `Default` = Light, so
+   every target gets the default hardening stack. ✅
 3. `Config` + `proj.configure(conf)` — `compiler()/linker()` (name or path), `stdlib()`
    (`StdLib` enum), `toolchain()` (`Toolchain` enum: LLVM/GCC expands compiler+stdlib+ar);
-   `TargetTriple` gains `stdlib`; project-wide default, `cross_target()` overrides.
-4. `Result<Target&>` for `add_subdirectory`/`conan`/`vcpkg` (no raw pointers);
-   `conan({"zlib/1.3.1", ...})` list overload generating a `conanfile.txt`.
+   `TargetTriple` gains `stdlib`; project-wide default, `cross_target()` overrides. ✅
+4. `Result<TargetRef>` for `add_subdirectory`/`conan`/`vcpkg` (std::expected can't hold
+   `T&`; TargetRef is a never-null handle); `conan({"zlib/1.3.1", ...})` list overload
+   generating a `conanfile.txt`. ✅
 5. Build hooks: `proj.pre_build(fn)` / `proj.post_build(fn)` (ordered, error aborts);
-   named tasks stay manual `./truss <name>`.
+   named tasks stay manual `./truss <name>`. ✅
 6. Doxygen reference (`./setup.sh docs` → `build/docs/`), `///` on the public API;
-   README stays the user guide.
+   README stays the user guide. ✅
 
 ## 6. Risks & mitigations
 

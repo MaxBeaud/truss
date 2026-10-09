@@ -478,7 +478,7 @@ examples`, `./setup.sh installed`, `./setup.sh amalgam`, `./setup.sh install
 
 ## Status & support matrix
 
-v0.1.0 — all ten planned phases complete except benchmarks.
+v0.1.0 — all eleven planned phases complete except benchmarks.
 
 | Feature | GCC | Clang | MSVC (cl.exe / clang-cl) |
 |---|---|---|---|
