@@ -2,17 +2,19 @@
 
 > Build your C++ using C++. mate.h API style + xmake-class features + samurai backend.
 
-**Status (2026-10-09):** Phases 0–7 complete. `xmake f -m debug && xmake` builds
+**Status (2026-10-09):** Phases 0–8 complete. `xmake f -m debug && xmake` builds
 `truss-mod` (BMI) + `libtruss.a` + `./truss`; `./bootstrap.sh` builds the same
-`libtruss.a` + BMI with plain clang++ (no xmake); Catch2 unit tests green (40 cases: glob, fs,
+`libtruss.a` + BMI with plain clang++ (no xmake); truss builds itself (`./truss debug`
+self-host, incremental verified); Catch2 unit tests green (42 cases: glob, fs,
 proc, triple, flags, golden ninja manifest, module scanner/resolver, lockfile, fetch
 validation, usage-requirement propagation); `examples/hello`, `examples/shared`,
 `examples/modules` (primary + partition + impl unit), `examples/fetch` (git-tag
 header-only + sha256 tarball compiled lib, cached offline), `examples/conan` (conan 2
 graph → Interface target, zlib) and `examples/vcpkg` (manifest mode, generated
 `vcpkg.json`, zlib) build/run/test/rebuild incrementally through the vendored samurai;
-shared libs + rpath + user tasks + `--target` verified; failing test fixtures exit 1.
-See AGENT.MD §10–13 for verified toolchain facts.
+`examples/installed` (no vendored truss) builds against bootstrap-staged artifacts
+(`just installed`); shared libs + rpath + user tasks + `--target` verified; failing test
+fixtures exit 1. See AGENT.MD §10–15 for verified toolchain facts.
 
 ## 0. Decisions (confirmed with user)
 
@@ -310,15 +312,16 @@ re-builds offline from cache.
 **Done when:** a clean machine path (git clone → `./bootstrap.sh` → example builds) works
 without xmake installed. ✅
 
-### Phase 8 — Self-hosting + installed-tool flow (2 days)
+### Phase 8 — Self-hosting + installed-tool flow (2 days) ✅
 1. Dogfood: truss builds truss (`truss.cpp` at repo root) using truss's own module
-   support; xmake remains only the bootstrap fallback.
+   support; xmake remains only the bootstrap fallback. ✅ (`samu` + `truss-lib` +
+   `truss` targets; incremental self-rebuild verified)
 2. Installed-tool flow: `truss` compiled on the user's machine (no prebuilt binaries);
    truss compiles a project's `truss.cpp` against the locally staged BMI — fixture
-   `examples/installed` (contains only `truss.cpp`).
+   `examples/installed` (contains only `truss.cpp`). ✅ (`just installed`)
 
 **Done when:** `examples/installed` (no vendored truss source) builds against an installed
-truss.
+truss. ✅
 
 ### Phase 9 — Amalgamation (1 day)
 1. `tools/amalgamate` → `dist/truss_all.hpp`: mate.h-style single-header drop-in

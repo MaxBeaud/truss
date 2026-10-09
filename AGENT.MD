@@ -232,3 +232,30 @@ Read `PLAN.MD` first. This file is the rulebook for any agent/human modifying th
   match the stdlib used to compile the consumer TU.
 - samurai C files compile with `-std=gnu17 -w -D_DEFAULT_SOURCE -D_POSIX_C_SOURCE=200809L`;
   `samu.c` excluded (shim provides main).
+
+## 15. Verified toolchain facts (learned during phase 8 — self-hosting + installed tool)
+
+- **Brace-list API footgun**: `.defines({"a","b"})` bound to the single-`string_view`
+  overload (the `StringRange R&&` template can't deduce from a braced-init-list, and
+  libc++ C++26 accepts `string_view{"a","b"}` producing a garbage-sized view →
+  `std::bad_alloc`). Fixed with explicit `std::initializer_list<std::string_view>`
+  overloads on all 7 paired builder methods (sources/include_dirs/defines/link_libs/
+  link_paths/link_frameworks/framework_paths); guarded by a unit test.
+- **Transitive static-lib linking**: `dep_outputs` now walks `depends_on` transitively
+  (pre-order, deduped via a seen-set) so exe -> libA -> libB links in GNU ld order
+  (direct deps first, their deps to the right). Regression test:
+  `usage_test.cpp "link: transitive static-lib deps are linked in order"`.
+- **samurai in-process re-entry bug**: the shim runs multiple builds per process, but
+  upstream `logclose()`/`depsclose()` fclose their FILE* without NULLing it → the next
+  `loginit`/`depsinit` double-frees. Vendored one-line patches (`/* truss patch */`),
+  recorded in `vendor/samurai/TRUSS-VENDOR.txt`.
+- Self-host (`truss.cpp` at repo root): targets `samu` (C, `remove_source` drops
+  `samu.c`), `truss-lib` (`sources_in("src")` picks up .cppm/.cpp/.c), `truss`
+  (this file; `import truss;` resolved cross-target via `collect_bmis` + depends_on).
+  Must set `.cpp_standard(CppStandard::Cpp26)` explicitly — `Default` maps to c++23.
+  The self-build uses clang's default stdlib (libstdc++) consistently; the xmake build
+  uses libc++ — the two graphs are independent and each is internally consistent.
+- Installed-tool flow: `bootstrap.sh --install <prefix>` stages
+  `<prefix>/lib/truss/{libtruss.a,truss.pcm,truss_api.pcm}`; a project compiles its
+  script with both `-fmodule-file` flags (§14) — fixture `examples/installed`, recipe
+  `just installed`.

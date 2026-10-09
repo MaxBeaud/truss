@@ -153,6 +153,7 @@ logclose(void)
 	if (ferror(logfile))
 		fatal("build log write failed");
 	fclose(logfile);
+	logfile = NULL; /* truss patch: the shim runs multiple builds in-process */
 }
 
 void

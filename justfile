@@ -10,6 +10,18 @@ build mode="debug":
 bootstrap:
     ./bootstrap.sh
 
+# Installed-tool flow: bootstrap + stage, compile the fixture's build script
+# against the staged BMI/libtruss.a, run it end-to-end.
+installed:
+    ./bootstrap.sh --install {{ROOT}}/build-bootstrap/prefix
+    clang++ -std=c++26 -stdlib=libc++ \
+        -fmodule-file=truss={{ROOT}}/build-bootstrap/prefix/lib/truss/truss.pcm \
+        -fmodule-file=truss:api={{ROOT}}/build-bootstrap/prefix/lib/truss/truss_api.pcm \
+        {{ROOT}}/examples/installed/truss.cpp \
+        {{ROOT}}/build-bootstrap/prefix/lib/truss/libtruss.a \
+        -o {{ROOT}}/examples/installed/truss
+    cd {{ROOT}}/examples/installed && ./truss test
+
 # Build the example's build script, then run it end-to-end.
 hello: build
     xmake -y hello-truss
@@ -26,6 +38,7 @@ test: build
     cd {{ROOT}}/examples/fetch && ./truss test
     cd {{ROOT}}/examples/conan && ./truss test
     cd {{ROOT}}/examples/vcpkg && VCPKG_ROOT={{home_directory()}}/vcpkg ./truss test
+    just installed
 
 clean:
     rm -rf {{ROOT}}/build/ {{ROOT}}/.xmake/
@@ -35,6 +48,7 @@ clean:
     cd {{ROOT}}/examples/fetch && rm -rf build/ truss truss.lock
     cd {{ROOT}}/examples/conan && rm -rf build/ truss conan.lock
     cd {{ROOT}}/examples/vcpkg && rm -rf build/ truss vcpkg.json
+    cd {{ROOT}}/examples/installed && rm -rf build/ truss
 
 add-packages:
     #!/usr/bin/env bash

@@ -9,5 +9,9 @@ How truss uses it:
     (its main() is replaced by truss's own driver).
   - truss's driver lives in src/samu/shim.c and calls samurai's library entry
     points (graphinit/envinit/parse/loginit/depsinit/buildadd/build/...).
-  - Upstream sources are NOT modified. If you update this vendored copy, re-check
-    that shim.c still matches the driver logic at the end of samu.c's main().
+  - Upstream sources are unmodified EXCEPT two one-line fixes (grep "truss patch"):
+    logclose()/depsclose() now NULL their FILE* after fclose. Upstream never
+    re-enters loginit/depsinit in one process (samu.c exits after logclose), but
+    truss's shim runs multiple builds in-process, which double-freed the logs.
+  - If you update this vendored copy, re-check that shim.c still matches the
+    driver logic at the end of samu.c's main(), and re-apply the truss patches.

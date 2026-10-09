@@ -10,6 +10,7 @@ module;
 #include <expected>
 #include <filesystem>
 #include <functional>
+#include <initializer_list>
 #include <memory>
 #include <optional>
 #include <ranges>
@@ -108,6 +109,11 @@ public:
         source_patterns_.emplace_back(pattern);
         return *this;
     }
+    Target& sources(std::initializer_list<std::string_view> patterns) {
+        for (const auto& p : patterns)
+            source_patterns_.emplace_back(p);
+        return *this;
+    }
     template <StringRange R>
     Target& sources(R&& patterns) {
         for (const auto& p : patterns)
@@ -124,6 +130,11 @@ public:
         include_dirs_.emplace_back(dir);
         return *this;
     }
+    Target& include_dirs(std::initializer_list<std::string_view> dirs) {
+        for (const auto& d : dirs)
+            include_dirs_.emplace_back(d);
+        return *this;
+    }
     template <StringRange R>
     Target& include_dirs(R&& dirs) {
         for (const auto& d : dirs)
@@ -132,6 +143,11 @@ public:
     }
     Target& defines(std::string_view def) {
         defines_.emplace_back(def);
+        return *this;
+    }
+    Target& defines(std::initializer_list<std::string_view> defs) {
+        for (const auto& d : defs)
+            defines_.emplace_back(d);
         return *this;
     }
     template <StringRange R>
@@ -144,6 +160,11 @@ public:
         link_libs_.emplace_back(lib);
         return *this;
     }
+    Target& link_libs(std::initializer_list<std::string_view> libs) {
+        for (const auto& l : libs)
+            link_libs_.emplace_back(l);
+        return *this;
+    }
     template <StringRange R>
     Target& link_libs(R&& libs) {
         for (const auto& l : libs)
@@ -152,6 +173,11 @@ public:
     }
     Target& link_paths(std::string_view path) {
         link_paths_.emplace_back(path);
+        return *this;
+    }
+    Target& link_paths(std::initializer_list<std::string_view> paths) {
+        for (const auto& p : paths)
+            link_paths_.emplace_back(p);
         return *this;
     }
     template <StringRange R>
@@ -164,6 +190,11 @@ public:
         frameworks_.emplace_back(fw);
         return *this;
     }
+    Target& link_frameworks(std::initializer_list<std::string_view> fw) {
+        for (const auto& f : fw)
+            frameworks_.emplace_back(f);
+        return *this;
+    }
     template <StringRange R>
     Target& link_frameworks(R&& fw) {
         for (const auto& f : fw)
@@ -172,6 +203,11 @@ public:
     }
     Target& framework_paths(std::string_view path) {
         framework_paths_.emplace_back(path);
+        return *this;
+    }
+    Target& framework_paths(std::initializer_list<std::string_view> paths) {
+        for (const auto& p : paths)
+            framework_paths_.emplace_back(p);
         return *this;
     }
     template <StringRange R>

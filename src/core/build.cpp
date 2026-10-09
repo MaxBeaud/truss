@@ -7,6 +7,7 @@ module;
 #include <cstdlib>
 #include <expected>
 #include <filesystem>
+#include <functional>
 #include <map>
 #include <memory>
 #include <set>
@@ -313,22 +314,38 @@ Result<void> emit_manifest(const Project& proj, const std::vector<ResolvedTarget
             objects.push_back(obj);
         }
 
-        /* dependency outputs (static archives / shared libs) */
+        /* dependency outputs (static archives / shared libs), transitive via
+         * depends_on. Pre-order with dedupe gives GNU ld the right order:
+         * direct deps first, their deps to the right of the archives that
+         * need them. */
         std::vector<std::string> dep_outputs;
         bool has_shared_dep = false;
-        for (const Target* dep : t.deps()) {
-            const auto it = std::ranges::find(resolved, dep->name(), [](const ResolvedTarget& x) -> const std::string& { return x.target->name(); });
-            if (it == resolved.end())
-                return std::unexpected(Error {
-                    Error::Kind::Config,
-                    "target '" + t.name() + "' depends on unknown target '" + dep->name() + "'",
-                });
-            if (dep->kind() == TargetKind::Interface)
-                continue; /* header-only: no artifact to link */
-            dep_outputs.push_back(it->output);
-            if (dep->kind() == TargetKind::SharedLibrary)
-                has_shared_dep = true;
-        }
+        std::set<const Target*> dep_seen {&t};
+        std::function<Result<void>(const Target&)> add_dep_outputs =
+            [&](const Target& d) -> Result<void> {
+            for (const Target* dep : d.deps()) {
+                if (!dep_seen.insert(dep).second)
+                    continue;
+                if (dep->kind() == TargetKind::Interface)
+                    continue; /* header-only: no artifact to link */
+                const auto it = std::ranges::find(
+                    resolved, dep->name(),
+                    [](const ResolvedTarget& x) -> const std::string& { return x.target->name(); });
+                if (it == resolved.end())
+                    return std::unexpected(Error {
+                        Error::Kind::Config,
+                        "target '" + d.name() + "' depends on unknown target '" + dep->name() + "'",
+                    });
+                dep_outputs.push_back(it->output);
+                if (dep->kind() == TargetKind::SharedLibrary)
+                    has_shared_dep = true;
+                if (auto sub = add_dep_outputs(*dep); !sub)
+                    return std::unexpected(sub.error());
+            }
+            return {};
+        };
+        if (auto sub = add_dep_outputs(t); !sub)
+            return std::unexpected(sub.error());
 
         if (t.kind() == TargetKind::StaticLibrary) {
             NinjaWriter::Edge e;

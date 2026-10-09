@@ -293,6 +293,7 @@ depsclose(void)
 	if (ferror(depsfile))
 		fatal("deps log write failed");
 	fclose(depsfile);
+	depsfile = NULL; /* truss patch: the shim runs multiple builds in-process */
 }
 
 static struct nodearray *

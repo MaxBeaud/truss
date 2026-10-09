@@ -31,6 +31,46 @@ struct ScratchDir {
 
 } // namespace
 
+TEST_CASE("brace-list builder overloads collect every element") {
+    char prog[] = "truss-tests";
+    char* argv[] = {prog};
+    Project proj("overloads", 1, argv);
+    auto& t = proj.add_static_library("x")
+                  .defines({"TRUSS_OVL_A", "TRUSS_OVL_B"})
+                  .include_dirs({"i1", "i2"})
+                  .link_libs({"l1", "l2"})
+                  .link_paths({"p1", "p2"});
+    CHECK(t.defines().size() == 2);
+    CHECK(t.include_dirs().size() == 2);
+    CHECK(t.link_libs().size() == 2);
+    CHECK(t.link_paths().size() == 2);
+}
+
+TEST_CASE("link: transitive static-lib deps are linked in order") {
+    ScratchDir scratch {"transitive"};
+    char prog[] = "truss-tests";
+    char* argv[] = {prog};
+    Project proj("transitive", 1, argv);
+
+    REQUIRE(detail::write_file("b/leaf.cpp", "int leaf() { return 7; }\n").has_value());
+    auto& b = proj.add_static_library("b").sources("b/leaf.cpp");
+
+    REQUIRE(detail::write_file("a/use.cpp", "int leaf();\nint use_leaf() { return leaf(); }\n").has_value());
+    auto& a = proj.add_static_library("a").sources("a/use.cpp").depends_on(b);
+
+    /* exe depends only on 'a'; 'b' must still reach the link line (to the
+     * right of 'a') for ld to resolve a's reference */
+    REQUIRE(detail::write_file("app/main.cpp",
+                               "int use_leaf();\n"
+                               "int main() { return use_leaf() == 7 ? 0 : 1; }\n")
+                  .has_value());
+    proj.add_executable("app").sources("app/main.cpp").depends_on(a);
+
+    auto r = proj.build();
+    INFO((r ? "build ok" : r.error().message));
+    REQUIRE(r.has_value());
+}
+
 TEST_CASE("usage: Interface defines/includes propagate; user lib defines do not") {
     ScratchDir scratch {"propagate"};
     char prog[] = "truss-tests";

@@ -1,15 +1,37 @@
-// truss's own build script (self-hosting).
+// truss's own build script — truss building truss (PLAN.MD phase 8).
 //
-// truss building truss with C++ modules arrives with PLAN.MD phase 7; until
-// then this script validates the consumption path end to end: `import truss;`
-// compiled against libtruss.a, producing ./truss.
+// Build this script once (xmake `truss-cli` target, or bootstrap.sh artifacts),
+// then `./truss debug` produces build/debug/bin/<triple>/truss — truss compiled
+// by itself. Unit tests need Catch2 (an xmake package for now), so they are
+// not part of the self-host graph yet.
 import truss;
 
 int main(int argc, char** argv) {
     truss::Project proj("truss", argc, argv);
 
-    // Placeholder: real self-host target definitions go here once truss can
-    // compile module interface units for user projects (phase 4/7).
+    /* vendored samurai (C17): samu.c excluded, its main() is replaced by
+     * src/samu/shim.c; warnings off since upstream code is unmodified */
+    auto& samu = proj.add_static_library("samu")
+                     .warnings(truss::Warnings::None)
+                     .defines({"_DEFAULT_SOURCE", "_POSIX_C_SOURCE=200809L"})
+                     .sources_in("vendor/samurai")
+                     .remove_source("vendor/samurai/samu.c");
+
+    /* truss itself: module interface units (.cppm in src/), implementation
+     * units (.cpp in src/core/) and the samurai shim (.c in src/samu/) */
+    auto& lib = proj.add_static_library("truss-lib")
+                    .sources_in("src")
+                    .include_dirs({"vendor/samurai", "vendor"})
+                    .defines({"_DEFAULT_SOURCE", "_POSIX_C_SOURCE=200809L"})
+                    .cpp_standard(truss::CppStandard::Cpp26)
+                    .depends_on(samu);
+
+    /* the CLI: this very file, compiled against the truss module built above */
+    proj.add_executable("truss")
+        .sources("truss.cpp")
+        .cpp_standard(truss::CppStandard::Cpp26)
+        .depends_on(lib);
+
     auto result = proj.build();
     return result ? 0 : 1;
 }
