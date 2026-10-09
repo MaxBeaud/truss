@@ -61,6 +61,7 @@ ninja manifest that samurai then executes incrementally.
   - [fetch](#fetch)
   - [conan](#conan)
   - [vcpkg](#vcpkg)
+- [Toolchain selection (Config)](#toolchain-selection-config)
 - [Cross-compiling & MSVC](#cross-compiling--msvc)
 - [Output layout](#output-layout)
 - [Errors](#errors)
@@ -325,6 +326,29 @@ proj.add_executable("app").sources_in("src").depends_on(deps);
 
 Installs into `build/<mode>/vcpkg_installed/` and returns an `Interface`
 target. Requires `VCPKG_ROOT` pointing at a vcpkg tree.
+
+## Toolchain selection (Config)
+
+Pick the project-wide compiler, linker, and standard library with
+`truss::Config` — the compiler *family* is detected from the name:
+
+```cpp
+truss::Config conf;
+conf.compiler("clang++-21")       // name or path (family auto-detected)
+    .linker("mold")               // passed as -fuse-ld=
+    .stdlib(truss::StdLib::Libcxx);
+proj.configure(conf);
+
+// or one call: expands to clang++ + libc++ + llvm-ar
+proj.configure(truss::Config{}.toolchain(truss::Toolchain::LLVM));
+```
+
+`toolchain(Toolchain::GCC)` is the matching `g++` + libstdc++ + `ar` bundle;
+explicit calls after `toolchain()` override it. Selections are validated:
+`g++` + `libc++` and any `stdlib()` on MSVC targets are clear Config errors.
+`-stdlib=` is emitted on both compile and link lines. Per-target
+`cross_target(triple)` still overrides the project default completely, and
+`TargetTriple` gained a `stdlib` field for per-target selection too.
 
 ## Cross-compiling & MSVC
 

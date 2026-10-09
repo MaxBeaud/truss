@@ -47,6 +47,11 @@ enum class Hardening { Default = 0, None, Light, Medium, Max };
  * Manual: precise per-file BMI wiring — not implemented yet. */
 enum class ModulesMode { Default = 0, Off, Auto, Manual };
 
+/* C++ standard library selection (emitted as -stdlib= on compile + link). */
+enum class StdLib { Default = 0, Libstdcxx, Libcxx };
+/* Named toolchain bundles: expands to compiler + stdlib + archiver. */
+enum class Toolchain { Default = 0, LLVM, GCC };
+
 /* fetch() sources. Exactly one pair must be set:
  *  - git + tag  : shallow clone pinned to a tag/branch/commit
  *  - url + sha256: tarball (.tar.gz/.tar.xz) verified against the hash */
@@ -90,10 +95,46 @@ struct TargetTriple {
     std::string compiler; /* compiler driver, e.g. "clang++" */
     std::string ar;       /* archiver, e.g. "llvm-ar" */
     std::string linker;   /* link driver override ("" = compiler default), passed via -fuse-ld= */
+    StdLib stdlib {StdLib::Default}; /* ""-equivalent: compiler's default stdlib */
 };
 
 /* Triple of the machine truss itself runs on. */
 TargetTriple host_triple();
+
+/* ---------------------------------------------------------------------------
+ * Config: project-wide toolchain selection, applied with proj.configure(conf).
+ * compiler()/linker() take a program name or a path; the compiler family is
+ * detected from the basename (clang++, g++, clang-cl, cl.exe, ...).
+ * toolchain() expands to compiler + stdlib + archiver in one call; later
+ * explicit calls override it (last call wins).
+ * ------------------------------------------------------------------------- */
+class Config {
+public:
+    Config& compiler(std::string name_or_path) { compiler_ = std::move(name_or_path); return *this; }
+    Config& linker(std::string name_or_path) { linker_ = std::move(name_or_path); return *this; }
+    Config& ar(std::string name_or_path) { ar_ = std::move(name_or_path); return *this; }
+    Config& stdlib(StdLib s) { stdlib_ = s; return *this; }
+
+    Config& toolchain(Toolchain t) {
+        switch (t) {
+        case Toolchain::LLVM:
+            compiler_ = "clang++"; ar_ = "llvm-ar"; stdlib_ = StdLib::Libcxx; break;
+        case Toolchain::GCC:
+            compiler_ = "g++"; ar_ = "ar"; stdlib_ = StdLib::Libstdcxx; break;
+        case Toolchain::Default: break;
+        }
+        return *this;
+    }
+
+    const std::string& compiler() const { return compiler_; }
+    const std::string& linker() const { return linker_; }
+    const std::string& ar() const { return ar_; }
+    StdLib stdlib() const { return stdlib_; }
+
+private:
+    std::string compiler_, linker_, ar_;
+    StdLib stdlib_ {StdLib::Default};
+};
 
 /* ---------------------------------------------------------------------------
  * Targets: options holders built with method chaining or pipe composition.
@@ -333,6 +374,11 @@ public:
     Interface& add_interface_library(std::string name);
     void task(std::string name, TaskFn fn);
 
+    /* Project-wide toolchain selection (compiler/linker/stdlib/archiver).
+     * Per-target cross_target() still overrides it completely. */
+    Project& configure(const Config& conf) { config_ = conf; return *this; }
+    const Config& config() const { return config_; }
+
     /* --- packages (phase 5) ------------------------------------------------
      * fetch(): git (shallow clone pinned to tag) or tarball (sha256-verified),
      * cached in ~/.cache/truss, materialized into build/{mode}/packages/{name},
@@ -372,6 +418,7 @@ private:
     std::filesystem::path cwd_;
     std::vector<std::unique_ptr<Target>> targets_;
     std::vector<std::pair<std::string, TaskFn>> user_tasks_;
+    Config config_;
 
     /* parsed CLI state */
     BuildMode mode_ {BuildMode::Debug};

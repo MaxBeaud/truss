@@ -113,6 +113,15 @@ Result<LinkFlags> link_flags(const TargetTriple& triple, BuildMode mode, DebugIn
 /* "<arch>-<os>-<family>" e.g. "x64-linux-clang" */
 std::string triple_dir(const TargetTriple& t);
 
+/* Compiler family from a driver name/path basename ("x86_64-w64-mingw32-g++"
+ * -> Gcc, "clang-cl" -> Msvc); Unknown when nothing matches. */
+CompilerFamily family_from_compiler_name(std::string_view name);
+
+/* Overlay a project Config onto a base triple (host by default): compiler
+ * (family re-detected, archiver follows), linker, ar, stdlib — then validate
+ * (g++ + libc++ and MSVC + stdlib() are Config errors). */
+Result<TargetTriple> apply_config(const Config& conf, const TargetTriple& base);
+
 /* --- ninja manifest emitter ---------------------------------------------- */
 class NinjaWriter {
 public:

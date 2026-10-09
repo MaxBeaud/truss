@@ -108,3 +108,68 @@ TEST_CASE("usage: Interface defines/includes propagate; user lib defines do not"
     INFO((r ? "build ok" : r.error().message));
     REQUIRE(r.has_value());
 }
+
+TEST_CASE("config: family detection from compiler names") {
+    CHECK(detail::family_from_compiler_name("x86_64-w64-mingw32-g++") == CompilerFamily::Gcc);
+    CHECK(detail::family_from_compiler_name("/usr/bin/clang++-21") == CompilerFamily::Clang);
+    CHECK(detail::family_from_compiler_name("clang-cl") == CompilerFamily::Msvc);
+    CHECK(detail::family_from_compiler_name("cl.exe") == CompilerFamily::Msvc);
+    CHECK(detail::family_from_compiler_name("cc") == CompilerFamily::Unknown);
+}
+
+TEST_CASE("config: toolchain(LLVM) expands to clang++ + libc++ + llvm-ar") {
+    Config conf;
+    conf.toolchain(Toolchain::LLVM);
+    TargetTriple base;
+    base.os = Os::Linux; base.arch = Arch::X64;
+    base.family = CompilerFamily::Gcc; base.compiler = "g++"; base.ar = "ar";
+    auto r = detail::apply_config(conf, base);
+    REQUIRE(r.has_value());
+    CHECK(r->compiler == "clang++");
+    CHECK(r->family == CompilerFamily::Clang);
+    CHECK(r->stdlib == StdLib::Libcxx);
+    CHECK(r->ar == "llvm-ar");
+}
+
+TEST_CASE("config: explicit calls after toolchain() win") {
+    Config conf;
+    conf.toolchain(Toolchain::LLVM).compiler("/opt/llvm/bin/clang++").ar("llvm-ar-21");
+    TargetTriple base = host_triple();
+    auto r = detail::apply_config(conf, base);
+    REQUIRE(r.has_value());
+    CHECK(r->compiler == "/opt/llvm/bin/clang++");
+    CHECK(r->family == CompilerFamily::Clang);
+    CHECK(r->ar == "llvm-ar-21");
+}
+
+TEST_CASE("config: g++ + libc++ is a Config error") {
+    Config conf;
+    conf.compiler("g++").stdlib(StdLib::Libcxx);
+    auto r = detail::apply_config(conf, host_triple());
+    REQUIRE_FALSE(r.has_value());
+    CHECK(r.error().kind == Error::Kind::Config);
+}
+
+TEST_CASE("config: MSVC + stdlib() is a Config error") {
+    Config conf;
+    conf.compiler("clang-cl").stdlib(StdLib::Libcxx);
+    auto r = detail::apply_config(conf, host_triple());
+    REQUIRE_FALSE(r.has_value());
+    CHECK(r.error().kind == Error::Kind::Config);
+}
+
+TEST_CASE("config: configure() end-to-end (clang++ + libc++ scratch build)") {
+    ScratchDir scratch {"config-llvm"};
+    char prog[] = "truss-tests";
+    char* argv[] = {prog};
+    Project proj("config-llvm", 1, argv);
+
+    REQUIRE(detail::write_file("app/main.cpp", "int main() { return 0; }\n").has_value());
+    proj.add_executable("app").sources("app/main.cpp");
+
+    Config conf;
+    conf.toolchain(Toolchain::LLVM);
+    proj.configure(conf);
+    auto r = proj.build();
+    REQUIRE(r.has_value());
+}

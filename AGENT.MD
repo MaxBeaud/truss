@@ -359,3 +359,10 @@ Read `PLAN.MD` first. This file is the rulebook for any agent/human modifying th
   libc++/libstdc++ hardening modes are emitted as plain defines
   (`_LIBCPP_HARDENING_MODE=…`, `_GLIBCXX_ASSERTIONS`) — inert against the other
   stdlib, so no stdlib detection is needed (compile-side only, never `compile_c`).
+- Config/toolchain: `proj.configure(Config)` overlays compiler (family re-detected
+  from basename via `detail::family_from_compiler_name`), linker (`-fuse-ld=`), ar
+  (follows family unless set), stdlib onto `host_triple()`; per-target
+  `cross_target()` still wins completely. `TargetTriple` gained a `StdLib stdlib`
+  field; `-stdlib=` emitted compile + link (never MSVC — validated away:
+  g++ + libc++ and MSVC + stdlib() are Config errors). Implementation units using
+  `std::unexpected` need `#include <expected>` in their GMF (reachable ≠ visible).

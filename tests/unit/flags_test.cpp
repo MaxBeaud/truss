@@ -305,3 +305,25 @@ TEST_CASE("hardening: MSVC mapping — tiers + x86-64 gating") {
     CHECK_FALSE(contains(arm_l->linker, "/guard:cf"));
     CHECK_FALSE(contains(arm_l->linker, "/CETCOMPAT"));
 }
+
+TEST_CASE("config: -stdlib= emitted on compile and link when selected") {
+    auto t = clang_triple();
+    t.stdlib = StdLib::Libcxx;
+    const std::array<std::string, 0> none {};
+    auto c = detail::build_flags(t, BuildMode::Debug, CppStandard::Default, Warnings::Default,
+                                 DebugInfo::Default, Optimization::Default, Sanitizer::Default,
+                                 Lto::Default, Hardening::None, false, none, none, "");
+    REQUIRE(c.has_value());
+    CHECK(contains(c->compile, "-stdlib=libc++"));
+    CHECK(contains(c->compile_c, "-stdlib=libc++"));
+    auto l = detail::link_flags(t, BuildMode::Debug, DebugInfo::Default, Sanitizer::Default,
+                                Lto::Default, Hardening::None, none, none, none, none, "");
+    REQUIRE(l.has_value());
+    CHECK(contains(l->driver, "-stdlib=libc++"));
+
+    t.stdlib = StdLib::Libstdcxx;
+    auto l2 = detail::link_flags(t, BuildMode::Debug, DebugInfo::Default, Sanitizer::Default,
+                                 Lto::Default, Hardening::None, none, none, none, none, "");
+    REQUIRE(l2.has_value());
+    CHECK(contains(l2->driver, "-stdlib=libstdc++"));
+}

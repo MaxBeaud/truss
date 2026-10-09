@@ -624,13 +624,21 @@ Result<void> Project::build() {
         if (name == "test" || name == "run" || name == "clean" || name == "compdb")
             return std::unexpected(Error {Error::Kind::Config, "user task '" + name + "' shadows a built-in task"});
 
+    /* project-wide toolchain: Config overlaid on the host triple (per-target
+     * cross_target() overrides completely) */
+    auto base_triple = detail::apply_config(config_, host_triple());
+    if (!base_triple) {
+        detail::log_error(base_triple.error());
+        return std::unexpected(base_triple.error());
+    }
+
     /* resolve + validate sources */
     std::vector<ResolvedTarget> resolved;
     resolved.reserve(targets_.size());
     for (const auto& t : targets_) {
         ResolvedTarget r;
         r.target = t.get();
-        r.triple = t->triple_override().value_or(host_triple());
+        r.triple = t->triple_override().value_or(*base_triple);
 
         auto sources = resolve_sources(*t);
         if (!sources) {
