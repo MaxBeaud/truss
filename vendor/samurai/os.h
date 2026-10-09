@@ -1,0 +1,15 @@
+#include <sys/types.h>
+
+struct string;
+
+void osgetcwd(char *, size_t);
+/* changes the working directory to the given path */
+void oschdir(const char *);
+/* creates all the parent directories of the given path */
+int osmkdirs(struct string *, _Bool);
+/* queries the mtime of a file in nanoseconds since the UNIX epoch */
+int64_t osmtime(const char *);
+/* queries the number of online processors */
+long osnproc(void);
+/* spawn a child process */
+pid_t osspawn(char *const argv[], int fd);

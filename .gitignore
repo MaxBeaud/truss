@@ -1,0 +1,14 @@
+# truss's own build artifacts
+/build/
+/.xmake/
+/compile_commands.json
+
+# self-hosted CLI binary (built by xmake target truss-cli)
+/truss
+
+# example build scripts compiled in place
+/examples/**/truss
+/examples/**/build/
+
+# package lockfile churn (phase 5)
+truss.lock
