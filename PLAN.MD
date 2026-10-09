@@ -2,8 +2,9 @@
 
 > Build your C++ using C++. mate.h API style + xmake-class features + samurai backend.
 
-**Status (2026-10-09):** Phases 0–6 complete. `xmake f -m debug && xmake` builds
-`truss-mod` (BMI) + `libtruss.a` + `./truss`; Catch2 unit tests green (40 cases: glob, fs,
+**Status (2026-10-09):** Phases 0–7 complete. `xmake f -m debug && xmake` builds
+`truss-mod` (BMI) + `libtruss.a` + `./truss`; `./bootstrap.sh` builds the same
+`libtruss.a` + BMI with plain clang++ (no xmake); Catch2 unit tests green (40 cases: glob, fs,
 proc, triple, flags, golden ninja manifest, module scanner/resolver, lockfile, fetch
 validation, usage-requirement propagation); `examples/hello`, `examples/shared`,
 `examples/modules` (primary + partition + impl unit), `examples/fetch` (git-tag
@@ -299,14 +300,15 @@ re-builds offline from cache.
 
 **Done when:** `examples/conan` + `examples/vcpkg` (zlib each) build/run/test green. ✅
 
-### Phase 7 — Distribution: vendored source + bootstrap.sh (1–2 days)
+### Phase 7 — Distribution: vendored source + bootstrap.sh (1–2 days) ✅
 1. `bootstrap.sh`: compile `libtruss.a` + BMI with plain clang++ (no xmake required),
-   vendored samurai included; `--install [prefix]` stages binary + libtruss.a + BMI.
+   vendored samurai included; `--install [prefix]` stages binary + libtruss.a + BMI. ✅
 2. Vendored-source repo stays the "simple one import" path: clone, run bootstrap, write
-   `truss.cpp`.
+   `truss.cpp`. ✅ (verified: `examples/hello/truss.cpp` compiled against the bootstrap
+   BMI + `libtruss.a` builds/runs/tests green)
 
 **Done when:** a clean machine path (git clone → `./bootstrap.sh` → example builds) works
-without xmake installed.
+without xmake installed. ✅
 
 ### Phase 8 — Self-hosting + installed-tool flow (2 days)
 1. Dogfood: truss builds truss (`truss.cpp` at repo root) using truss's own module

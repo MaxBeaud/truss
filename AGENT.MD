@@ -217,3 +217,18 @@ Read `PLAN.MD` first. This file is the rulebook for any agent/human modifying th
   `Interface` deps, so user static libs never leak private defines. Integration-tested
   by `tests/unit/usage_test.cpp` (scratch dir + chdir + real `proj.build()`; Catch2
   `INFO` needs the ternary parenthesized: `<<` binds tighter than `?:`).
+
+## 14. Verified toolchain facts (learned during phase 7 — bootstrap.sh)
+
+- Plain clang++ can build truss's module without xmake: compile each interface unit once
+  with `-c -fmodule-output=<pcm>` (object + BMI in a single pass — no `--precompile`
+  two-pass dance). Order: `truss:api` -> `truss:impl` (needs :api) -> primary `truss`
+  (needs :api + :impl); implementation units need all three via `-fmodule-file`.
+- **Consumers of `import truss;` need TWO flags**: `-fmodule-file=truss=...` AND
+  `-fmodule-file=truss:api=...`. clang does not embed imported BMIs into the emitted
+  BMI; the primary re-exports :api but references it by name. `:impl` is NOT needed by
+  consumers (the primary never imports it). `--install` stages both pcms.
+- truss is built against libc++ (`-stdlib=libc++`); the staged BMI + libtruss.a ABI must
+  match the stdlib used to compile the consumer TU.
+- samurai C files compile with `-std=gnu17 -w -D_DEFAULT_SOURCE -D_POSIX_C_SOURCE=200809L`;
+  `samu.c` excluded (shim provides main).

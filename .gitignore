@@ -1,6 +1,7 @@
 # truss's own build artifacts
 /build/
 /.xmake/
+/build-bootstrap/
 /compile_commands.json
 
 # self-hosted CLI binary (built by xmake target truss-cli)

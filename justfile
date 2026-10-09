@@ -6,6 +6,10 @@ build mode="debug":
     xmake f -m {{mode}}
     xmake -y
 
+# Build libtruss.a + truss BMI with plain clang++ (no xmake needed).
+bootstrap:
+    ./bootstrap.sh
+
 # Build the example's build script, then run it end-to-end.
 hello: build
     xmake -y hello-truss
