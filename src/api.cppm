@@ -356,6 +356,16 @@ public:
     Result<Target*> add_subdirectory(const std::filesystem::path& dir);
     Result<Target*> add_subdirectory(const Package& pkg) { return add_subdirectory(pkg.dir); }
 
+    /* conan 2: runs `conan install` on the conanfile (path to conanfile.txt/.py
+     * or its directory). Returns an Interface target carrying the whole graph's
+     * includes/libs/defines — depends_on() it. */
+    Result<Target*> conan(std::string_view conanfile = ".");
+
+    /* vcpkg manifest mode: uses the project's vcpkg.json, or generates one from
+     * `packages`. Installs under build/{mode}/vcpkg_installed and returns an
+     * Interface target for depends_on(). */
+    Result<Target*> vcpkg(std::vector<std::string> packages);
+
     /* Generates the ninja manifest, runs samurai, then the requested tasks.
      * Errors are logged and returned. */
     Result<void> build();

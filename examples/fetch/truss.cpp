@@ -15,20 +15,20 @@ static int fail(const truss::Error& e) {
 int main(int argc, char** argv) {
     truss::Project proj("fetch", argc, argv);
 
-    auto expected = proj.fetch("tl-expected", truss::FetchOptions {
-        .git = "https://github.com/TartanLlama/expected",
-        .tag = "v1.1.0",
-    });
+    truss::FetchOptions expected_opts;
+    expected_opts.git = "https://github.com/TartanLlama/expected";
+    expected_opts.tag = "v1.1.0";
+    auto expected = proj.fetch("tl-expected", expected_opts);
     if (!expected)
         return fail(expected.error());
     auto expected_t = proj.add_subdirectory(*expected);
     if (!expected_t)
         return fail(expected_t.error());
 
-    auto xxh = proj.fetch("xxhash", truss::FetchOptions {
-        .url = "https://github.com/Cyan4973/xxHash/archive/refs/tags/v0.8.2.tar.gz",
-        .sha256 = "baee0c6afd4f03165de7a4e67988d16f0f2b257b51d0e3cb91909302a26a79c4",
-    });
+    truss::FetchOptions xxh_opts;
+    xxh_opts.url = "https://github.com/Cyan4973/xxHash/archive/refs/tags/v0.8.2.tar.gz";
+    xxh_opts.sha256 = "baee0c6afd4f03165de7a4e67988d16f0f2b257b51d0e3cb91909302a26a79c4";
+    auto xxh = proj.fetch("xxhash", xxh_opts);
     if (!xxh)
         return fail(xxh.error());
     auto xxh_t = proj.add_subdirectory(*xxh);

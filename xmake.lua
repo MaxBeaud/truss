@@ -86,7 +86,7 @@ target("truss-lib")
     add_rules("c++.build.modules")
     add_deps("truss-mod")
     add_files("src/core/*.cpp")
-    add_includedirs("vendor/samurai")
+    add_includedirs("vendor/samurai", "vendor")
     add_files("src/samu/shim.c", {
         force = {
             languages = "c17",
@@ -143,6 +143,24 @@ target("fetch-truss")
     add_files("examples/fetch/truss.cpp")
     set_basename("truss")
     set_targetdir("$(projectdir)/examples/fetch")
+
+-- examples/conan build script (conan 2 integration).
+target("conan-truss")
+    set_kind("binary")
+    add_rules("c++.build.modules")
+    add_deps("truss-mod", "truss-lib")
+    add_files("examples/conan/truss.cpp")
+    set_basename("truss")
+    set_targetdir("$(projectdir)/examples/conan")
+
+-- examples/vcpkg build script (vcpkg manifest-mode integration).
+target("vcpkg-truss")
+    set_kind("binary")
+    add_rules("c++.build.modules")
+    add_deps("truss-mod", "truss-lib")
+    add_files("examples/vcpkg/truss.cpp")
+    set_basename("truss")
+    set_targetdir("$(projectdir)/examples/vcpkg")
 
 -- Unit tests: test files are implementation units of truss (module truss;) so they
 -- can exercise the internal :impl partition (glob, fs, proc, flags, ninja emitter).

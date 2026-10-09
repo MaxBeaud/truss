@@ -49,6 +49,9 @@ struct ProcOutcome {
     std::string output; /* captured stdout+stderr when requested */
 };
 Result<ProcOutcome> run_process(std::span<const std::string> argv, bool capture);
+/* Capture stdout only; stderr passes through to the terminal (for tools whose
+ * stdout is machine-readable, e.g. `conan install --format=json`). */
+Result<ProcOutcome> run_process_stdout(std::span<const std::string> argv);
 bool program_exists(std::string_view name);
 
 /* --- C++ module scanning (v0.1: line-anchored regex, no preprocessor) ---- */

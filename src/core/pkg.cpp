@@ -11,6 +11,8 @@ module;
 
 #include <cstdlib>
 
+#include <nlohmann/json.hpp>
+
 module truss;
 import :api;
 import :impl;
@@ -292,6 +294,185 @@ Result<Target*> Project::add_subdirectory(const std::filesystem::path& dir) {
         target->include_dirs(rel);
     subdir_target_names_.push_back(name);
     return target;
+}
+
+/* --- Project::conan ---------------------------------------------------------
+ * Runs conan 2, parses the --format=json dependency graph, and returns one
+ * Interface target ("conan") carrying the whole graph's usage requirements. */
+Result<Target*> Project::conan(std::string_view conanfile) {
+    for (const auto& t : targets_)
+        if (t->name() == "conan")
+            return t.get(); /* idempotent */
+    if (!detail::program_exists("conan"))
+        return std::unexpected(Error {Error::Kind::Toolchain, "conan not found on PATH (conan 2 required)"});
+
+    const std::filesystem::path cf = cwd_ / std::filesystem::path(conanfile.empty() ? "." : std::string(conanfile));
+    std::error_code ec;
+    if (!std::filesystem::exists(cf, ec))
+        return std::unexpected(Error {Error::Kind::Config, "conan: conanfile not found", cf});
+
+    const std::filesystem::path out = build_dir() / "packages" / "conan";
+    if (auto r = detail::make_dirs(out); !r)
+        return std::unexpected(r.error());
+
+    detail::log_info("conan install " + cf.generic_string());
+    const std::vector<std::string> argv {"conan", "install", cf.generic_string(),
+                                         "--format=json", "--output-folder", out.generic_string(),
+                                         "--build=missing"};
+    auto outcome = detail::run_process_stdout(argv);
+    if (!outcome)
+        return std::unexpected(outcome.error());
+    if (outcome->exit_code != 0)
+        return std::unexpected(Error {
+            Error::Kind::Fetch,
+            "conan install failed (exit " + std::to_string(outcome->exit_code) + ")",
+        });
+
+    const auto j = nlohmann::json::parse(outcome->output, nullptr, false);
+    if (!j.is_object() || !j.contains("graph") || !j["graph"].contains("nodes") ||
+        !j["graph"]["nodes"].is_object())
+        return std::unexpected(Error {Error::Kind::Fetch, "conan: unexpected --format=json output"});
+
+    auto str_array = [](const nlohmann::json& obj, const char* key) {
+        std::vector<std::string> out;
+        if (obj.contains(key) && obj[key].is_array())
+            for (const auto& v : obj[key])
+                if (v.is_string())
+                    out.push_back(v.get<std::string>());
+        return out;
+    };
+    auto dir_array = [](const nlohmann::json& obj, const char* key,
+                        const std::filesystem::path& pkg_folder) {
+        std::vector<std::string> out;
+        if (obj.contains(key) && obj[key].is_array())
+            for (const auto& v : obj[key]) {
+                if (!v.is_string())
+                    continue;
+                std::filesystem::path p(v.get<std::string>());
+                if (p.is_relative() && !pkg_folder.empty())
+                    p = pkg_folder / p;
+                out.push_back(p.generic_string());
+            }
+        return out;
+    };
+
+    auto& iface = add_interface_library("conan");
+    for (const auto& [id, node] : j["graph"]["nodes"].items()) {
+        /* skip the consumer root node: it has no package folder */
+        std::filesystem::path pkg_folder;
+        if (!node.contains("package_folder") || !node["package_folder"].is_string())
+            continue;
+        pkg_folder = node["package_folder"].get<std::string>();
+        if (!node.contains("cpp_info") || !node["cpp_info"].contains("root"))
+            continue;
+        const auto& root = node["cpp_info"]["root"];
+        for (const auto& d : dir_array(root, "includedirs", pkg_folder))
+            iface.include_dirs(d);
+        for (const auto& d : dir_array(root, "libdirs", pkg_folder))
+            iface.link_paths(d);
+        for (const auto& l : str_array(root, "libs"))
+            iface.link_libs(l);
+        for (const auto& l : str_array(root, "system_libs"))
+            iface.link_libs(l);
+        for (const auto& d : str_array(root, "defines"))
+            iface.defines(d);
+    }
+    return &iface;
+}
+
+/* --- Project::vcpkg ---------------------------------------------------------
+ * Manifest mode: uses the project's vcpkg.json (generating one from `packages`
+ * when absent), installs under build/{mode}/vcpkg_installed, and returns one
+ * Interface target ("vcpkg") for the triplet's include/ + lib/ trees. */
+Result<Target*> Project::vcpkg(std::vector<std::string> packages) {
+    for (const auto& t : targets_)
+        if (t->name() == "vcpkg")
+            return t.get(); /* idempotent */
+
+    std::string exe = "vcpkg";
+    if (const char* root = std::getenv("VCPKG_ROOT"); root && *root) {
+        const std::filesystem::path p = std::filesystem::path(root) / "vcpkg";
+        if (std::filesystem::exists(p))
+            exe = p.generic_string();
+    }
+    if (!detail::program_exists(exe))
+        return std::unexpected(Error {Error::Kind::Toolchain, "vcpkg not found (put it on PATH or set VCPKG_ROOT)"});
+
+    const std::filesystem::path manifest = cwd_ / "vcpkg.json";
+    std::error_code ec;
+    if (!std::filesystem::exists(manifest, ec)) {
+        if (packages.empty())
+            return std::unexpected(Error {
+                Error::Kind::Config, "vcpkg: no vcpkg.json in the project root and no packages listed",
+            });
+        std::string body = "{\n  \"name\": \"" + name_ + "\",\n  \"version\": \"1.0.0\",\n  \"dependencies\": [";
+        for (size_t i = 0; i < packages.size(); ++i) {
+            if (i)
+                body += ",";
+            body += "\n    \"" + packages[i] + "\"";
+        }
+        body += "\n  ]\n}\n";
+        if (auto r = detail::write_file(manifest, body); !r)
+            return std::unexpected(r.error());
+    }
+
+    const TargetTriple triple = host_triple();
+    if (triple.os != Os::Linux)
+        return std::unexpected(Error {Error::Kind::Toolchain, "the vcpkg integration currently supports Linux only"});
+    std::string arch = "x64";
+    if (triple.arch == Arch::X86)
+        arch = "x86";
+    else if (triple.arch == Arch::Arm64)
+        arch = "arm64";
+    const std::string triplet = arch + "-linux";
+
+    const std::filesystem::path install_root = build_dir() / "vcpkg_installed";
+    detail::log_info("vcpkg install (" + triplet + ")");
+    /* manifest mode is auto-detected from vcpkg.json in the current directory,
+     * which is the project root (truss runs from cwd_) */
+    const std::vector<std::string> argv {exe, "install", "--triplet", triplet,
+                                         "--x-install-root", install_root.generic_string(),
+                                         "--no-print-usage"};
+    auto outcome = detail::run_process(argv, false);
+    if (!outcome)
+        return std::unexpected(outcome.error());
+    if (outcome->exit_code != 0)
+        return std::unexpected(Error {
+            Error::Kind::Fetch,
+            "vcpkg install failed (exit " + std::to_string(outcome->exit_code) + ")",
+        });
+
+    const std::filesystem::path tdir = install_root / triplet;
+    auto& iface = add_interface_library("vcpkg");
+    if (std::filesystem::is_directory(tdir / "include", ec))
+        iface.include_dirs((tdir / "include").generic_string());
+    const std::filesystem::path libdir = tdir / "lib";
+    if (std::filesystem::is_directory(libdir, ec)) {
+        iface.link_paths(libdir.generic_string());
+        std::vector<std::string> names;
+        for (auto it = std::filesystem::directory_iterator(libdir, ec);
+             it != std::filesystem::directory_iterator {}; it.increment(ec)) {
+            if (ec)
+                break;
+            if (!it->is_regular_file(ec))
+                continue; /* skip pkgconfig/ and other subdirs */
+            const std::string fn = it->path().filename().generic_string();
+            std::string base;
+            if (fn.ends_with(".a") || fn.contains(".so"))
+                base = fn.starts_with("lib") ? fn.substr(3) : fn;
+            else
+                continue;
+            if (const auto dot = base.find(".so"); dot != std::string::npos)
+                base.erase(dot);
+            else
+                base.erase(base.size() - 2); /* strip ".a" */
+            if (!base.empty() && std::ranges::find(names, base) == names.end())
+                names.push_back(base);
+        }
+        for (const auto& n : names)
+            iface.link_libs(n);
+    }
+    return &iface;
 }
 
 } // namespace truss

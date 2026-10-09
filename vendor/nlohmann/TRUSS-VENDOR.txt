@@ -1,0 +1,11 @@
+nlohmann/json — "JSON for Modern C++"
+  upstream:  https://github.com/nlohmann/json
+  version:   3.12.0 (single-header release: json.hpp)
+  obtained:  https://github.com/nlohmann/json/releases/download/v3.12.0/json.hpp
+  sha256:    aaf127c04cb31c406e5b04a63f1ae89369fccde6d8fa7cdda1ed4f32dfc5de63
+  license:   MIT (see https://github.com/nlohmann/json/blob/develop/LICENSE.MIT)
+
+Usage in truss: included from the global module fragment of src/core/pkg.cpp
+(`#include <nlohmann/json.hpp>`, include root = vendor/). Used to parse the
+`conan install --format=json` dependency graph. Upstream is never modified;
+the file is the unmodified amalgamated release.

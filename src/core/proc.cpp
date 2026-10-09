@@ -18,8 +18,10 @@ import :api;
 import :impl;
 
 namespace truss::detail {
+namespace {
 
-Result<ProcOutcome> run_process(std::span<const std::string> argv, bool capture) {
+Result<ProcOutcome> run_impl(std::span<const std::string> argv, int capture_mode) {
+    /* capture_mode: 0 = none, 1 = stdout+stderr merged, 2 = stdout only */
     if (argv.empty())
         return std::unexpected(Error {Error::Kind::Config, "cannot run an empty command"});
 
@@ -34,9 +36,10 @@ Result<ProcOutcome> run_process(std::span<const std::string> argv, bool capture)
     posix_spawn_file_actions_t actions;
     const bool have_actions = posix_spawn_file_actions_init(&actions) == 0;
 
-    if (capture && have_actions && pipe(pipe_fd) == 0) {
+    if (capture_mode && have_actions && pipe(pipe_fd) == 0) {
         posix_spawn_file_actions_adddup2(&actions, pipe_fd[1], STDOUT_FILENO);
-        posix_spawn_file_actions_adddup2(&actions, pipe_fd[1], STDERR_FILENO);
+        if (capture_mode == 1)
+            posix_spawn_file_actions_adddup2(&actions, pipe_fd[1], STDERR_FILENO);
         posix_spawn_file_actions_addclose(&actions, pipe_fd[0]);
         posix_spawn_file_actions_addclose(&actions, pipe_fd[1]);
     }
@@ -55,7 +58,7 @@ Result<ProcOutcome> run_process(std::span<const std::string> argv, bool capture)
         });
     }
 
-    if (capture && pipe_fd[1] != -1) {
+    if (capture_mode && pipe_fd[1] != -1) {
         close(pipe_fd[1]);
         std::array<char, 4096> buf {};
         for (;;) {
@@ -74,6 +77,16 @@ Result<ProcOutcome> run_process(std::span<const std::string> argv, bool capture)
     else outcome.exit_code = -1;
 
     return outcome;
+}
+
+} // namespace
+
+Result<ProcOutcome> run_process(std::span<const std::string> argv, bool capture) {
+    return run_impl(argv, capture ? 1 : 0);
+}
+
+Result<ProcOutcome> run_process_stdout(std::span<const std::string> argv) {
+    return run_impl(argv, 2);
 }
 
 bool program_exists(std::string_view name) {

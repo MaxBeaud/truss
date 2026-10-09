@@ -74,20 +74,38 @@ void collect_bmis(const ResolvedTarget& r, const std::vector<ResolvedTarget>& al
     }
 }
 
-/* Include dirs a target sees: its own plus those of depends_on (transitively),
- * so vendored/fetched packages expose their headers to consumers automatically. */
-void collect_include_dirs(const ResolvedTarget& r, const std::vector<ResolvedTarget>& all,
-                          std::vector<std::string>& out, std::set<const Target*>& seen) {
+/* Usage requirements a target sees through depends_on (transitively):
+ * include dirs from every dependency; defines/link flags only from Interface
+ * (header-only / prebuilt package) targets, mirroring CMake INTERFACE semantics
+ * so user static libs never leak private defines into consumers. */
+struct Usage {
+    std::vector<std::string> includes, defines, link_paths, link_libs;
+};
+
+void collect_usage(const ResolvedTarget& r, const std::vector<ResolvedTarget>& all,
+                   Usage& out, std::set<const Target*>& seen) {
     if (!seen.insert(r.target).second)
         return;
+    const bool interface = r.target->kind() == TargetKind::Interface;
     for (const auto& d : r.target->include_dirs())
-        if (std::ranges::find(out, d) == out.end())
-            out.push_back(d);
+        if (std::ranges::find(out.includes, d) == out.includes.end())
+            out.includes.push_back(d);
+    if (interface) {
+        for (const auto& d : r.target->defines())
+            if (std::ranges::find(out.defines, d) == out.defines.end())
+                out.defines.push_back(d);
+        for (const auto& p : r.target->link_paths())
+            if (std::ranges::find(out.link_paths, p) == out.link_paths.end())
+                out.link_paths.push_back(p);
+        for (const auto& l : r.target->link_libs())
+            if (std::ranges::find(out.link_libs, l) == out.link_libs.end())
+                out.link_libs.push_back(l);
+    }
     for (const Target* dep : r.target->deps()) {
         const auto it = std::ranges::find(all, dep->name(),
                                           [](const ResolvedTarget& x) -> const std::string& { return x.target->name(); });
         if (it != all.end())
-            collect_include_dirs(*it, all, out, seen);
+            collect_usage(*it, all, out, seen);
     }
 }
 
@@ -208,13 +226,16 @@ Result<void> emit_manifest(const Project& proj, const std::vector<ResolvedTarget
             continue;
         const bool pic = t.pic() || t.kind() != TargetKind::Executable;
 
-        std::vector<std::string> includes;
-        std::set<const Target*> inc_seen;
-        collect_include_dirs(r, resolved, includes, inc_seen);
+        Usage usage;
+        std::set<const Target*> usage_seen;
+        collect_usage(r, resolved, usage, usage_seen);
+
+        std::vector<std::string> defines = t.defines();
+        defines.insert(defines.end(), usage.defines.begin(), usage.defines.end());
 
         auto cflags = detail::build_flags(r.triple, proj.mode(), t.cpp_standard(), t.warnings(),
                                           t.debug_info(), t.optimization(), t.sanitizer(), t.lto(),
-                                          pic, t.defines(), includes, t.flags());
+                                          pic, defines, usage.includes, t.flags());
         if (!cflags)
             return std::unexpected(cflags.error());
 
@@ -323,8 +344,12 @@ Result<void> emit_manifest(const Project& proj, const std::vector<ResolvedTarget
                  * single-quote $ORIGIN so the shell passes it through to ld. */
                 extra_link.push_back("-Wl,-rpath,'$ORIGIN'/../../lib/" + detail::triple_dir(r.triple));
             }
-            auto link_res = detail::link_flags(r.triple, t.sanitizer(), t.lto(), t.link_paths(),
-                                               t.link_libs(), t.frameworks(), t.framework_paths(),
+            std::vector<std::string> link_paths = t.link_paths();
+            link_paths.insert(link_paths.end(), usage.link_paths.begin(), usage.link_paths.end());
+            std::vector<std::string> link_libs = t.link_libs();
+            link_libs.insert(link_libs.end(), usage.link_libs.begin(), usage.link_libs.end());
+            auto link_res = detail::link_flags(r.triple, t.sanitizer(), t.lto(), link_paths,
+                                               link_libs, t.frameworks(), t.framework_paths(),
                                                t.linker_flags());
             if (!link_res)
                 return std::unexpected(link_res.error());

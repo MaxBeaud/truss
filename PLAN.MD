@@ -2,14 +2,16 @@
 
 > Build your C++ using C++. mate.h API style + xmake-class features + samurai backend.
 
-**Status (2026-10-09):** Phases 0–5 complete. `xmake f -m debug && xmake` builds
-`truss-mod` (BMI) + `libtruss.a` + `./truss`; Catch2 unit tests green (39 cases: glob, fs,
+**Status (2026-10-09):** Phases 0–6 complete. `xmake f -m debug && xmake` builds
+`truss-mod` (BMI) + `libtruss.a` + `./truss`; Catch2 unit tests green (40 cases: glob, fs,
 proc, triple, flags, golden ninja manifest, module scanner/resolver, lockfile, fetch
-validation); `examples/hello`, `examples/shared`, `examples/modules` (primary + partition +
-impl unit) and `examples/fetch` (git-tag header-only + sha256 tarball compiled lib, cached
-offline) build/run/test/rebuild incrementally through the vendored samurai; shared libs +
-rpath + user tasks + `--target` verified; failing test fixtures exit 1. See AGENT.MD
-§10–12 for verified toolchain facts.
+validation, usage-requirement propagation); `examples/hello`, `examples/shared`,
+`examples/modules` (primary + partition + impl unit), `examples/fetch` (git-tag
+header-only + sha256 tarball compiled lib, cached offline), `examples/conan` (conan 2
+graph → Interface target, zlib) and `examples/vcpkg` (manifest mode, generated
+`vcpkg.json`, zlib) build/run/test/rebuild incrementally through the vendored samurai;
+shared libs + rpath + user tasks + `--target` verified; failing test fixtures exit 1.
+See AGENT.MD §10–13 for verified toolchain facts.
 
 ## 0. Decisions (confirmed with user)
 
@@ -283,18 +285,49 @@ minimally, and `./truss compdb` still works.
 **Done when:** fixture fetches a tiny header-only lib and a compiled lib from GitHub tags,
 re-builds offline from cache.
 
-### Phase 6 — conan + vcpkg (2–3 days)
-1. conan: `proj.conan("conanfile.txt")` → `conan install --format=json` → parse graph JSON →
-   apply includes/libs/defines/flags to a returned handle.
-2. vcpkg: `proj.vcpkg({"zlib"})` → install → consume `vcpkg_installed/<triplet>` layout.
-3. Both cache their outputs under `build/<mode>/packages/`.
+### Phase 6 — conan + vcpkg (2–3 days) ✅
+1. conan: `proj.conan("conanfile.txt")` → `conan install --format=json --build=missing`
+   (stdout-only capture; progress goes to stderr) → parse graph JSON (vendored
+   nlohmann/json) → one `Interface` target "conan" carrying every package node's
+   `cpp_info.root` includes/libs/system_libs/defines, relative dirs resolved against
+   `package_folder`. ✅
+2. vcpkg: `proj.vcpkg({"zlib"})` → manifest mode (generates `vcpkg.json` when absent),
+   `--x-install-root build/{mode}/vcpkg_installed`, triplet `x64-linux` → `Interface`
+   target "vcpkg" from the triplet's `include/` + `lib/` trees. ✅
+3. Usage semantics: includes propagate from all deps; defines/link flags only from
+   `Interface` deps (CMake INTERFACE semantics) — `collect_usage` in `build.cpp`. ✅
 
-### Phase 7 — Polish & dogfood (ongoing)
+**Done when:** `examples/conan` + `examples/vcpkg` (zlib each) build/run/test green. ✅
+
+### Phase 7 — Distribution: vendored source + bootstrap.sh (1–2 days)
+1. `bootstrap.sh`: compile `libtruss.a` + BMI with plain clang++ (no xmake required),
+   vendored samurai included; `--install [prefix]` stages binary + libtruss.a + BMI.
+2. Vendored-source repo stays the "simple one import" path: clone, run bootstrap, write
+   `truss.cpp`.
+
+**Done when:** a clean machine path (git clone → `./bootstrap.sh` → example builds) works
+without xmake installed.
+
+### Phase 8 — Self-hosting + installed-tool flow (2 days)
+1. Dogfood: truss builds truss (`truss.cpp` at repo root) using truss's own module
+   support; xmake remains only the bootstrap fallback.
+2. Installed-tool flow: `truss` compiled on the user's machine (no prebuilt binaries);
+   truss compiles a project's `truss.cpp` against the locally staged BMI — fixture
+   `examples/installed` (contains only `truss.cpp`).
+
+**Done when:** `examples/installed` (no vendored truss source) builds against an installed
+truss.
+
+### Phase 9 — Amalgamation (1 day)
+1. `tools/amalgamate` → `dist/truss_all.hpp`: mate.h-style single-header drop-in
+   (`#include "truss_all.hpp"` instead of `import truss;`).
+2. CI compiles the amalgamated header against an example to keep it honest.
+
+### Phase 10 — Polish (ongoing)
 1. MSVC flag mapping + `/showIncludes` deps (design already reserved in `Target`).
 2. rsp files for long lines; `--explain` passthrough to samu debug flags.
-3. Dogfood: truss builds truss (`truss.cpp` at repo root); xmake remains the bootstrap.
-4. Docs: README with mate-style guide; `examples/` per feature.
-5. Benchmarks: clean + incremental build times vs xmake on a fixture.
+3. Docs: README with mate-style guide; `examples/` per feature.
+4. Benchmarks: clean + incremental build times vs xmake on a fixture.
 
 ## 6. Risks & mitigations
 

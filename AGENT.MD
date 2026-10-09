@@ -111,9 +111,11 @@ Read `PLAN.MD` first. This file is the rulebook for any agent/human modifying th
 - ~~Phase 5: exact `fetch` option surface~~ — resolved with the plan's defaults: both
   git+tag and tarball+sha256 are supported; lockfile is the tiny key=value `truss.lock`
   (mate's ini equivalent).
-- Phase 6: conan 2 assumed (v1 EOL) — confirm; vcpkg manifest vs classic mode.
-- Phase 7: whether `import std;` becomes the default inside truss's own module once
-  libc++ + clang trunk combination is verified stable with sanitizers + hardening.
+- ~~Phase 6: conan 2 assumed (v1 EOL) — confirm; vcpkg manifest vs classic mode~~ —
+  confirmed: conan 2 only, vcpkg manifest mode.
+- Distribution phases: whether `import std;` becomes the default inside truss's own
+  module once libc++ + clang trunk combination is verified stable with sanitizers +
+  hardening.
 
 ## 10. Verified toolchain facts (learned during phases 0–2 — do not re-derive)
 
@@ -184,3 +186,34 @@ Read `PLAN.MD` first. This file is the rulebook for any agent/human modifying th
   no filter; fine for small deps).
 - Test-vector lesson: don't hardcode library constants from memory (XXH64/XXH32 vectors
   were wrong); compute them against the real library first.
+
+## 13. Verified toolchain facts (learned during phase 6 — conan + vcpkg)
+
+- JSON parsing: vendored nlohmann/json 3.12.0 single header (`vendor/nlohmann/json.hpp`,
+  sha256 in `vendor/nlohmann/TRUSS-VENDOR.txt`), included from `pkg.cpp`'s GMF; the
+  include root is `vendor/` (added to truss-lib's `add_includedirs`).
+- conan 2.32 `install --format=json` graph shape: `graph.nodes` is an object keyed by
+  node id. The root node has `recipe: "Consumer"` and `package_folder: null`; package
+  nodes carry `ref` (NOT `reference`), absolute `package_folder`, and
+  `cpp_info.root.{includedirs,libdirs,libs,system_libs,defines}`. Filter packages by
+  "package_folder is a string"; resolve relative dirs against it anyway (defensive).
+- conan prints JSON on **stdout** and progress on **stderr** — merged capture corrupts
+  the JSON. `run_process_stdout` (stdout-only, stderr passthrough) exists for this.
+- conan needs `conan profile detect` once on a fresh machine; zlib has no prebuilt for
+  this box's profile (gcc 16 / libstdc++11) so `--build=missing` is mandatory.
+  `conan install` re-runs on every `./truss` invocation (~100 ms when cached) — fine for
+  v0.1, conan caches internally.
+- vcpkg: the Arch-packaged `/usr/bin/vcpkg` is a bare binary with NO tree; it errors
+  "Could not detect vcpkg-root" unless `VCPKG_ROOT` points at a cloned vcpkg tree
+  (`~/vcpkg`). truss prefers `$VCPKG_ROOT/vcpkg` when it exists, else `vcpkg` on PATH.
+- `vcpkg install` has **no `--manifest-path` flag** (current versions); manifest mode is
+  auto-detected from `vcpkg.json` in the current directory — truss always runs from the
+  project root, so no flag is needed.
+- vcpkg layout under `--x-install-root`: `<triplet>/{include,lib}`; `lib/` mixes
+  `libz.a`, `libz.so*` (symlinks — `is_regular_file` follows them) and a `pkgconfig/`
+  subdir; strip `lib` prefix + `.a`/`.so...` suffix and dedupe for `-l` names.
+- Usage semantics (CMake INTERFACE-style, `collect_usage` in build.cpp): include dirs
+  propagate from ALL deps transitively; defines/link_paths/link_libs propagate only from
+  `Interface` deps, so user static libs never leak private defines. Integration-tested
+  by `tests/unit/usage_test.cpp` (scratch dir + chdir + real `proj.build()`; Catch2
+  `INFO` needs the ternary parenthesized: `<<` binds tighter than `?:`).

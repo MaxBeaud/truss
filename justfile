@@ -15,11 +15,13 @@ hello: build
 test: build
     xmake -y truss-tests
     xmake run truss-tests
-    xmake -y hello-truss shared-truss modules-truss fetch-truss
+    xmake -y hello-truss shared-truss modules-truss fetch-truss conan-truss vcpkg-truss
     cd {{ROOT}}/examples/hello && ./truss test
     cd {{ROOT}}/examples/shared && ./truss test
     cd {{ROOT}}/examples/modules && ./truss test
     cd {{ROOT}}/examples/fetch && ./truss test
+    cd {{ROOT}}/examples/conan && ./truss test
+    cd {{ROOT}}/examples/vcpkg && VCPKG_ROOT={{home_directory()}}/vcpkg ./truss test
 
 clean:
     rm -rf {{ROOT}}/build/ {{ROOT}}/.xmake/
@@ -27,6 +29,8 @@ clean:
     cd {{ROOT}}/examples/shared && rm -rf build/ truss
     cd {{ROOT}}/examples/modules && rm -rf build/ truss
     cd {{ROOT}}/examples/fetch && rm -rf build/ truss truss.lock
+    cd {{ROOT}}/examples/conan && rm -rf build/ truss conan.lock
+    cd {{ROOT}}/examples/vcpkg && rm -rf build/ truss vcpkg.json
 
 add-packages:
     #!/usr/bin/env bash
