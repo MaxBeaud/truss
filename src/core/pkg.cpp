@@ -61,7 +61,8 @@ Result<void> run_tool(std::span<const std::string> argv, std::string_view what) 
 Result<void> git_fetch(const std::string& url, const std::string& ref,
                        const std::filesystem::path& dest) {
     const std::filesystem::path tmp = dest.string() + ".tmp";
-    std::filesystem::remove_all(tmp);
+    std::error_code ec;
+    std::filesystem::remove_all(tmp, ec); /* best effort */
     if (!looks_like_commit(ref)) {
         const std::vector<std::string> argv {"git", "clone", "--depth", "1", "--branch", ref, url,
                                             tmp.generic_string()};
@@ -78,7 +79,6 @@ Result<void> git_fetch(const std::string& url, const std::string& ref,
                 return r;
         }
     }
-    std::error_code ec;
     std::filesystem::rename(tmp, dest, ec);
     if (ec)
         return std::unexpected(Error {Error::Kind::Io, "could not move git cache into place", tmp});
@@ -87,12 +87,13 @@ Result<void> git_fetch(const std::string& url, const std::string& ref,
 
 Result<void> tarball_fetch(const std::string& url, const std::string& sha256,
                            const std::filesystem::path& cache_file) {
-    if (std::filesystem::exists(cache_file))
+    std::error_code ec;
+    if (std::filesystem::exists(cache_file, ec))
         return {};
     const std::filesystem::path tmp = cache_file.string() + ".tmp";
     const std::vector<std::string> curl {"curl", "-fsSL", "--retry", "2", "-o", tmp.generic_string(), url};
     if (auto r = run_tool(curl, "curl"); !r) {
-        std::filesystem::remove(tmp);
+        std::filesystem::remove(tmp, ec);
         return r;
     }
     const std::vector<std::string> sum {"sha256sum", tmp.generic_string()};
@@ -104,13 +105,12 @@ Result<void> tarball_fetch(const std::string& url, const std::string& sha256,
     std::string actual = outcome->output;
     actual.erase(actual.find_first_of(" \t\n"));
     if (actual != sha256) {
-        std::filesystem::remove(tmp);
+        std::filesystem::remove(tmp, ec);
         return std::unexpected(Error {
             Error::Kind::Fetch,
             "sha256 mismatch for '" + url + "': expected " + sha256 + ", got " + actual,
         });
     }
-    std::error_code ec;
     std::filesystem::rename(tmp, cache_file, ec);
     if (ec)
         return std::unexpected(Error {Error::Kind::Io, "could not move tarball into cache", tmp});
@@ -190,7 +190,8 @@ Result<void> copy_tree(const std::filesystem::path& from, const std::filesystem:
             }
         }
     }
-    std::filesystem::remove_all(to / ".git"); /* older materializations may have it */
+    std::error_code git_ec;
+    std::filesystem::remove_all(to / ".git", git_ec); /* older materializations may have it */
     return {};
 }
 
@@ -231,6 +232,7 @@ Result<void> validate_fetch(const std::string& pkg_name, const FetchOptions& opt
 Result<void> materialize_fetch(const std::string& pkg_name, const FetchOptions& opts,
                                const std::filesystem::path& dest) {
     const auto root = cache_root();
+    std::error_code ec;
     if (!opts.git.empty()) {
         const std::string flat_tag = [&] {
             std::string s = opts.tag;
@@ -240,14 +242,14 @@ Result<void> materialize_fetch(const std::string& pkg_name, const FetchOptions& 
             return s;
         }();
         const std::filesystem::path git_cache = root / "git" / pkg_name / flat_tag;
-        if (!std::filesystem::exists(git_cache)) {
+        if (!std::filesystem::exists(git_cache, ec)) {
             detail::log_info("fetching " + pkg_name + " (" + opts.git + " @ " + opts.tag + ")");
             if (auto r = detail::make_dirs(git_cache.parent_path()); !r)
                 return std::unexpected(r.error());
             if (auto r = git_fetch(opts.git, opts.tag, git_cache); !r)
                 return std::unexpected(r.error());
         }
-        std::filesystem::remove_all(dest);
+        std::filesystem::remove_all(dest, ec);
         return detail::copy_tree(git_cache, dest);
     }
     std::string ext {".tar.gz"};
@@ -259,12 +261,12 @@ Result<void> materialize_fetch(const std::string& pkg_name, const FetchOptions& 
     const std::filesystem::path tar_cache = root / "tarballs" / (opts.sha256 + ext);
     if (auto r = detail::make_dirs(tar_cache.parent_path()); !r)
         return std::unexpected(r.error());
-    if (!std::filesystem::exists(tar_cache)) {
+    if (!std::filesystem::exists(tar_cache, ec)) {
         detail::log_info("fetching " + pkg_name + " (" + opts.url + ")");
         if (auto r = tarball_fetch(opts.url, opts.sha256, tar_cache); !r)
             return std::unexpected(r.error());
     }
-    std::filesystem::remove_all(dest);
+    std::filesystem::remove_all(dest, ec);
     if (auto r = detail::make_dirs(dest); !r)
         return std::unexpected(r.error());
     return extract_tarball(tar_cache, dest);
@@ -284,15 +286,18 @@ Result<Package> Project::fetch(std::string_view name, const FetchOptions& opts) 
     auto lock = detail::read_lockfile(lock_file);
     const auto pin_it = lock.find(lock_key(pkg_name));
     const bool pinned = pin_it != lock.end() && pin_it->second == pin;
-    if (pinned && std::filesystem::exists(dest))
+    std::error_code ec;
+    if (pinned && std::filesystem::exists(dest, ec))
         return Package {pkg_name, dest}; /* offline fast path */
 
     if (auto r = materialize_fetch(pkg_name, opts, dest); !r)
         return std::unexpected(r.error());
 
-    lock[lock_key(pkg_name)] = pin;
-    if (auto r = detail::write_lockfile(lock_file, lock); !r)
-        return std::unexpected(r.error());
+    if (!pinned) { /* only touch the lockfile when the pin actually changes */
+        lock[lock_key(pkg_name)] = pin;
+        if (auto r = detail::write_lockfile(lock_file, lock); !r)
+            return std::unexpected(r.error());
+    }
     return Package {pkg_name, dest};
 }
 
@@ -319,13 +324,15 @@ Result<std::vector<Package>> Project::fetch_all(std::vector<std::pair<std::strin
     auto lock = detail::read_lockfile(lock_file);
     std::vector<Job> jobs;
     jobs.reserve(requests.size());
+    std::error_code ec;
     for (auto& [name, opts] : requests) {
         Job job;
         job.name = name;
         job.pin = opts.git.empty() ? opts.sha256 : opts.tag;
         job.dest = build_dir() / "packages" / name;
         const auto pin_it = lock.find(lock_key(name));
-        job.offline = pin_it != lock.end() && pin_it->second == job.pin && std::filesystem::exists(job.dest);
+        job.offline = pin_it != lock.end() && pin_it->second == job.pin &&
+                      std::filesystem::exists(job.dest, ec);
         jobs.push_back(std::move(job));
     }
 
@@ -350,11 +357,15 @@ Result<std::vector<Package>> Project::fetch_all(std::vector<std::pair<std::strin
         if (!job.outcome)
             return std::unexpected(job.outcome.error());
 
+    bool lock_dirty = false;
     for (const auto& job : jobs)
-        if (job.fetched)
+        if (job.fetched && lock[lock_key(job.name)] != job.pin) {
             lock[lock_key(job.name)] = job.pin;
-    if (auto r = detail::write_lockfile(lock_file, lock); !r)
-        return std::unexpected(r.error());
+            lock_dirty = true;
+        }
+    if (lock_dirty)
+        if (auto r = detail::write_lockfile(lock_file, lock); !r)
+            return std::unexpected(r.error());
 
     std::vector<Package> out;
     out.reserve(jobs.size());
@@ -440,6 +451,16 @@ std::string conanfile_in(const std::filesystem::path& cf) {
     return {};
 }
 
+/* string array member of a JSON object (empty when absent or malformed) */
+std::vector<std::string> json_str_array(const nlohmann::json& obj, const char* key) {
+    std::vector<std::string> out;
+    if (obj.contains(key) && obj[key].is_array())
+        for (const auto& v : obj[key])
+            if (v.is_string())
+                out.push_back(v.get<std::string>());
+    return out;
+}
+
 /* --- Project::conan ---------------------------------------------------------
  * Runs conan 2, parses the --format=json dependency graph, and returns one
  * Interface target ("conan") carrying the whole graph's usage requirements. */
@@ -471,21 +492,13 @@ Result<TargetRef> Project::conan(std::string_view conanfile) {
     std::vector<std::string> includes, link_paths, libs, defines;
     const auto apply_spec = [&](const nlohmann::json& spec) {
         auto& iface = add_interface_library("conan");
-        const auto strings = [](const nlohmann::json& obj, const char* key) {
-            std::vector<std::string> out;
-            if (obj.contains(key) && obj[key].is_array())
-                for (const auto& v : obj[key])
-                    if (v.is_string())
-                        out.push_back(v.get<std::string>());
-            return out;
-        };
-        for (const auto& d : strings(spec, "includes"))
+        for (const auto& d : json_str_array(spec, "includes"))
             iface.include_dirs(d);
-        for (const auto& d : strings(spec, "link_paths"))
+        for (const auto& d : json_str_array(spec, "link_paths"))
             iface.link_paths(d);
-        for (const auto& l : strings(spec, "libs"))
+        for (const auto& l : json_str_array(spec, "libs"))
             iface.link_libs(l);
-        for (const auto& d : strings(spec, "defines"))
+        for (const auto& d : json_str_array(spec, "defines"))
             iface.defines(d);
         return TargetRef {iface};
     };
@@ -525,14 +538,6 @@ Result<TargetRef> Project::conan(std::string_view conanfile) {
         !j["graph"]["nodes"].is_object())
         return std::unexpected(Error {Error::Kind::Fetch, "conan: unexpected --format=json output"});
 
-    auto str_array = [](const nlohmann::json& obj, const char* key) {
-        std::vector<std::string> out;
-        if (obj.contains(key) && obj[key].is_array())
-            for (const auto& v : obj[key])
-                if (v.is_string())
-                    out.push_back(v.get<std::string>());
-        return out;
-    };
     auto dir_array = [](const nlohmann::json& obj, const char* key,
                         const std::filesystem::path& pkg_folder) {
         std::vector<std::string> out;
@@ -561,11 +566,11 @@ Result<TargetRef> Project::conan(std::string_view conanfile) {
             includes.push_back(d);
         for (const auto& d : dir_array(root, "libdirs", pkg_folder))
             link_paths.push_back(d);
-        for (const auto& l : str_array(root, "libs"))
+        for (const auto& l : json_str_array(root, "libs"))
             libs.push_back(l);
-        for (const auto& l : str_array(root, "system_libs"))
+        for (const auto& l : json_str_array(root, "system_libs"))
             libs.push_back(l);
-        for (const auto& d : str_array(root, "defines"))
+        for (const auto& d : json_str_array(root, "defines"))
             defines.push_back(d);
     }
 
@@ -623,7 +628,8 @@ Result<TargetRef> Project::vcpkg(std::vector<std::string> packages) {
     std::string exe = "vcpkg";
     if (const char* root = std::getenv("VCPKG_ROOT"); root && *root) {
         const std::filesystem::path p = std::filesystem::path(root) / "vcpkg";
-        if (std::filesystem::exists(p))
+        std::error_code vec;
+        if (std::filesystem::exists(p, vec))
             exe = p.generic_string();
     }
     if (!detail::program_exists(exe))

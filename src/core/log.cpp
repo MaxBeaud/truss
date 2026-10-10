@@ -30,14 +30,7 @@ void log_line(const char* color, const char* level, std::string_view msg) {
     std::fflush(stdout);
 }
 
-bool g_verbose = false;
-
 } // namespace
-
-void log_set_verbose(bool v) { g_verbose = v; }
-
-/* verbose logging hooks land with phase 3 (fetch/resolve chatter). */
-bool log_is_verbose() { return g_verbose; }
 
 void log_info(std::string_view msg) { log_line(kGray, "[INFO]", msg); }
 void log_warn(std::string_view msg) { log_line(kOrange, "[WARN]", msg); }

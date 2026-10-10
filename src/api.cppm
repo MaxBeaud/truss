@@ -123,7 +123,7 @@ struct TargetTriple {
     std::string compiler;                       ///< compiler driver, e.g. "clang++"
     std::string ar;                             ///< archiver, e.g. "llvm-ar"
     std::string linker;                         ///< -fuse-ld= override ("" = driver default)
-    StdLib stdlib {StdLib::Default};            ///< stdlib selection ("" equivalent: default)
+    StdLib stdlib {StdLib::Default};            ///< stdlib selection (Default = compiler default)
 };
 
 /// Triple of the machine truss itself runs on.
@@ -316,10 +316,20 @@ public:
     }
 
     /* raw escape hatches (verbatim, compiler-specific) */
-    /// Raw compiler flags, appended verbatim.
-    Target& flags(std::string_view raw) { flags_ = std::string(raw); return *this; }
-    /// Raw linker flags, appended verbatim.
-    Target& linker_flags(std::string_view raw) { linker_flags_ = std::string(raw); return *this; }
+    /// Raw compiler flags, appended verbatim (repeat calls accumulate).
+    Target& flags(std::string_view raw) {
+        if (!flags_.empty() && !raw.empty())
+            flags_ += ' ';
+        flags_ += raw;
+        return *this;
+    }
+    /// Raw linker flags, appended verbatim (repeat calls accumulate).
+    Target& linker_flags(std::string_view raw) {
+        if (!linker_flags_.empty() && !raw.empty())
+            linker_flags_ += ' ';
+        linker_flags_ += raw;
+        return *this;
+    }
 
     /* --- options --- */
     /// C++ standard (Default = C++23).
@@ -479,13 +489,13 @@ public:
     Project(std::string name, int argc, char** argv);
 
     /// Create a new executable target owned by the project.
-    Executable& add_executable(std::string name);
+    Executable& add_executable(std::string name) { return add_target<Executable>(std::move(name)); }
     /// Create a new static library target.
-    StaticLib& add_static_library(std::string name);
+    StaticLib& add_static_library(std::string name) { return add_target<StaticLib>(std::move(name)); }
     /// Create a new shared library target.
-    SharedLib& add_shared_library(std::string name);
+    SharedLib& add_shared_library(std::string name) { return add_target<SharedLib>(std::move(name)); }
     /// Create a new header-only interface target.
-    Interface& add_interface_library(std::string name);
+    Interface& add_interface_library(std::string name) { return add_target<Interface>(std::move(name)); }
     /// Register a named task: `./truss <name>` builds first, then runs fn.
     void task(std::string name, TaskFn fn);
 
@@ -559,6 +569,14 @@ public:
     const std::vector<std::string>& only_targets() const { return only_targets_; }
 
 private:
+    template <class T>
+    T& add_target(std::string name) {
+        auto t = std::make_unique<T>(std::move(name));
+        auto& ref = *t;
+        targets_.push_back(std::move(t));
+        return ref;
+    }
+
     std::string name_;
     std::filesystem::path cwd_;
     std::vector<std::unique_ptr<Target>> targets_;

@@ -90,6 +90,4 @@ void NinjaWriter::default_targets(std::vector<std::string> names) {
     buf_ += '\n';
 }
 
-std::string NinjaWriter::str() const { return buf_; }
-
 } // namespace truss::detail

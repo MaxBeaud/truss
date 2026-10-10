@@ -501,3 +501,37 @@ Read `PLAN.MD` first. This file is the rulebook for any agent/human modifying th
   PCH/launcher/scan-deps reduce per-TU and configure cost further but the
   fixture does not enable them by default.
 - No regressions: 80 unit cases + all examples green.
+
+## 20. Final QC pass (post phase 12)
+Reviewed every library source for perf sinks, duplication, anti-patterns,
+dead code. Fixed:
+- Dead code: FlagSet::link (never written), log_is_verbose + g_verbose +
+  log_set_verbose (write-only channel), unused includes (cstdio/cctype/
+  functional). glob() kept (test-only convenience wrapper).
+- program_exists forked `sh -c command -v` on EVERY call (~4-6 per build:
+  llvm-ar, ccache, sccache, clang-scan-deps, conan, vcpkg). Memoized
+  (static map + mutex). Self-host no-op: 57 ms -> ~20 ms.
+- Manifest was rewritten every run (mtime churn): now write_file_if_changed;
+  NinjaWriter::str() returns const& (was a copy).
+- `./truss clean` resolved sources, scanned files and emitted a manifest
+  just to delete it: clean-only invocations now short-circuit (and work on
+  broken projects).
+- truss.lock was rewritten on every no-op fetch/fetch_all: now only when a
+  pin actually changes.
+- Exception-safety: throwing std::filesystem overloads (remove_all/remove/
+  exists without ec) violated the no-exceptions policy in pkg.cpp,
+  modules.cpp, build.cpp -> all use error_code overloads now.
+- Emitter: unit_for() deref without null check (UB if invariant breaks) ->
+  Internal error guard; unity batch members copied into a vector -> span;
+  dep_outputs copied into edge inputs -> moved.
+- API: flags()/linker_flags() REPLACED on repeat calls despite "appended
+  verbatim" docs -> accumulate (space-joined); the four add_* factories
+  were copy-paste -> one private add_target<T>; stale TargetTriple::stdlib
+  comment fixed.
+- conan() had the same JSON string-array lambda twice -> json_str_array.
+Noted, not changed (deliberate): regex module scanner (Manual mode is the
+precise escape hatch); per-edge flag-string copies (O(TU x flags),
+negligible); O(n^2) duplicate-name checks (n small); test executables run
+serially (output interleaving); unity obj paths embed the absolute unity
+path under objdir (valid, tested by filename search).
+Tests: 82 cases (new: clean-only short-circuit, flags accumulation).

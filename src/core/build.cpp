@@ -3,11 +3,11 @@ module;
 #include <array>
 #include <chrono>
 #include <cstddef>
-#include <cstdio>
 #include <cstdlib>
 #include <expected>
 #include <filesystem>
 #include <functional>
+#include <iterator>
 #include <map>
 #include <memory>
 #include <set>
@@ -369,7 +369,8 @@ Result<void> emit_manifest(const Project& proj, std::vector<ResolvedTarget>& res
                     Error::Kind::Config, "pch() is not yet supported on MSVC targets", std::filesystem::path(t.pch()),
                 });
             const std::filesystem::path hdr = t.pch();
-            if (!std::filesystem::exists(proj.cwd() / hdr))
+            std::error_code pch_ec;
+            if (!std::filesystem::exists(proj.cwd() / hdr, pch_ec))
                 return std::unexpected(Error {Error::Kind::Config, "pch: header not found", hdr});
             const std::string base = hdr.filename().generic_string();
             const std::string pch_dir = (build_dir / "pch" / t.name()).generic_string();
@@ -418,7 +419,12 @@ Result<void> emit_manifest(const Project& proj, std::vector<ResolvedTarget>& res
             CxxUnit unit;
             std::set<std::string> seen; /* dedupe bmi paths across members */
             for (const auto& m : members) {
-                auto imp = detail::resolve_module_imports(*unit_for(m), bmis);
+                const detail::ModuleUnitInfo* u = unit_for(m);
+                if (!u)
+                    return std::unexpected(Error {
+                        Error::Kind::Internal, "no scanned unit info for '" + m + "'", std::filesystem::path(m),
+                    });
+                auto imp = detail::resolve_module_imports(*u, bmis);
                 if (!imp)
                     return std::unexpected(imp.error());
                 /* imp->first is space-joined -fmodule-file=NAME=PATH tokens,
@@ -454,8 +460,8 @@ Result<void> emit_manifest(const Project& proj, std::vector<ResolvedTarget>& res
             constexpr size_t kBatch = 16;
             for (size_t begin = 0; begin < r.cxx_sources.size(); begin += kBatch) {
                 const size_t end = std::min(begin + kBatch, r.cxx_sources.size());
-                std::vector<std::string> members(r.cxx_sources.begin() + static_cast<std::ptrdiff_t>(begin),
-                                                 r.cxx_sources.begin() + static_cast<std::ptrdiff_t>(end));
+                const std::span<const std::string> members(r.cxx_sources.data() + begin,
+                                                           end - begin);
                 auto unit = merge_imports(members);
                 if (!unit)
                     return std::unexpected(unit.error());
@@ -481,7 +487,13 @@ Result<void> emit_manifest(const Project& proj, std::vector<ResolvedTarget>& res
         /* compile edges */
         std::vector<std::string> objects;
         for (const auto& b : r.bmis) {
-            auto imp = detail::resolve_module_imports(*unit_for(b.source), bmis);
+            const detail::ModuleUnitInfo* u = unit_for(b.source);
+            if (!u)
+                return std::unexpected(Error {
+                    Error::Kind::Internal, "no scanned unit info for '" + b.source + "'",
+                    std::filesystem::path(b.source),
+                });
+            auto imp = detail::resolve_module_imports(*u, bmis);
             if (!imp)
                 return std::unexpected(imp.error());
             NinjaWriter::Edge e;
@@ -613,7 +625,8 @@ Result<void> emit_manifest(const Project& proj, std::vector<ResolvedTarget>& res
             e.inputs = std::move(objects);
             /* samu's $in only carries explicit inputs, so dependency artifacts
              * (archives / shared libs) must be explicit, after the objects. */
-            e.inputs.insert(e.inputs.end(), dep_outputs.begin(), dep_outputs.end());
+            e.inputs.insert(e.inputs.end(), std::make_move_iterator(dep_outputs.begin()),
+                            std::make_move_iterator(dep_outputs.end()));
             e.vars = {
                 {"cxx", r.triple.compiler},
                 {"flags", link_res->driver},
@@ -716,40 +729,10 @@ Project::Project(std::string name, std::span<char* const> argv) : name_(std::mov
         }
         else requested_tasks_.emplace_back(a);
     }
-
-    detail::log_set_verbose(verbose_);
 }
 
 Project::Project(std::string name, int argc, char** argv)
     : Project(std::move(name), std::span<char* const>(argv, static_cast<std::size_t>(argc))) {}
-
-Executable& Project::add_executable(std::string name) {
-    auto t = std::make_unique<Executable>(std::move(name));
-    auto& ref = *t;
-    targets_.push_back(std::move(t));
-    return ref;
-}
-
-StaticLib& Project::add_static_library(std::string name) {
-    auto t = std::make_unique<StaticLib>(std::move(name));
-    auto& ref = *t;
-    targets_.push_back(std::move(t));
-    return ref;
-}
-
-SharedLib& Project::add_shared_library(std::string name) {
-    auto t = std::make_unique<SharedLib>(std::move(name));
-    auto& ref = *t;
-    targets_.push_back(std::move(t));
-    return ref;
-}
-
-Interface& Project::add_interface_library(std::string name) {
-    auto t = std::make_unique<Interface>(std::move(name));
-    auto& ref = *t;
-    targets_.push_back(std::move(t));
-    return ref;
-}
 
 void Project::task(std::string name, TaskFn fn) {
     user_tasks_.emplace_back(std::move(name), std::move(fn));
@@ -774,6 +757,20 @@ Result<void> Project::build() {
             "paths containing spaces or ':' are not supported yet (project root or build dir)",
             cwd_,
         });
+
+    std::vector<std::string> tasks = requested_tasks_;
+    if (tasks.empty())
+        tasks.push_back("build");
+
+    /* clean-only: never resolve sources or emit a manifest just to delete it;
+     * clean also works on a project whose sources are broken */
+    if (std::ranges::all_of(tasks, [](const std::string& t) { return t == "clean"; })) {
+        if (auto r = detail::remove_tree(bld); !r) {
+            detail::log_error(r.error());
+            return std::unexpected(r.error());
+        }
+        return {};
+    }
 
     if (auto r = validate(targets_); !r) {
         detail::log_error(r.error());
@@ -882,16 +879,14 @@ Result<void> Project::build() {
         return std::unexpected(r.error());
     }
     const std::filesystem::path manifest = bld / "ninja" / "build.ninja";
-    if (auto r = detail::write_file(manifest, w.str()); !r) {
+    /* if_changed: an unchanged manifest keeps its mtime (no disk churn) */
+    if (auto r = detail::write_file_if_changed(manifest, w.str()); !r) {
         detail::log_error(r.error());
         return std::unexpected(r.error());
     }
 
     /* dispatch tasks */
     const TaskContext ctx {name_, mode_, bld, cwd_, jobs_, verbose_};
-    std::vector<std::string> tasks = requested_tasks_;
-    if (tasks.empty())
-        tasks.push_back("build");
 
     /* build hooks: pre_build once before the first compile step, post_build
      * once after the first successful one; a failing hook aborts */

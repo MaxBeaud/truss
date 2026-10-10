@@ -516,3 +516,40 @@ TEST_CASE("modules: regex scan misses line-spliced imports, Manual finds them") 
         CHECK(proj.build().has_value());
     }
 }
+
+TEST_CASE("clean: clean-only invocation removes the build dir without resolving sources") {
+    ScratchDir scratch {"clean-task"};
+    char prog[] = "truss-tests";
+    char* argv[] = {prog};
+    REQUIRE(detail::write_file("ct/main.cpp", "int main() { return 0; }\n").has_value());
+    {
+        Project proj("clean-task", 1, argv);
+        proj.add_executable("app").sources("ct/main.cpp");
+        REQUIRE(proj.build().has_value());
+        CHECK(std::filesystem::exists("build/debug"));
+    }
+    char* clean_argv[] = {prog, (char*)"clean"};
+    {
+        Project proj("clean-task", 2, clean_argv);
+        proj.add_executable("app").sources("ct/main.cpp");
+        REQUIRE(proj.build().has_value());
+        CHECK_FALSE(std::filesystem::exists("build/debug"));
+    }
+    /* clean works even when sources are broken (nothing is resolved) */
+    {
+        Project proj("clean-task", 2, clean_argv);
+        proj.add_executable("app").sources("ct/does-not-exist.cpp");
+        CHECK(proj.build().has_value());
+    }
+}
+
+TEST_CASE("api: flags()/linker_flags() accumulate across calls") {
+    char prog[] = "truss-tests";
+    char* argv[] = {prog};
+    Project proj("flags-accum", 1, argv);
+    auto& t = proj.add_executable("app");
+    t.flags("-DFOO=1").flags("-DBAR=2");
+    t.linker_flags("-Wl,-s").linker_flags("-lm");
+    CHECK(t.flags() == "-DFOO=1 -DBAR=2");
+    CHECK(t.linker_flags() == "-Wl,-s -lm");
+}

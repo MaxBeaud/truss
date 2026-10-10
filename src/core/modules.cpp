@@ -2,7 +2,6 @@ module;
 #include <algorithm>
 #include <expected>
 #include <filesystem>
-#include <functional>
 #include <map>
 #include <regex>
 #include <sstream>
@@ -151,7 +150,8 @@ scan_deps_requires(const std::string& compiler, std::string_view compile_flags,
         "clang-scan-deps", "--format=p1689", "-compilation-database=" + cdb.generic_string(),
     };
     auto outcome = run_process_stdout(argv);
-    std::filesystem::remove(cdb);
+    std::error_code rm_ec;
+    std::filesystem::remove(cdb, rm_ec); /* best effort */
     if (!outcome)
         return std::unexpected(outcome.error());
     if (outcome->exit_code != 0)

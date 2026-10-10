@@ -22,8 +22,6 @@ void log_warn(std::string_view msg);
 void log_success(std::string_view msg);
 void log_error(std::string_view msg);
 void log_error(const Error& err);
-void log_set_verbose(bool v);
-bool log_is_verbose();
 
 /* --- filesystem ---------------------------------------------------------- */
 Result<std::string> read_file(const std::filesystem::path& p);
@@ -87,7 +85,6 @@ scan_deps_requires(const std::string& compiler, std::string_view compile_flags,
 struct FlagSet {
     std::string compile;    /* flags for C++ compile edges */
     std::string compile_c;  /* flags for C compile edges (gnu17 instead of c++XX) */
-    std::string link;       /* flags for link edges */
 };
 
 /* Link flags split by where they belong: driver-side flags go before the
@@ -153,7 +150,7 @@ public:
     void build(Edge e);
     void phony(std::string_view name, std::vector<std::string> ins);
     void default_targets(std::vector<std::string> names);
-    std::string str() const;
+    const std::string& str() const { return buf_; }
 
 private:
     std::string buf_;
