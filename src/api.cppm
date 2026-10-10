@@ -341,6 +341,13 @@ public:
      * never use it.
      */
     Target& pch(std::string_view path) { pch_ = std::string(path); return *this; }
+    /**
+     * \brief Unity build: concatenate this target's C/C++ sources into batch
+     * TUs (16 per batch) under build/{mode}/unity/{target}/, compiled instead
+     * of the originals. Module units (.cppm) are never batched. Faster clean
+     * builds; coarser incremental rebuilds.
+     */
+    Target& unity(bool v = true) { unity_ = v; return *this; }
     /// .cppm handling mode (Default = Auto).
     Target& modules_mode(ModulesMode m) { modules_ = m; return *this; }
     /// Position-independent code (on by default for libraries).
@@ -373,6 +380,7 @@ public:
     Lto lto() const { return lto_; }
     Hardening hardening() const { return hardening_; }
     const std::string& pch() const { return pch_; }
+    bool unity() const { return unity_; }
     ModulesMode modules_mode() const { return modules_; }
     bool pic() const { return pic_; }
     const std::optional<TargetTriple>& triple_override() const { return triple_; }
@@ -395,6 +403,7 @@ private:
     Lto lto_ {};
     Hardening hardening_ {};
     std::string pch_;
+    bool unity_ {false};
     ModulesMode modules_ {};
     bool pic_ {false};
     bool test_ {false};

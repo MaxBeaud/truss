@@ -221,6 +221,14 @@ Result<void> write_file(const std::filesystem::path& p, std::string_view data) {
     return {};
 }
 
+/* write only when content differs: keeps mtimes stable so generated build
+ * inputs (unity TUs) do not trigger spurious recompiles */
+Result<void> write_file_if_changed(const std::filesystem::path& p, std::string_view data) {
+    if (auto existing = read_file(p); existing && *existing == data)
+        return {};
+    return write_file(p, data);
+}
+
 Result<void> make_dirs(const std::filesystem::path& p) {
     std::error_code ec;
     std::filesystem::create_directories(p, ec);

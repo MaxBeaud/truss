@@ -463,3 +463,15 @@ Read `PLAN.MD` first. This file is the rulebook for any agent/human modifying th
 - Test gotcha: setting a source's mtime to `now()+1s` makes it perpetually
   newer than the outputs built right after, so every later build rebuilds.
   Use `now()` (the build itself takes ms, so outputs land strictly newer).
+
+### Step 6: unity builds
+- `target.unity()`: batch TUs of 16 (`build/<mode>/unity/<target>/unity_N.cpp`,
+  each `#include`s absolute member paths), compiled instead of the originals;
+  `.cppm` units never batched (cxx_sources already excludes them). Batch BMI
+  wiring = union of members' imports (merge_imports dedupes by BMI path).
+  `detail::write_file_if_changed` keeps batch mtimes stable so unchanged
+  builds stay no-ops.
+- Measured on the 60-TU bench fixture: clean 539 ms -> ~285 ms (~1.9x).
+- Object paths nest the absolute unity path under objdir
+  ("objdir//home/...") — valid POSIX (double slash collapses); tests must
+  locate unity objects by filename search, not by path guess.

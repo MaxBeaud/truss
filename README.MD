@@ -58,6 +58,7 @@ ninja manifest that samurai then executes incrementally.
   - [Compiler options](#compiler-options)
   - [Hardening](#hardening)
   - [Precompiled headers](#precompiled-headers)
+  - [Unity builds](#unity-builds)
   - [Custom tasks](#custom-tasks)
   - [Build hooks](#build-hooks)
 - [C++ modules](#c-modules)
@@ -256,6 +257,24 @@ is dependency-tracked like any other edge (editing the PCH header rebuilds
 the target's objects; editing one source rebuilds only that object). Module
 BMI rules and C sources never use the PCH, and MSVC targets are a clear
 `Config` error in v0.
+
+### Unity builds
+
+`target.unity()` batches that target's C/C++ sources into generated batch
+TUs (16 sources each) under `build/<mode>/unity/<target>/`, compiled
+instead of the originals:
+
+```cpp
+proj.add_static_library("core").sources_in("src").unity();
+```
+
+Clean builds get much faster (one preprocess + one compiler warm-up per
+batch instead of per TU — the 60-TU benchmark fixture builds ~2x faster
+with unity). The trade-off is coarser incrementality: editing one source
+rebuilds its whole batch, and same-named `static` functions or anonymous
+namespace entities in different sources can now collide. Module units
+(`.cppm`) are never batched; batch files are only rewritten when their
+membership changes, so unchanged builds stay no-ops.
 
 ### Custom tasks
 

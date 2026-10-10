@@ -406,3 +406,63 @@ TEST_CASE("pch: MSVC family is a clear Config error") {
     CHECK(r.error().kind == Error::Kind::Config);
     CHECK(r.error().message.find("MSVC") != std::string::npos);
 }
+
+TEST_CASE("unity: batches sources and rebuilds the batch on any member edit") {
+    ScratchDir scratch {"unity"};
+    char prog[] = "truss-tests";
+    char* argv[] = {prog};
+    /* 19 sources -> two batches (16 + 3) */
+    for (int i = 0; i < 18; ++i)
+        REQUIRE(detail::write_file("u/f" + std::to_string(i) + ".cpp",
+                                   "int f" + std::to_string(i) + "() { return " + std::to_string(i) + "; }\n").has_value());
+    REQUIRE(detail::write_file("u/main.cpp", "int f0();\nint main() { return f0(); }\n").has_value());
+    Project proj("unity", 1, argv);
+    proj.add_executable("app").unity().sources_in("u");
+    REQUIRE(proj.build().has_value());
+
+    /* two batch TUs generated: 16 + 3 members, originals never compiled directly */
+    auto batch0 = detail::read_file("build/debug/unity/app/unity_0.cpp");
+    auto batch1 = detail::read_file("build/debug/unity/app/unity_1.cpp");
+    REQUIRE(batch0.has_value());
+    REQUIRE(batch1.has_value());
+    const auto count_includes = [](const std::string& s) {
+        size_t n = 0;
+        for (size_t p = 0; (p = s.find("#include", p)) != std::string::npos; ++p)
+            ++n;
+        return n;
+    };
+    CHECK(count_includes(*batch0) == 16);
+    CHECK(count_includes(*batch1) == 3);
+
+    auto manifest = detail::read_file("build/debug/ninja/build.ninja");
+    REQUIRE(manifest.has_value());
+    CHECK(manifest->find("unity/app/unity_0.cpp") != std::string::npos);
+    CHECK(manifest->find("u/f3.cpp") == std::string::npos); /* originals not compiled directly */
+
+    /* editing a member rebuilds its batch object, not the other batch */
+    const bool f3_in_batch0 = batch0->find("/f3.cpp") != std::string::npos;
+    const auto find_obj = [](const std::string& name) {
+        for (auto it = std::filesystem::recursive_directory_iterator("build/debug/obj");
+             it != std::filesystem::recursive_directory_iterator {}; ++it)
+            if (it->path().filename() == name)
+                return it->path();
+        return std::filesystem::path {};
+    };
+    const auto o0 = find_obj("unity_0.cpp.o");
+    const auto o1 = find_obj("unity_1.cpp.o");
+    REQUIRE(!o0.empty());
+    REQUIRE(!o1.empty());
+    const auto m0 = std::filesystem::last_write_time(o0);
+    const auto m1 = std::filesystem::last_write_time(o1);
+    std::filesystem::last_write_time("u/f3.cpp", std::filesystem::file_time_type::clock::now());
+    Project proj2("unity", 1, argv);
+    proj2.add_executable("app").unity().sources_in("u");
+    REQUIRE(proj2.build().has_value());
+    if (f3_in_batch0) {
+        CHECK(std::filesystem::last_write_time(o0) != m0); /* batch 0 rebuilt */
+        CHECK(std::filesystem::last_write_time(o1) == m1); /* batch 1 untouched */
+    } else {
+        CHECK(std::filesystem::last_write_time(o0) == m0);
+        CHECK(std::filesystem::last_write_time(o1) != m1);
+    }
+}

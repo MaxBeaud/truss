@@ -11,6 +11,7 @@ module;
 #include <map>
 #include <memory>
 #include <set>
+#include <span>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -369,6 +370,79 @@ Result<void> emit_manifest(const Project& proj, const std::vector<ResolvedTarget
             return it == unit_by_path.end() ? nullptr : it->second;
         };
 
+        /* compile units: plain sources, or unity batch TUs that #include them
+         * (module units never batched). A batch needs the union of every
+         * member's BMI wiring, so imports are merged at generation time. */
+        struct CxxUnit {
+            std::string path;
+            std::string imp_flags;
+            std::vector<std::string> imp_ins;
+        };
+        std::vector<CxxUnit> cxx_units;
+        const auto merge_imports = [&](std::span<const std::string> members) -> Result<CxxUnit> {
+            CxxUnit unit;
+            std::set<std::string> seen; /* dedupe bmi paths across members */
+            for (const auto& m : members) {
+                auto imp = detail::resolve_module_imports(*unit_for(m), bmis);
+                if (!imp)
+                    return std::unexpected(imp.error());
+                /* imp->first is space-joined -fmodule-file=NAME=PATH tokens,
+                 * imp->second the same BMIs as dep paths (parallel order) */
+                std::vector<std::string> tokens;
+                {
+                    std::string_view fs = imp->first;
+                    while (!fs.empty()) {
+                        const auto sp = fs.find(' ');
+                        tokens.emplace_back(fs.substr(0, sp == std::string_view::npos ? fs.size() : sp));
+                        if (sp == std::string_view::npos)
+                            break;
+                        fs.remove_prefix(sp + 1);
+                    }
+                }
+                for (size_t i = 0; i < imp->second.size(); ++i) {
+                    if (!seen.insert(imp->second[i]).second)
+                        continue;
+                    unit.imp_ins.push_back(imp->second[i]);
+                    if (i < tokens.size()) {
+                        if (!unit.imp_flags.empty())
+                            unit.imp_flags += ' ';
+                        unit.imp_flags += tokens[i];
+                    }
+                }
+            }
+            return unit;
+        };
+        if (t.unity() && !r.cxx_sources.empty()) {
+            const std::string unity_dir = (build_dir / "unity" / t.name()).generic_string();
+            if (auto r2 = detail::make_dirs(unity_dir); !r2)
+                return std::unexpected(r2.error());
+            constexpr size_t kBatch = 16;
+            for (size_t begin = 0; begin < r.cxx_sources.size(); begin += kBatch) {
+                const size_t end = std::min(begin + kBatch, r.cxx_sources.size());
+                std::vector<std::string> members(r.cxx_sources.begin() + static_cast<std::ptrdiff_t>(begin),
+                                                 r.cxx_sources.begin() + static_cast<std::ptrdiff_t>(end));
+                auto unit = merge_imports(members);
+                if (!unit)
+                    return std::unexpected(unit.error());
+                std::string body = "/* truss unity batch for target '" + t.name() + "' */\n";
+                for (const auto& m : members)
+                    body += "#include \"" + (proj.cwd() / m).generic_string() + "\"\n";
+                const std::string gen = unity_dir + "/unity_" + std::to_string(begin / kBatch) + ".cpp";
+                if (auto r2 = detail::write_file_if_changed(gen, body); !r2)
+                    return std::unexpected(r2.error());
+                unit->path = gen;
+                cxx_units.push_back(std::move(*unit));
+            }
+        } else {
+            for (const auto& src : r.cxx_sources) {
+                auto unit = merge_imports(std::span<const std::string> {&src, 1});
+                if (!unit)
+                    return std::unexpected(unit.error());
+                unit->path = src;
+                cxx_units.push_back(std::move(*unit));
+            }
+        }
+
         /* compile edges */
         std::vector<std::string> objects;
         for (const auto& b : r.bmis) {
@@ -395,21 +469,18 @@ Result<void> emit_manifest(const Project& proj, const std::vector<ResolvedTarget
             w.build(std::move(e));
             objects.push_back(b.object);
         }
-        for (const auto& src : r.cxx_sources) {
-            auto imp = detail::resolve_module_imports(*unit_for(src), bmis);
-            if (!imp)
-                return std::unexpected(imp.error());
-            const std::string obj = r.objdir + "/" + src + obj_ext(r.triple.family);
+        for (const auto& unit : cxx_units) {
+            const std::string obj = r.objdir + "/" + unit.path + obj_ext(r.triple.family);
             NinjaWriter::Edge e;
             e.outputs = {obj};
             e.rule = msvc ? "compile_cxx_msvc" : "compile_cxx";
-            e.inputs = {src};
-            e.implicit_ins = imp->second;
+            e.inputs = {unit.path};
+            e.implicit_ins = unit.imp_ins;
             if (!pch_out.empty())
                 e.implicit_ins.push_back(pch_out);
             std::string flags = cflags->compile;
-            if (!imp->first.empty())
-                flags += " " + imp->first;
+            if (!unit.imp_flags.empty())
+                flags += " " + unit.imp_flags;
             if (!pch_flag.empty())
                 flags += " " + pch_flag;
             e.vars = {

@@ -28,6 +28,7 @@ bool log_is_verbose();
 /* --- filesystem ---------------------------------------------------------- */
 Result<std::string> read_file(const std::filesystem::path& p);
 Result<void> write_file(const std::filesystem::path& p, std::string_view data);
+Result<void> write_file_if_changed(const std::filesystem::path& p, std::string_view data);
 Result<void> make_dirs(const std::filesystem::path& p);
 Result<void> remove_tree(const std::filesystem::path& p);
 
