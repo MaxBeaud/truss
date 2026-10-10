@@ -1,0 +1,69 @@
+# Internals {#internals_page}
+
+How truss is built internally. Everything here is **not public API**: the
+`truss:impl` partition is not re-exported by the primary module, so `import
+truss;` never sees it, and its contents may change between releases. The
+[Internals group](@ref grp_internals) lists the internal declarations; this
+page explains the architecture around them.
+
+## Module structure
+
+- `src/truss.cppm` — primary module interface; re-exports `truss:api` only.
+- `src/api.cppm` (`truss:api`) — the public API: Project, Target hierarchy,
+  Config, Error/Result, enums.
+- `src/impl.cppm` (`truss:impl`) — internal declarations in `truss::detail`,
+  imported by the implementation units but never re-exported.
+- `src/core/*.cpp` — implementation units (`module truss;`) that define both
+  partitions' functions. File-local machinery lives in anonymous namespaces
+  there, so it is described below rather than in the group.
+
+## Build flow (`Project::build()`)
+
+1. **Validate** — target names, duplicate detection, clean-only invocations
+   short-circuit before any resolution.
+2. **Resolve** — glob sources, scan module units (regex or clang-scan-deps
+   in `ModulesMode::Manual`), apply `Config` overlays to triples, resolve
+   dependency graphs and link order.
+3. **Emit** — `emit_manifest()` (anonymous namespace in `build.cpp`) writes
+   the ninja graph: rules per language/BMI/PCH/link, unity TU generation,
+   launcher (`ccache`) prefixing, per-edge variables. The manifest is written
+   with `write_file_if_changed` so an unchanged graph never dirties samurai.
+4. **Execute** — vendored samurai runs in-process (`samu_build`), then
+   registered tasks (`test`, custom `task()`s) run.
+
+## Subsystems
+
+| Unit | Role |
+|---|---|
+| `src/core/fs.cpp` | glob engine (brace expansion -> one regex per alternative, literal-prefix walk, hidden entries skipped), file helpers, truss.lock parsing |
+| `src/core/modules.cpp` | regex module scanner (`export module`/`import` line matching), BMI name resolution, p1689 `scan_deps_requires` fallback |
+| `src/core/flags.cpp` | enum-indexed flag tables per compiler family (GCC/Clang/MSVC), triple/Config resolution, launcher detection |
+| `src/core/ninja.cpp` | `NinjaWriter` + ninja escaping rules |
+| `src/core/samu.cpp` | C shim over vendored samurai (`vendor/samurai`), in-process build + compdb |
+| `src/core/proc.cpp` | `posix_spawn` process runner, memoized `program_exists` |
+| `src/core/pkg.cpp` | fetch (git/tarball + sha256), `~/.cache/truss` cache, hardlink materialization, conan/vcpkg fingerprint + configure-skip |
+| `src/core/target.cpp` | host triple detection, `Target::depends_on` bookkeeping |
+| `src/core/build.cpp` | the emitter: rules, edges, unity batching, PCH edges, scan-deps wiring, `Project::build()` orchestration |
+| `src/core/log.cpp` | colored stderr logging |
+
+## Invariants
+
+- **No exceptions across the API**: everything internal returns
+  `Result<T>` = `std::expected<T, Error>`; `std::filesystem` calls use the
+  `error_code` overloads.
+- **Path safety**: ninja paths escape `:` and spaces; truss additionally
+  rejects `$` in project paths at startup.
+- **Determinism**: identical inputs produce a byte-identical `build.ninja`
+  (sorted edges, memoized probes), so `write_file_if_changed` skips writes.
+- **Module wiring**: BMI edges are separate rules; consumers get
+  `-fmodule-file=` flags from the scanner (Auto) or clang-scan-deps (Manual);
+  unity never batches `.cppm` units.
+- **jthread pools**: locals captured by reference must be declared *before*
+  the pool vector (destruction order would otherwise join too late).
+
+## Vendored samurai
+
+`vendor/samurai` is samurai (ninja-compatible backend) compiled into truss
+as a static shim. Patches are minimal and listed in `vendor/samurai/README.truss.md`;
+`AGENT.MD` records the verified behavioral quirks (e.g. clang-scan-deps
+p1689 output shape on LLVM 23).

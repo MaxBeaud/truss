@@ -8,10 +8,11 @@ PROJECT_NUMBER         = 0.1.0
 OUTPUT_DIRECTORY       = build/docs
 OUTPUT_LANGUAGE        = English
 
-# inputs: the public API partition is the reference (README.MD stays the
-# GitHub user guide — its markdown anchors don't map to doxygen sections)
-INPUT                  = src/api.cppm
-FILE_PATTERNS          = *.cppm
+# inputs: the public API partition is the reference, truss:impl + the
+# internals page document the implementation (README.MD stays the GitHub
+# user guide — its markdown anchors don't map to doxygen sections)
+INPUT                  = src/api.cppm src/impl.cppm docs/internals.md
+FILE_PATTERNS          = *.cppm *.md
 RECURSIVE              = NO
 
 EXTRACT_ALL            = YES
@@ -26,7 +27,7 @@ HTML_EXTRA_STYLESHEET  =
 GENERATE_LATEX         = NO
 GENERATE_TAGFILE       = build/docs/truss.tag
 
-WARN_IF_UNDOCUMENTED   = NO
+WARN_IF_UNDOCUMENTED   = YES
 WARN_NO_PARAMDOC       = NO
 QUIET                  = YES
 

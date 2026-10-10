@@ -535,3 +535,33 @@ negligible); O(n^2) duplicate-name checks (n small); test executables run
 serially (output interleaving); unity obj paths embed the absolute unity
 path under objdir (valid, tested by filename search).
 Tests: 82 cases (new: clean-only short-circuit, flags accumulation).
+
+## 21. Doxygen coverage pass (docs audit follow-up)
+
+Public API (src/api.cppm): 100% member coverage (WARN_IF_UNDOCUMENTED=YES,
+zero warnings — now a permanent guard in the Doxyfile), plus @param/@return
+on all parameterized entry points and per-enumerator `///<` docs on every
+enum. Internals: src/impl.cppm is fully documented (every truss::detail
+declaration, brief-level) and grouped via `\ingroup grp_internals` into a
+"Internals" group (nav: Topics -> Internals); docs/internals.md adds an
+"Internals" page (nav: Pages -> Internals) describing module structure,
+build flow, subsystems (incl. anonymous-namespace machinery in src/core/*.cpp,
+which doxygen cannot see) and invariants. Doxyfile INPUT = api.cppm +
+impl.cppm + docs/internals.md.
+
+Verified doxygen 1.18 facts:
+- `/*` inside a `/** */` block comment NESTS (doxygen counts nesting): a doc
+  block containing "src/**.cpp" swallows the rest of the file. Use `///` line
+  comments for text containing `/*`.
+- A `{` at end of a doc-comment line opens a verbatim block (unmatched </tt>
+  warnings). Inline `{a,b}` mid-line is safe; escape or rephrase trailing ones.
+- `\memberof <group>` on namespace members fails ("class 'grp_internals' ...
+  is not documented") — doxygen wants a class. `\ingroup <group>` on each
+  declaration works and keeps members on the namespace page too.
+- A `\defgroup ... \{` around a namespace only adds the NAMESPACE to the
+  group, not its members; the group page stays thin without per-member
+  \ingroup.
+- Doxygen 1.18 nav calls groups "Topics" (topics.html), not "Modules";
+  no modules.html is generated.
+- WARN_NO_PARAMDOC=NO + WARN_IF_UNDOCUMENTED=YES: params are documented by
+  choice, members are enforced.

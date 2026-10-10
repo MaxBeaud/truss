@@ -29,32 +29,78 @@ export namespace truss {
 inline constexpr std::string_view kVersion = "0.1.0";
 
 /// Target operating system.
-enum class Os { Unknown = 0, Linux, Windows, MacOS, FreeBSD, Android, Emscripten };
+enum class Os {
+    Unknown = 0, ///< not detected / not recognized
+    Linux, Windows, MacOS, FreeBSD, Android, Emscripten, ///< supported platforms
+};
 /// Target instruction set.
-enum class Arch { Unknown = 0, X64, X86, Arm64, Arm32, Riscv64, Ppc64, S390x, Wasm32 };
+enum class Arch {
+    Unknown = 0, ///< not detected / not recognized
+    X64, X86, Arm64, Arm32, Riscv64, Ppc64, S390x, Wasm32, ///< supported ISAs
+};
 /// Compiler driver dialect (flag syntax family).
-enum class CompilerFamily { Unknown = 0, Gcc, Clang, Msvc, Tcc };
+enum class CompilerFamily {
+    Unknown = 0,   ///< unrecognized driver (clear error at build time)
+    Gcc, Clang,    ///< GNU and clang driver flag syntax
+    Msvc,          ///< cl.exe / clang-cl syntax (validated with clang-cl)
+    Tcc,           ///< detected but not supported by truss
+};
 /// Debug or release; `Default` option values resolve per mode.
 enum class BuildMode { Debug, Release };
 
 /// C++ standard (`Default` = C++23).
 enum class CppStandard { Default = 0, Cpp11, Cpp14, Cpp17, Cpp20, Cpp23, Cpp26 };
 /// Warning level (`Default` = -Wall -Wextra).
-enum class Warnings { Default = 0, None, Minimal, All, Pedantic };
-/// Debug symbol level (`Default` = Full in debug, None in release).
-enum class DebugInfo { Default = 0, None, Minimal, Medium, Full };
-/// Optimization level (`Default` = -O0 debug, -O2 release).
-enum class Optimization { Default = 0, None, O1, O2, Size, O3 };
-/// Sanitizer set (`Default` = off; debug builds often pick Address+Ub).
-enum class Sanitizer { Default = 0, None, Address, Ub, All };
-/// Link-time optimization (`Default` = off).
-enum class Lto { Default = 0, None, Full, Thin };
+enum class Warnings {
+    Default = 0, ///< -Wall -Wextra
+    None,        ///< -w
+    Minimal,     ///< -Wall
+    All,         ///< -Wall -Wextra
+    Pedantic,    ///< -Wall -Wextra -Wpedantic
+};
+/// Debug symbol level (`Default` resolves per mode).
+enum class DebugInfo {
+    Default = 0, ///< Full in debug, None in release
+    None,        ///< -g0
+    Minimal,     ///< -g1
+    Medium,      ///< -g2
+    Full,        ///< -g3 (MSVC: /Z7, embedded — no PDB races)
+};
+/// Optimization level.
+enum class Optimization {
+    Default = 0, ///< -O0 in debug, -O2 in release
+    None,        ///< -O0
+    O1, O2,      ///< -O1 / -O2
+    Size,        ///< -Os
+    O3,          ///< -O3 (MSVC: /O2)
+};
+/// Sanitizer set.
+enum class Sanitizer {
+    Default = 0, ///< off
+    None,        ///< explicitly off
+    Address,     ///< -fsanitize=address (+ -fno-omit-frame-pointer)
+    Ub,          ///< -fsanitize=undefined
+    All,         ///< address + undefined
+};
+/// Link-time optimization.
+enum class Lto {
+    Default = 0, ///< off
+    None,        ///< explicitly off
+    Full,        ///< -flto=full (MSVC: /GL + /LTCG)
+    Thin,        ///< -flto=thin (no MSVC equivalent: maps to /GL)
+};
 /**
  * \brief Compiler/linker hardening tiers.
  * `Default` resolves to Light (truss's default hardening stack); None opts out.
  * See README "Hardening" for the per-tier flag tables.
  */
-enum class Hardening { Default = 0, None, Light, Medium, Max };
+enum class Hardening {
+    Default = 0, ///< resolves to Light
+    None,        ///< no hardening flags
+    Light,       ///< stack protector + hardened link (relro/full-bind/no-exec stack)
+    Medium,      ///< Light + pattern-filled uninit locals, CFI, stack-clash (x86-64), libc++ hardened mode
+    Max,         ///< Medium + libc++ debug mode + libstdc++ assertions
+};
 
 /**
  * \brief How .cppm sources in a user target get compiled and wired.
@@ -64,12 +110,25 @@ enum class Hardening { Default = 0, None, Light, Medium, Max };
  * Manual: same wiring but the import lists come from clang-scan-deps
  * (p1689) at configure time — authoritative, at ~10 ms per TU; clang only.
  */
-enum class ModulesMode { Default = 0, Off, Auto, Manual };
+enum class ModulesMode {
+    Default = 0, ///< resolves to Auto
+    Off,         ///< no BMI wiring (.cppm sources become a Config error)
+    Auto,        ///< BMI edges + regex-scanned import wiring (heuristic, fast)
+    Manual,      ///< import lists from clang-scan-deps (authoritative, ~10 ms/TU, clang only)
+};
 
 /// C++ standard library selection (emitted as -stdlib= on compile + link).
-enum class StdLib { Default = 0, Libstdcxx, Libcxx };
+enum class StdLib {
+    Default = 0, ///< compiler's default stdlib (no -stdlib= emitted)
+    Libstdcxx,   ///< -stdlib=libstdc++ (clang only)
+    Libcxx,      ///< -stdlib=libc++ (clang only; g++ + libc++ is a Config error)
+};
 /// Named toolchain bundles: expands to compiler + stdlib + archiver.
-enum class Toolchain { Default = 0, LLVM, GCC };
+enum class Toolchain {
+    Default = 0, ///< host defaults (no override)
+    LLVM,        ///< clang++ + libc++ + llvm-ar
+    GCC,         ///< g++ + libstdc++ + ar
+};
 
 /**
  * \brief fetch() sources. Exactly one pair must be set:
@@ -90,7 +149,12 @@ struct Package {
 };
 
 /// Artifact kind of a Target.
-enum class TargetKind { Executable, StaticLibrary, SharedLibrary, Interface };
+enum class TargetKind {
+    Executable,     ///< linked binary under build/{mode}/bin/
+    StaticLibrary,  ///< .a / .lib under build/{mode}/lib/
+    SharedLibrary,  ///< .so / .dll under build/{mode}/lib/
+    Interface,      ///< header-only: usage requirements only, no artifact
+};
 
 /**
  * \brief A range whose elements can name a string (vector<string>,
@@ -105,7 +169,14 @@ concept StringRange = std::ranges::range<R> &&
 /// Error carried by every fallible truss operation (no exceptions).
 struct Error {
     /// Error category.
-    enum class Kind { Io, Config, Command, Fetch, Toolchain, Internal };
+    enum class Kind {
+        Io,        ///< filesystem / stream failure
+        Config,    ///< bad build-script input (bad name, unknown target, ...)
+        Command,   ///< a spawned process failed
+        Fetch,     ///< dependency download/verification failed
+        Toolchain, ///< required tool missing or unsupported
+        Internal,  ///< truss invariant violated (please report)
+    };
     Kind kind {Kind::Internal};                   ///< category
     std::string message;                          ///< human-readable, multi-line OK
     std::optional<std::filesystem::path> path {}; ///< offending file/dir when known
@@ -126,7 +197,9 @@ struct TargetTriple {
     StdLib stdlib {StdLib::Default};            ///< stdlib selection (Default = compiler default)
 };
 
-/// Triple of the machine truss itself runs on.
+/// Triple of the machine truss itself runs on (compiler from $CXX when set).
+/// \return os/arch/family detected from predefined macros, plus default
+///         driver and archiver (llvm-ar for clang when available).
 TargetTriple host_triple();
 
 /**
@@ -193,10 +266,12 @@ public:
     Target(const Target&) = delete;
     Target& operator=(const Target&) = delete;
 
-    /// Source glob patterns relative to the project root.
+    /// \brief Source glob patterns relative to the project root.
     /// `*` matches within one path component, `**` across components,
     /// `?` one char, `{a,b}` alternation. e.g. "src/**.cpp", "src/*.c".
     /// Overloads: single pattern, braced list, any range of strings.
+    /// \param pattern glob, or literal path (which must exist).
+    /// \return `*this` for chaining.
     Target& sources(std::string_view pattern) {
         source_patterns_.emplace_back(pattern);
         return *this;
@@ -347,10 +422,11 @@ public:
     /// Hardening tier (Default = Light: truss's default hardening stack).
     Target& harden(Hardening h) { hardening_ = h; return *this; }
     /**
-     * \brief Precompiled header for this target's C++ sources (path relative
-     * to the project root). clang: `-include-pch`; GCC: `.gch` + `-I`/`-include`.
-     * Not yet supported on MSVC targets (clear error); module BMI and C rules
-     * never use it.
+     * \brief Precompiled header for this target's C++ sources.
+     * clang: `-include-pch`; GCC: `.gch` + `-I`/`-include`. Output lives
+     * under build/{mode}/pch/{target}/ and is dependency-tracked. Not yet
+     * supported on MSVC targets (clear error); module BMI and C rules never use it.
+     * \param path the header, relative to the project root.
      */
     Target& pch(std::string_view path) { pch_ = std::string(path); return *this; }
     /**
@@ -358,17 +434,25 @@ public:
      * TUs (16 per batch) under build/{mode}/unity/{target}/, compiled instead
      * of the originals. Module units (.cppm) are never batched. Faster clean
      * builds; coarser incremental rebuilds.
+     * \param v true to enable (default when called with no argument).
      */
     Target& unity(bool v = true) { unity_ = v; return *this; }
     /// .cppm handling mode (Default = Auto).
     Target& modules_mode(ModulesMode m) { modules_ = m; return *this; }
     /// Position-independent code (on by default for libraries).
     Target& pic(bool v) { pic_ = v; return *this; }
-    /// Full triple override for this target (cross-compiling); wins over proj.configure().
+    /**
+     * \brief Full triple override for this target (cross-compiling); wins
+     * over proj.configure() completely (it is not merged with the Config).
+     */
     Target& cross_target(TargetTriple t) { triple_ = t; return *this; }
-    /// Depend on another target: links its artifact, inherits its usage requirements.
+    /**
+     * \brief Depend on another target: links its artifact, inherits its
+     * usage requirements (include dirs always; defines/link flags from
+     * Interface targets). Order is tracked in the ninja graph.
+     */
     Target& depends_on(const Target& dep);
-    /// Mark as a test executable (run by `./truss test`).
+    /// Mark as a test executable (built and run by `./truss test`).
     Target& is_test(bool v = true) { test_ = v; return *this; }
 
     /* --- read access (used by the build engine) --- */
@@ -485,16 +569,34 @@ using TaskFn = std::function<Result<void>(const TaskContext&)>;
  */
 class Project {
 public:
+    /**
+     * \brief Parse truss's CLI from argv (span form).
+     * \param name project name (used in messages and generated vcpkg.json)
+     * \param argv full process argv; truss parses `debug|release`, tasks,
+     *             `-j`, `-v`, `-n`, `--explain`, `--target`, `--build-dir`
+     *             (see README "Tasks & flags"); unknown options become a
+     *             Config error reported by build().
+     */
     Project(std::string name, std::span<char* const> argv);
+    /**
+     * \brief Parse truss's CLI from argc/argv (classic main() form).
+     * \param name project name (used in messages and generated vcpkg.json)
+     * \param argc argument count
+     * \param argv argument array, passed straight to the span form.
+     */
     Project(std::string name, int argc, char** argv);
 
-    /// Create a new executable target owned by the project.
+    /**
+     * \brief Create a new executable target owned by the project.
+     * \param name bare target name (no path, no platform extension)
+     * \return reference for builder chaining; the target lives as long as the Project.
+     */
     Executable& add_executable(std::string name) { return add_target<Executable>(std::move(name)); }
-    /// Create a new static library target.
+    /// \copydoc add_executable
     StaticLib& add_static_library(std::string name) { return add_target<StaticLib>(std::move(name)); }
-    /// Create a new shared library target.
+    /// \copydoc add_executable
     SharedLib& add_shared_library(std::string name) { return add_target<SharedLib>(std::move(name)); }
-    /// Create a new header-only interface target.
+    /// \copydoc add_executable
     Interface& add_interface_library(std::string name) { return add_target<Interface>(std::move(name)); }
     /// Register a named task: `./truss <name>` builds first, then runs fn.
     void task(std::string name, TaskFn fn);
@@ -521,6 +623,11 @@ public:
      * \brief fetch(): git (shallow clone pinned to tag) or tarball
      * (sha256-verified), cached in ~/.cache/truss, materialized into
      * build/{mode}/packages/{name}, pinned in ./truss.lock. Call before build().
+     * \param name package name (letters, digits, '-', '_', '.'; names the
+     *             materialized directory and the truss.lock entry)
+     * \param opts exactly one source: git+tag or url+sha256 (see FetchOptions)
+     * \return the materialized Package, or a Config/Fetch/Io Error.
+     *         Already-pinned + present packages return without touching the network.
      */
     Result<Package> fetch(std::string_view name, const FetchOptions& opts);
 
@@ -528,36 +635,63 @@ public:
      * \brief fetch_all(): fetch several packages concurrently (the network-
      * bound work overlaps). Same pinning/caching as fetch(); results come
      * back in request order and the first error aborts the build script.
+     * \param requests (name, options) pairs; duplicate names are a Config error
+     * \return the materialized Packages in request order, or the first Error.
      */
     Result<std::vector<Package>> fetch_all(std::vector<std::pair<std::string, FetchOptions>> requests);
 
     /**
      * \brief add_subdirectory(): convention-based vendored project — a static
      * library named after the directory, sources from its src/ tree, includes
-     * from its include/ dir when present. Returns the target for depends_on().
+     * from its include/ dir when present.
+     * \param dir directory (relative to the project root or absolute)
+     * \return a handle to the created target for depends_on(), or a Config
+     *         Error (missing directory, name clash with a non-subdirectory target).
      */
     Result<TargetRef> add_subdirectory(const std::filesystem::path& dir);
-    /// \copydoc add_subdirectory
+    /**
+     * \brief add_subdirectory() for a fetched Package: uses the package's
+     * materialized directory (build/{mode}/packages/{name}).
+     * \param pkg a Package returned by fetch()/fetch_all().
+     * \return a handle to the created target for depends_on(), or a Config
+     *         Error (missing directory, name clash with a non-subdirectory target).
+     */
     Result<TargetRef> add_subdirectory(const Package& pkg) { return add_subdirectory(pkg.dir); }
 
     /**
      * \brief conan 2: runs `conan install` on the conanfile (path to
      * conanfile.txt/.py or its directory), or generates one from versioned
-     * refs — conan({"zlib/1.3.1", "fmt/11.0.2"}). Returns an Interface target
-     * carrying the whole graph's includes/libs/defines — depends_on() it.
+     * refs — conan({"zlib/1.3.1", "fmt/11.0.2"}).
+     * \param conanfile path to a conanfile or its directory ("." = project root)
+     * \return one Interface target ("conan") carrying the whole graph's
+     *         includes/libs/defines — depends_on() it; or a Toolchain/Fetch Error.
+     *         Idempotent: a second call returns the same target. An unchanged
+     *         conanfile fingerprint skips the tool invocation entirely.
      */
     Result<TargetRef> conan(std::string_view conanfile = ".");
-    /// \copydoc conan
+    /**
+     * \brief conan() with a generated conanfile: writes the versioned refs
+     * into build/{mode}/packages/conan_generated/conanfile.txt and runs the
+     * path overload on it.
+     * \param refs conan references, each versioned ("fmt/11.0.2"); an
+     *             unversioned ref is a Config error.
+     * \return the "conan" Interface target, same as the path overload.
+     */
     Result<TargetRef> conan(std::initializer_list<std::string_view> refs);
 
     /**
      * \brief vcpkg manifest mode: uses the project's vcpkg.json, or generates
      * one from `packages`. Installs under build/{mode}/vcpkg_installed and
      * returns an Interface target for depends_on().
+     * \param packages vcpkg names (unversioned); empty = use the existing
+     *                 vcpkg.json in the project root
+     * \return the "vcpkg" Interface target, or a Toolchain/Config Error.
+     *         Idempotent; an unchanged vcpkg.json skips the install.
      */
     Result<TargetRef> vcpkg(std::vector<std::string> packages);
 
-    /// Generates the ninja manifest, runs samurai, then the requested tasks. Errors are logged and returned.
+    /// Generates the ninja manifest, runs samurai, then the requested tasks.
+    /// \return success, or the first Error (also logged). Errors are logged.
     Result<void> build();
 
     const std::string& name() const { return name_; }
