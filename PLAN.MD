@@ -370,7 +370,7 @@ truss. ✅
 6. Doxygen reference (`./setup.sh docs` → `build/docs/`), `///` on the public API;
    README stays the user guide. ✅
 
-### Phase 12 — Performance
+### Phase 12 — Performance ✅
 
 0. Benchmark harness: `./setup.sh bench` — generated 60-TU fixture (30 core + 20 mid +
    10 app, 2 static libs + exe) under `build/bench/fixture`; truss vs xmake vs a plain
