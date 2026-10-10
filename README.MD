@@ -213,10 +213,12 @@ This is what makes package managers ergonomic: `conan()`/`vcpkg()` return an
 | `harden(...)` | `None, Light, Medium, Max` | **Light** (see below) |
 | `pic(bool)` | position-independent code | on for libs |
 | `modules_mode(...)` | `Off, Auto, Manual` | `Auto` |
+| `pch("hdr.hpp")` | precompiled header for this target | off (see below) |
+| `unity(bool)` | batch sources into 16-source TUs | off (see below) |
 | `cross_target(triple)` | see [Cross-compiling](#cross-compiling--msvc) | host |
 | `is_test(bool)` | mark as a test for the `test` task | false |
-| `flags("...")` | raw compiler flags, verbatim | — |
-| `linker_flags("...")` | raw linker flags, verbatim | — |
+| `flags("...")` | raw compiler flags, verbatim (repeat calls accumulate) | — |
+| `linker_flags("...")` | raw linker flags, verbatim (repeat calls accumulate) | — |
 
 `Default` enum values always resolve per mode (e.g. `DebugInfo::Default` →
 `Full` in debug, `None` in release), so a single build script does the right
