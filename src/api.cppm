@@ -495,6 +495,13 @@ public:
     Result<Package> fetch(std::string_view name, const FetchOptions& opts);
 
     /**
+     * \brief fetch_all(): fetch several packages concurrently (the network-
+     * bound work overlaps). Same pinning/caching as fetch(); results come
+     * back in request order and the first error aborts the build script.
+     */
+    Result<std::vector<Package>> fetch_all(std::vector<std::pair<std::string, FetchOptions>> requests);
+
+    /**
      * \brief add_subdirectory(): convention-based vendored project — a static
      * library named after the directory, sources from its src/ tree, includes
      * from its include/ dir when present. Returns the target for depends_on().

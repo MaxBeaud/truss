@@ -76,6 +76,31 @@ TEST_CASE("fetch: option validation errors before any network access") {
     CHECK(r4.error().kind == Error::Kind::Config);
 }
 
+TEST_CASE("fetch_all: validation and duplicate names before any network access") {
+    char prog[] = "truss-tests";
+    char* argv[] = {prog};
+    Project proj("pkg-test", 1, argv);
+
+    FetchOptions git;
+    git.git = "https://example.invalid/repo";
+    git.tag = "v1";
+
+    /* duplicate names rejected */
+    auto dup = proj.fetch_all({{"a", git}, {"a", git}});
+    REQUIRE_FALSE(dup.has_value());
+    CHECK(dup.error().message.find("duplicate") != std::string::npos);
+
+    /* per-entry option validation still applies */
+    auto bad = proj.fetch_all({{"a", git}, {"b", FetchOptions {}}});
+    REQUIRE_FALSE(bad.has_value());
+    CHECK(bad.error().kind == Error::Kind::Config);
+
+    /* empty batch is a valid no-op */
+    auto empty = proj.fetch_all({});
+    REQUIRE(empty.has_value());
+    CHECK(empty->empty());
+}
+
 TEST_CASE("conan list overload: refs must be versioned") {
     char prog[] = "truss-tests";
     char* argv[] = {prog};

@@ -8,6 +8,7 @@ module;
 #include <span>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 #include <cstdlib>
@@ -196,10 +197,12 @@ Result<void> copy_tree(const std::filesystem::path& from, const std::filesystem:
 } // namespace detail
 
 /* --- Project::fetch --------------------------------------------------------
- * v0.1 fetches sequentially; parallel fetch is a later optimization (network
- * bound, rare path — not worth the complexity yet). */
-Result<Package> Project::fetch(std::string_view name, const FetchOptions& opts) {
-    const std::string pkg_name(name);
+ * fetch() fetches one package; fetch_all() overlaps the network-bound work
+ * of several fetches on worker threads. Both share validation, caching and
+ * lockfile pinning. */
+namespace {
+
+Result<void> validate_fetch(const std::string& pkg_name, const FetchOptions& opts) {
     if (pkg_name.empty() || pkg_name == "." || pkg_name == "..")
         return std::unexpected(Error {Error::Kind::Config, "fetch: package name must not be empty, '.' or '..'"});
     for (const char c : pkg_name) {
@@ -220,19 +223,15 @@ Result<Package> Project::fetch(std::string_view name, const FetchOptions& opts) 
         return std::unexpected(Error {Error::Kind::Config, "fetch('" + pkg_name + "'): git source needs a tag"});
     if (use_tarball && opts.sha256.empty())
         return std::unexpected(Error {Error::Kind::Config, "fetch('" + pkg_name + "'): tarball source needs sha256"});
+    return {};
+}
 
-    const std::string pin = use_git ? opts.tag : opts.sha256;
-    const std::filesystem::path dest = build_dir() / "packages" / pkg_name;
-    const std::filesystem::path lock_file = cwd_ / "truss.lock";
-
-    auto lock = detail::read_lockfile(lock_file);
-    const auto pin_it = lock.find(lock_key(pkg_name));
-    const bool pinned = pin_it != lock.end() && pin_it->second == pin;
-    if (pinned && std::filesystem::exists(dest))
-        return Package {pkg_name, dest}; /* offline fast path */
-
+/* cache + materialize (no lockfile I/O): worker-thread safe — every job
+ * touches its own dest, caches are per-package, log lines are single printfs */
+Result<void> materialize_fetch(const std::string& pkg_name, const FetchOptions& opts,
+                               const std::filesystem::path& dest) {
     const auto root = cache_root();
-    if (use_git) {
+    if (!opts.git.empty()) {
         const std::string flat_tag = [&] {
             std::string s = opts.tag;
             for (char& c : s)
@@ -249,34 +248,119 @@ Result<Package> Project::fetch(std::string_view name, const FetchOptions& opts) 
                 return std::unexpected(r.error());
         }
         std::filesystem::remove_all(dest);
-        if (auto r = detail::copy_tree(git_cache, dest); !r)
-            return std::unexpected(r.error());
-    } else {
-        std::string ext {".tar.gz"};
-        for (std::string_view cand : {".tar.gz", ".tgz", ".tar.xz", ".txz", ".tar.bz2", ".tar"})
-            if (opts.url.ends_with(cand)) {
-                ext = std::string(cand);
-                break;
-            }
-        const std::filesystem::path tar_cache = root / "tarballs" / (opts.sha256 + ext);
-        if (auto r = detail::make_dirs(tar_cache.parent_path()); !r)
-            return std::unexpected(r.error());
-        if (!std::filesystem::exists(tar_cache)) {
-            detail::log_info("fetching " + pkg_name + " (" + opts.url + ")");
-            if (auto r = tarball_fetch(opts.url, opts.sha256, tar_cache); !r)
-                return std::unexpected(r.error());
+        return detail::copy_tree(git_cache, dest);
+    }
+    std::string ext {".tar.gz"};
+    for (std::string_view cand : {".tar.gz", ".tgz", ".tar.xz", ".txz", ".tar.bz2", ".tar"})
+        if (opts.url.ends_with(cand)) {
+            ext = std::string(cand);
+            break;
         }
-        std::filesystem::remove_all(dest);
-        if (auto r = detail::make_dirs(dest); !r)
-            return std::unexpected(r.error());
-        if (auto r = extract_tarball(tar_cache, dest); !r)
+    const std::filesystem::path tar_cache = root / "tarballs" / (opts.sha256 + ext);
+    if (auto r = detail::make_dirs(tar_cache.parent_path()); !r)
+        return std::unexpected(r.error());
+    if (!std::filesystem::exists(tar_cache)) {
+        detail::log_info("fetching " + pkg_name + " (" + opts.url + ")");
+        if (auto r = tarball_fetch(opts.url, opts.sha256, tar_cache); !r)
             return std::unexpected(r.error());
     }
+    std::filesystem::remove_all(dest);
+    if (auto r = detail::make_dirs(dest); !r)
+        return std::unexpected(r.error());
+    return extract_tarball(tar_cache, dest);
+}
+
+} // namespace
+
+Result<Package> Project::fetch(std::string_view name, const FetchOptions& opts) {
+    const std::string pkg_name(name);
+    if (auto r = validate_fetch(pkg_name, opts); !r)
+        return std::unexpected(r.error());
+
+    const std::string pin = opts.git.empty() ? opts.sha256 : opts.tag;
+    const std::filesystem::path dest = build_dir() / "packages" / pkg_name;
+    const std::filesystem::path lock_file = cwd_ / "truss.lock";
+
+    auto lock = detail::read_lockfile(lock_file);
+    const auto pin_it = lock.find(lock_key(pkg_name));
+    const bool pinned = pin_it != lock.end() && pin_it->second == pin;
+    if (pinned && std::filesystem::exists(dest))
+        return Package {pkg_name, dest}; /* offline fast path */
+
+    if (auto r = materialize_fetch(pkg_name, opts, dest); !r)
+        return std::unexpected(r.error());
 
     lock[lock_key(pkg_name)] = pin;
     if (auto r = detail::write_lockfile(lock_file, lock); !r)
         return std::unexpected(r.error());
     return Package {pkg_name, dest};
+}
+
+Result<std::vector<Package>> Project::fetch_all(std::vector<std::pair<std::string, FetchOptions>> requests) {
+    for (const auto& [name, opts] : requests)
+        if (auto r = validate_fetch(name, opts); !r)
+            return std::unexpected(r.error());
+    for (size_t i = 0; i < requests.size(); ++i)
+        for (size_t j = i + 1; j < requests.size(); ++j)
+            if (requests[i].first == requests[j].first)
+                return std::unexpected(Error {
+                    Error::Kind::Config, "fetch_all: duplicate package name '" + requests[i].first + "'",
+                });
+
+    struct Job {
+        std::string name;
+        std::string pin;
+        std::filesystem::path dest;
+        bool offline {false};   /* lockfile pin hit: nothing to do */
+        bool fetched {false};   /* materialized by this call: needs a lock entry */
+        Result<void> outcome {};
+    };
+    const std::filesystem::path lock_file = cwd_ / "truss.lock";
+    auto lock = detail::read_lockfile(lock_file);
+    std::vector<Job> jobs;
+    jobs.reserve(requests.size());
+    for (auto& [name, opts] : requests) {
+        Job job;
+        job.name = name;
+        job.pin = opts.git.empty() ? opts.sha256 : opts.tag;
+        job.dest = build_dir() / "packages" / name;
+        const auto pin_it = lock.find(lock_key(name));
+        job.offline = pin_it != lock.end() && pin_it->second == job.pin && std::filesystem::exists(job.dest);
+        jobs.push_back(std::move(job));
+    }
+
+    /* worker threads pull disjoint jobs (round-robin chunks); the network and
+     * tar/git processes dominate, so 8 concurrent fetches is plenty */
+    {
+        std::vector<std::jthread> pool;
+        const size_t nthreads = std::min<size_t>(jobs.size(), 8);
+        for (size_t t = 0; t < nthreads; ++t)
+            pool.emplace_back([&, t] {
+                for (size_t i = t; i < jobs.size(); i += nthreads) {
+                    if (jobs[i].offline)
+                        continue;
+                    jobs[i].outcome = materialize_fetch(jobs[i].name, requests[i].second, jobs[i].dest);
+                    jobs[i].fetched = jobs[i].outcome.has_value();
+                }
+            });
+        /* jthread destructors join at scope end */
+    }
+
+    for (auto& job : jobs)
+        if (!job.outcome)
+            return std::unexpected(job.outcome.error());
+
+    for (const auto& job : jobs)
+        if (job.fetched)
+            lock[lock_key(job.name)] = job.pin;
+    if (auto r = detail::write_lockfile(lock_file, lock); !r)
+        return std::unexpected(r.error());
+
+    std::vector<Package> out;
+    out.reserve(jobs.size());
+    for (const auto& job : jobs)
+        out.push_back(Package {job.name, job.dest});
+    return out;
 }
 
 /* --- Project::add_subdirectory ---------------------------------------------

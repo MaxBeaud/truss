@@ -436,3 +436,14 @@ Read `PLAN.MD` first. This file is the rulebook for any agent/human modifying th
   skipping `.git` via `disable_recursion_pending()` instead of copying then
   deleting it. Verified: fetched git packages show link count 2 in
   `build/<mode>/packages/`; tarball packages stay count 1 (tar extracts fresh).
+
+### Step 4: parallel fetch
+- `proj.fetch_all({{name, FetchOptions{...}}, ...})`: validates all entries
+  first (duplicate names = Config error), then runs cache+materialize on up
+  to 8 `std::jthread`s (round-robin job chunks), writes the lockfile once,
+  returns Packages in request order, first error aborts.
+- Thread safety: each job owns its dest dir; caches are per-package; log
+  lines are single `printf` calls (libc-atomic, verified interleaved-but-
+  intact under concurrent fetch).
+- Verified: cold-cache fetch example downloads both packages concurrently
+  (0.9 s total), lockfile gets both pins.

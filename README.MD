@@ -332,6 +332,13 @@ auto pkg = proj.fetch("fmt", {
 });
 auto fmt = proj.add_subdirectory(pkg->dir);
 proj.add_executable("app").depends_on(*fmt);
+
+// several packages at once (downloads overlap):
+auto pkgs = proj.fetch_all({
+    {"fmt",  truss::FetchOptions{.git = "https://github.com/fmtlib/fmt", .tag = "11.0.2"}},
+    {"zlib", truss::FetchOptions{.url = "https://zlib.net/zlib-1.3.1.tar.gz",
+                                 .sha256 = "9a93b2b7df..." }},
+});
 ```
 
 Exactly one of `git+tag` (shallow clone pinned to a tag/branch/commit) or
