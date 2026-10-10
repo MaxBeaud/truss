@@ -189,7 +189,9 @@ Result<FlagSet> build_flags(const TargetTriple& triple, BuildMode mode,
         add(fs.compile, f);
         add(fs.compile_c, f);
     };
-    if (triple.stdlib != StdLib::Default && !msvc)
+    /* -stdlib= is a clang driver flag; GCC's default is libstdc++ (no flag)
+     * and GCC+libc++ is rejected earlier, so only clang gets it. */
+    if (triple.stdlib != StdLib::Default && !msvc && triple.family == CompilerFamily::Clang)
         add_both(triple.stdlib == StdLib::Libcxx ? "-stdlib=libc++" : "-stdlib=libstdc++");
     if (msvc) add_both("/utf-8 /EHsc /nologo");
     add_both(msvc ? kWarningFlagsMsvc[static_cast<std::size_t>(warnings)]
@@ -269,7 +271,7 @@ Result<LinkFlags> link_flags(const TargetTriple& triple, BuildMode mode, DebugIn
         add(lf.driver, kSanitizerLinkFlags[static_cast<std::size_t>(sanitizer)]);
         add(lf.driver, kLtoLinkFlags[static_cast<std::size_t>(lto)]);
         add(lf.driver, kHardeningLinkFlags[hi]);
-        if (triple.stdlib != StdLib::Default)
+        if (triple.stdlib != StdLib::Default && triple.family == CompilerFamily::Clang)
             add(lf.driver, triple.stdlib == StdLib::Libcxx ? "-stdlib=libc++" : "-stdlib=libstdc++");
         for (const auto& p : link_paths) add(lf.linker, "-L\"" + p + "\"");
         for (const auto& p : framework_paths) add(lf.linker, "-F\"" + p + "\"");

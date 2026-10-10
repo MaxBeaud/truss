@@ -334,6 +334,13 @@ public:
     Target& lto(Lto l) { lto_ = l; return *this; }
     /// Hardening tier (Default = Light: truss's default hardening stack).
     Target& harden(Hardening h) { hardening_ = h; return *this; }
+    /**
+     * \brief Precompiled header for this target's C++ sources (path relative
+     * to the project root). clang: `-include-pch`; GCC: `.gch` + `-I`/`-include`.
+     * Not yet supported on MSVC targets (clear error); module BMI and C rules
+     * never use it.
+     */
+    Target& pch(std::string_view path) { pch_ = std::string(path); return *this; }
     /// .cppm handling mode (Default = Auto).
     Target& modules_mode(ModulesMode m) { modules_ = m; return *this; }
     /// Position-independent code (on by default for libraries).
@@ -365,6 +372,7 @@ public:
     Sanitizer sanitizer() const { return sanitizer_; }
     Lto lto() const { return lto_; }
     Hardening hardening() const { return hardening_; }
+    const std::string& pch() const { return pch_; }
     ModulesMode modules_mode() const { return modules_; }
     bool pic() const { return pic_; }
     const std::optional<TargetTriple>& triple_override() const { return triple_; }
@@ -386,6 +394,7 @@ private:
     Sanitizer sanitizer_ {};
     Lto lto_ {};
     Hardening hardening_ {};
+    std::string pch_;
     ModulesMode modules_ {};
     bool pic_ {false};
     bool test_ {false};

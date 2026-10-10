@@ -258,6 +258,13 @@ Result<void> emit_manifest(const Project& proj, const std::vector<ResolvedTarget
     const bool any_msvc = std::ranges::any_of(resolved, [](const ResolvedTarget& r) {
         return r.triple.family == CompilerFamily::Msvc;
     });
+    if (std::ranges::any_of(resolved, [](const ResolvedTarget& r) { return !r.target->pch().empty(); }))
+        w.rule("compile_pch", {
+            /* no launcher: ccache's PCH support is unreliable */
+            {"command", "$cxx $flags -x c++-header -MMD -MF $depfile -c $in -o $out"},
+            {"deps", "gcc"},
+            {"description", "PCH $out"},
+        });
     if (any_msvc) {
         /* header deps via /showIncludes: the vendored samurai parses these
          * lines (deps = msvc, see vendor/samurai TRUSS-VENDOR.txt) */
@@ -316,6 +323,39 @@ Result<void> emit_manifest(const Project& proj, const std::vector<ResolvedTarget
         if (!cflags)
             return std::unexpected(cflags.error());
 
+        /* precompiled header: one generation edge; every C++ object of this
+         * target depends on it and carries the use-flag. GCC finds the .gch
+         * through -I + -include <base>; clang takes -include-pch directly. */
+        std::string pch_out, pch_flag;
+        if (!t.pch().empty()) {
+            if (msvc)
+                return std::unexpected(Error {
+                    Error::Kind::Config, "pch() is not yet supported on MSVC targets", std::filesystem::path(t.pch()),
+                });
+            const std::filesystem::path hdr = t.pch();
+            if (!std::filesystem::exists(proj.cwd() / hdr))
+                return std::unexpected(Error {Error::Kind::Config, "pch: header not found", hdr});
+            const std::string base = hdr.filename().generic_string();
+            const std::string pch_dir = (build_dir / "pch" / t.name()).generic_string();
+            if (r.triple.family == CompilerFamily::Gcc) {
+                pch_out = pch_dir + "/" + base + ".gch";
+                pch_flag = "-I" + pch_dir + " -include " + base;
+            } else {
+                pch_out = pch_dir + "/" + base + ".pch";
+                pch_flag = "-include-pch " + pch_out;
+            }
+            NinjaWriter::Edge pe;
+            pe.outputs = {pch_out};
+            pe.rule = "compile_pch";
+            pe.inputs = {hdr.generic_string()};
+            pe.vars = {
+                {"cxx", r.triple.compiler},
+                {"flags", cflags->compile},
+                {"depfile", pch_out + ".d"},
+            };
+            w.build(std::move(pe));
+        }
+
         /* BMIs visible to this target: own + transitive depends_on */
         std::map<std::string, std::string, std::less<>> bmis;
         std::set<const Target*> seen;
@@ -365,9 +405,13 @@ Result<void> emit_manifest(const Project& proj, const std::vector<ResolvedTarget
             e.rule = msvc ? "compile_cxx_msvc" : "compile_cxx";
             e.inputs = {src};
             e.implicit_ins = imp->second;
+            if (!pch_out.empty())
+                e.implicit_ins.push_back(pch_out);
             std::string flags = cflags->compile;
             if (!imp->first.empty())
                 flags += " " + imp->first;
+            if (!pch_flag.empty())
+                flags += " " + pch_flag;
             e.vars = {
                 {"cxx", r.triple.compiler},
                 {"flags", flags},

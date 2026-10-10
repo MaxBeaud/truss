@@ -57,6 +57,7 @@ ninja manifest that samurai then executes incrementally.
   - [Usage requirements & propagation](#usage-requirements--propagation)
   - [Compiler options](#compiler-options)
   - [Hardening](#hardening)
+  - [Precompiled headers](#precompiled-headers)
   - [Custom tasks](#custom-tasks)
   - [Build hooks](#build-hooks)
 - [C++ modules](#c-modules)
@@ -238,6 +239,23 @@ stdlib you link (each stdlib ignores the other's macro).
 proj.add_executable("app").sources_in("src")
    .harden(truss::Hardening::Max);   // maximum paranoia
 ```
+
+### Precompiled headers
+
+`target.pch(header)` precompiles one header for that target's C++ sources —
+one extra `PCH` build edge, and every object of the target carries the use
+flag:
+
+```cpp
+proj.add_static_library("core").sources_in("src").pch("include/stdinc.hpp");
+```
+
+clang uses `-include-pch`; GCC generates a `.gch` and finds it through
+`-I`/`-include`. The PCH output lives under `build/<mode>/pch/<target>/` and
+is dependency-tracked like any other edge (editing the PCH header rebuilds
+the target's objects; editing one source rebuilds only that object). Module
+BMI rules and C sources never use the PCH, and MSVC targets are a clear
+`Config` error in v0.
 
 ### Custom tasks
 

@@ -447,3 +447,19 @@ Read `PLAN.MD` first. This file is the rulebook for any agent/human modifying th
   intact under concurrent fetch).
 - Verified: cold-cache fetch example downloads both packages concurrently
   (0.9 s total), lockfile gets both pins.
+
+### Step 5: precompiled headers
+- `target.pch(path)`: one `compile_pch` edge (`-x c++-header -MMD`), output
+  under `build/<mode>/pch/<target>/`; every C++ object edge gets the use-flag
+  + the PCH as an implicit input. clang: `-include-pch <out.pch>`; GCC:
+  `<base>.gch` single file + `-I <pchdir> -include <base>` (verified on
+  g++ 16.2). MSVC family = Config error. compile_pch rule has NO launcher
+  (ccache+PCH unreliable).
+- Pre-existing bug fixed on the way: `Config().toolchain(GCC)` emitted
+  `-stdlib=libstdc++`, which this GCC 16.2.1 rejects (GCC's default is
+  libstdc++; `-stdlib=` is a clang driver flag). flags.cpp now emits
+  `-stdlib=` only for the Clang family (GCC+Libstdcxx = no flag, GCC+Libcxx
+  already rejected by apply_config).
+- Test gotcha: setting a source's mtime to `now()+1s` makes it perpetually
+  newer than the outputs built right after, so every later build rebuilds.
+  Use `now()` (the build itself takes ms, so outputs land strictly newer).

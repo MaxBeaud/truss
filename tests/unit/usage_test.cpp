@@ -2,6 +2,7 @@ module;
 #include <doctest/doctest.h>
 
 #include <filesystem>
+#include <chrono>
 #include <expected>
 #include <string>
 #include <vector>
@@ -311,4 +312,97 @@ TEST_CASE("pkg: conan configure-skip caches a spec keyed by conanfile hash") {
         REQUIRE(z.has_value());
         CHECK(std::filesystem::last_write_time(spec) != mtime1);
     }
+}
+
+TEST_CASE("pch: clang -include-pch edge + rebuild minimality") {
+    ScratchDir scratch {"pch-clang"};
+    char prog[] = "truss-tests";
+    char* argv[] = {prog};
+    REQUIRE(detail::write_file("pc/pch.hpp", "#pragma once\n#include <string>\ninline int pf() { return 42; }\n").has_value());
+    REQUIRE(detail::write_file("pc/a.cpp", "int pf();\nint a() { return pf(); }\n").has_value());
+    REQUIRE(detail::write_file("pc/b.cpp", "int pf();\nint b() { return pf() + 1; }\nint main() { return b() - 43; }\n").has_value());
+    Project proj("pch-clang", 1, argv);
+    proj.add_executable("app").pch("pc/pch.hpp").sources({"pc/a.cpp", "pc/b.cpp"});
+    REQUIRE(proj.build().has_value());
+
+    auto manifest = detail::read_file("build/debug/ninja/build.ninja");
+    REQUIRE(manifest.has_value());
+    CHECK(manifest->find("rule compile_pch") != std::string::npos);
+    CHECK(manifest->find("-include-pch") != std::string::npos);
+    CHECK(std::filesystem::exists("build/debug/pch/app/pch.hpp.pch"));
+
+    /* touch the PCH header: both objects rebuild */
+    const auto oa = std::filesystem::path("build/debug/obj/x64-linux-clang/app/pc/a.cpp.o");
+    const auto ob = std::filesystem::path("build/debug/obj/x64-linux-clang/app/pc/b.cpp.o");
+    const auto ma = std::filesystem::last_write_time(oa);
+    const auto mb = std::filesystem::last_write_time(ob);
+    std::filesystem::last_write_time("pc/pch.hpp", std::filesystem::file_time_type::clock::now());
+    Project proj2("pch-clang", 1, argv);
+    proj2.add_executable("app").pch("pc/pch.hpp").sources({"pc/a.cpp", "pc/b.cpp"});
+    REQUIRE(proj2.build().has_value());
+    CHECK(std::filesystem::last_write_time(oa) != ma);
+    CHECK(std::filesystem::last_write_time(ob) != mb);
+
+    /* touch one TU: only that object rebuilds */
+    const auto ma2 = std::filesystem::last_write_time(oa);
+    const auto mb2 = std::filesystem::last_write_time(ob);
+    std::filesystem::last_write_time("pc/b.cpp", std::filesystem::file_time_type::clock::now());
+    Project proj3("pch-clang", 1, argv);
+    proj3.add_executable("app").pch("pc/pch.hpp").sources({"pc/a.cpp", "pc/b.cpp"});
+    REQUIRE(proj3.build().has_value());
+    CHECK(std::filesystem::last_write_time(oa) == ma2);
+    CHECK(std::filesystem::last_write_time(ob) != mb2);
+}
+
+TEST_CASE("pch: missing header is a Config error") {
+    ScratchDir scratch {"pch-missing"};
+    char prog[] = "truss-tests";
+    char* argv[] = {prog};
+    REQUIRE(detail::write_file("pm/a.cpp", "int main() { return 0; }\n").has_value());
+    Project proj("pch-missing", 1, argv);
+    proj.add_executable("app").pch("pm/nope.hpp").sources("pm/a.cpp");
+    auto r = proj.build();
+    REQUIRE_FALSE(r.has_value());
+    CHECK(r.error().kind == Error::Kind::Config);
+    CHECK(r.error().message.find("pch") != std::string::npos);
+}
+
+TEST_CASE("pch: GCC family uses .gch + -I/-include") {
+    if (!detail::program_exists("g++")) {
+        MESSAGE("g++ not installed, skipping");
+        return;
+    }
+    ScratchDir scratch {"pch-gcc"};
+    char prog[] = "truss-tests";
+    char* argv[] = {prog};
+    REQUIRE(detail::write_file("pg/pch.hpp", "#pragma once\n#include <string>\ninline int pf() { return 42; }\n").has_value());
+    REQUIRE(detail::write_file("pg/a.cpp", "int pf();\nint main() { return pf() - 42; }\n").has_value());
+    Project proj("pch-gcc", 1, argv);
+    proj.configure(Config().toolchain(Toolchain::GCC));
+    proj.add_executable("app").pch("pg/pch.hpp").sources("pg/a.cpp");
+    REQUIRE(proj.build().has_value());
+    CHECK(std::filesystem::exists("build/debug/pch/app/pch.hpp.gch"));
+    auto manifest = detail::read_file("build/debug/ninja/build.ninja");
+    REQUIRE(manifest.has_value());
+    CHECK(manifest->find("-include pch.hpp") != std::string::npos);
+}
+
+TEST_CASE("pch: MSVC family is a clear Config error") {
+    ScratchDir scratch {"pch-msvc"};
+    char prog[] = "truss-tests";
+    char* argv[] = {prog};
+    REQUIRE(detail::write_file("pv/pch.hpp", "#pragma once\n").has_value());
+    REQUIRE(detail::write_file("pv/a.cpp", "int main() { return 0; }\n").has_value());
+    Project proj("pch-msvc", 1, argv);
+    TargetTriple t;
+    t.os = Os::Windows;
+    t.arch = Arch::X64;
+    t.family = CompilerFamily::Msvc;
+    t.compiler = "clang-cl";
+    t.ar = "llvm-lib";
+    proj.add_executable("app").pch("pv/pch.hpp").sources("pv/a.cpp").cross_target(t);
+    auto r = proj.build();
+    REQUIRE_FALSE(r.has_value());
+    CHECK(r.error().kind == Error::Kind::Config);
+    CHECK(r.error().message.find("MSVC") != std::string::npos);
 }
