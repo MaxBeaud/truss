@@ -14,6 +14,7 @@ module;
 #include <span>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -205,7 +206,7 @@ std::string import_lib_path(const std::string& artifact) {
     return s;
 }
 
-Result<void> emit_manifest(const Project& proj, const std::vector<ResolvedTarget>& resolved,
+Result<void> emit_manifest(const Project& proj, std::vector<ResolvedTarget>& resolved,
                           const std::filesystem::path& build_dir, NinjaWriter& w) {
     const std::filesystem::path ninja_dir = build_dir / "ninja";
 
@@ -302,7 +303,7 @@ Result<void> emit_manifest(const Project& proj, const std::vector<ResolvedTarget
     }
 
     std::vector<std::string> all_outputs;
-    for (const auto& r : resolved) {
+    for (auto& r : resolved) {
         const Target& t = *r.target;
         /* header-only targets contribute usage requirements (via collect_include_dirs)
          * but produce no artifact and no edges */
@@ -323,6 +324,40 @@ Result<void> emit_manifest(const Project& proj, const std::vector<ResolvedTarget
                                           t.hardening(), pic, defines, usage.includes, t.flags());
         if (!cflags)
             return std::unexpected(cflags.error());
+
+        /* Manual mode: replace the regex import lists with clang-scan-deps'
+         * authoritative closures (parallel; ~10 ms per TU). */
+        if (t.modules_mode() == ModulesMode::Manual) {
+            if (r.triple.family != CompilerFamily::Clang)
+                return std::unexpected(Error {
+                    Error::Kind::Config,
+                    "modules_mode(Manual) requires a clang-family compiler (clang-scan-deps)",
+                });
+            if (!detail::program_exists("clang-scan-deps"))
+                return std::unexpected(Error {
+                    Error::Kind::Toolchain, "modules_mode(Manual): clang-scan-deps not found on PATH",
+                });
+            const std::filesystem::path scratch = build_dir / "scan";
+            if (auto r2 = detail::make_dirs(scratch); !r2)
+                return std::unexpected(r2.error());
+            std::vector<Result<std::vector<std::string>>> scanned(r.units.size());
+            const size_t nthreads = std::min<size_t>(r.units.size(), 8);
+            {
+                std::vector<std::jthread> pool;
+                for (size_t w = 0; w < nthreads; ++w)
+                    pool.emplace_back([&, w] {
+                        for (size_t i = w; i < r.units.size(); i += nthreads)
+                            scanned[i] = detail::scan_deps_requires(
+                                r.triple.compiler, cflags->compile, r.units[i].path, proj.cwd(), scratch);
+                    });
+                /* jthread destructors join at scope end */
+            }
+            for (size_t i = 0; i < r.units.size(); ++i) {
+                if (!scanned[i])
+                    return std::unexpected(scanned[i].error());
+                r.units[i].imports = std::move(*scanned[i]);
+            }
+        }
 
         /* precompiled header: one generation edge; every C++ object of this
          * target depends on it and carries the use-flag. GCC finds the .gch
@@ -779,11 +814,6 @@ Result<void> Project::build() {
 
         const ModulesMode mm =
             t->modules_mode() == ModulesMode::Default ? ModulesMode::Auto : t->modules_mode();
-        if (mm == ModulesMode::Manual)
-            return std::unexpected(Error {
-                Error::Kind::Config,
-                "modules_mode(Manual) is not implemented yet — use Auto (conservative BMI wiring)",
-            });
 
         const std::string tdir = detail::triple_dir(r.triple);
         r.objdir = (bld / "obj" / tdir / t->name()).generic_string();

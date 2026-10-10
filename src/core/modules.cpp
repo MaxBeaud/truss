@@ -10,6 +10,8 @@ module;
 #include <utility>
 #include <vector>
 
+#include <nlohmann/json.hpp>
+
 module truss;
 import :api;
 import :impl;
@@ -121,6 +123,58 @@ resolve_module_imports(const ModuleUnitInfo& u, const std::map<std::string, std:
             });
     }
     return std::make_pair(flags, order);
+}
+
+/* Authoritative import list for one TU via clang-scan-deps (p1689 JSON).
+ * One TU per invocation (a single-entry compilation database): this clang
+ * build leaves "primary-output" empty in multi-TU CDB scans, so rules could
+ * not be mapped back to files otherwise. ~10 ms per TU. */
+Result<std::vector<std::string>>
+scan_deps_requires(const std::string& compiler, std::string_view compile_flags,
+                   const std::string& source, const std::filesystem::path& cwd,
+                   const std::filesystem::path& scratch) {
+    std::string flat = source;
+    for (char& c : flat)
+        if (c == '/' || c == '.')
+            c = '_';
+    const std::filesystem::path cdb = scratch / ("cdb_" + flat + ".json");
+    const std::string cmd = compiler + " " + std::string(compile_flags) + " -c " + source;
+    const nlohmann::json entry {
+        {"directory", cwd.generic_string()},
+        {"file", source},
+        {"command", cmd},
+    };
+    if (auto r = write_file(cdb, nlohmann::json {entry}.dump()); !r)
+        return std::unexpected(r.error());
+
+    const std::vector<std::string> argv {
+        "clang-scan-deps", "--format=p1689", "-compilation-database=" + cdb.generic_string(),
+    };
+    auto outcome = run_process_stdout(argv);
+    std::filesystem::remove(cdb);
+    if (!outcome)
+        return std::unexpected(outcome.error());
+    if (outcome->exit_code != 0)
+        return std::unexpected(Error {
+            Error::Kind::Toolchain,
+            "clang-scan-deps failed for '" + source + "' (modules_mode(Manual) requires clang)",
+            std::filesystem::path(source),
+        });
+
+    const auto j = nlohmann::json::parse(outcome->output, nullptr, false);
+    if (!j.is_object() || !j.contains("rules") || !j["rules"].is_array() || j["rules"].empty())
+        return std::unexpected(Error {
+            Error::Kind::Toolchain, "clang-scan-deps produced no p1689 rules for '" + source + "'",
+            std::filesystem::path(source),
+        });
+    std::vector<std::string> names;
+    const auto& rule = j["rules"][0];
+    if (rule.contains("requires") && rule["requires"].is_array())
+        for (const auto& req : rule["requires"])
+            if (req.is_object() && req.contains("logical-name") && req["logical-name"].is_string()
+                && !req.value("isHeaderUnit", false))
+                names.push_back(req["logical-name"].get<std::string>());
+    return names;
 }
 
 } // namespace truss::detail

@@ -6,6 +6,8 @@ module;
 #include <string>
 #include <vector>
 
+#include <unistd.h>
+
 module truss;
 import :api;
 import :impl;
@@ -140,4 +142,36 @@ TEST_CASE("resolve: partition import without module declaration is an error") {
     auto r = detail::resolve_module_imports(u, bmis);
     REQUIRE_FALSE(r.has_value());
     CHECK(r.error().kind == Error::Kind::Config);
+}
+
+TEST_CASE("scan-deps: authoritative closures replace the regex heuristic") {
+    if (!detail::program_exists("clang-scan-deps")) {
+        MESSAGE("clang-scan-deps not installed, skipping");
+        return;
+    }
+    const auto prev = std::filesystem::current_path();
+    const auto dir = std::filesystem::temp_directory_path() / "truss-scandeps-test";
+    std::filesystem::remove_all(dir);
+    std::filesystem::create_directories(dir);
+    REQUIRE(chdir(dir.c_str()) == 0);
+
+    REQUIRE(detail::write_file("math_part.cppm", "export module math:part;\nexport int p();\n").has_value());
+    REQUIRE(detail::write_file("math.cppm", "export module math;\nexport import :part;\nexport int f();\n").has_value());
+    REQUIRE(detail::write_file("math_impl.cpp", "module math;\nint f() { return p(); }\n").has_value());
+    REQUIRE(detail::write_file("app.cpp",
+                               "import \\\n  math;\n// import bogus; in a comment\nint main() { return f(); }\n").has_value());
+
+    const auto scan = [&](const char* f) {
+        auto r = detail::scan_deps_requires("clang++", "-std=c++23", f, dir, dir);
+        REQUIRE(r.has_value());
+        return *r;
+    };
+    CHECK(scan("math_part.cppm") == std::vector<std::string> {});
+    CHECK(scan("math.cppm") == std::vector<std::string> {"math:part"});
+    CHECK(scan("math_impl.cpp") == std::vector<std::string> {"math"});
+    /* line-spliced import found; comment "import bogus;" correctly not */
+    CHECK(scan("app.cpp") == std::vector<std::string> {"math"});
+
+    chdir(prev.c_str());
+    std::filesystem::remove_all(dir);
 }

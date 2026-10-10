@@ -466,3 +466,53 @@ TEST_CASE("unity: batches sources and rebuilds the batch on any member edit") {
         CHECK(std::filesystem::last_write_time(o1) != m1);
     }
 }
+
+TEST_CASE("modules: Manual mode wires via clang-scan-deps and builds") {
+    if (!detail::program_exists("clang-scan-deps")) {
+        MESSAGE("clang-scan-deps not installed, skipping");
+        return;
+    }
+    ScratchDir scratch {"modules-manual"};
+    char prog[] = "truss-tests";
+    char* argv[] = {prog};
+    REQUIRE(detail::write_file("mm/math_part.cppm", "export module math:part;\nexport int p();\n").has_value());
+    REQUIRE(detail::write_file("mm/math.cppm", "export module math;\nexport import :part;\nexport int f();\n").has_value());
+    REQUIRE(detail::write_file("mm/math_impl.cpp", "module math;\nint p() { return 7; }\nint f() { return p(); }\n").has_value());
+    REQUIRE(detail::write_file("mm/app.cpp", "import math;\nint main() { return f() - 7; }\n").has_value());
+    Project proj("modules-manual", 1, argv);
+    auto& lib = proj.add_static_library("mathmod").sources_in("mm").modules_mode(ModulesMode::Manual);
+    proj.add_executable("app").sources("mm/app.cpp").modules_mode(ModulesMode::Manual).depends_on(lib);
+    REQUIRE(proj.build().has_value());
+    auto manifest = detail::read_file("build/debug/ninja/build.ninja");
+    REQUIRE(manifest.has_value());
+    CHECK(manifest->find("-fmodule-file=math=") != std::string::npos);
+    CHECK(manifest->find("-fmodule-file=math:part=") != std::string::npos);
+}
+
+TEST_CASE("modules: regex scan misses line-spliced imports, Manual finds them") {
+    if (!detail::program_exists("clang-scan-deps")) {
+        MESSAGE("clang-scan-deps not installed, skipping");
+        return;
+    }
+    ScratchDir scratch {"modules-macro"};
+    char prog[] = "truss-tests";
+    char* argv[] = {prog};
+    REQUIRE(detail::write_file("mg/math.cppm", "export module math;\nexport int f() { return 3; }\n").has_value());
+    /* the import is line-spliced: the line-anchored regex scan cannot see it */
+    REQUIRE(detail::write_file("mg/app.cpp",
+                               "import \\\n  math;\nint main() { return f() - 3; }\n").has_value());
+
+    { /* Auto: no -fmodule-file is wired, clang cannot find the BMI */
+        Project proj("modules-macro", 1, argv);
+        auto& lib = proj.add_static_library("mathmod").sources("mg/math.cppm");
+        proj.add_executable("app").sources("mg/app.cpp").depends_on(lib);
+        auto r = proj.build();
+        REQUIRE_FALSE(r.has_value());
+    }
+    { /* Manual: scan-deps preprocesses and reports the requirement */
+        Project proj("modules-macro", 1, argv);
+        auto& lib = proj.add_static_library("mathmod").sources("mg/math.cppm").modules_mode(ModulesMode::Manual);
+        proj.add_executable("app").sources("mg/app.cpp").modules_mode(ModulesMode::Manual).depends_on(lib);
+        CHECK(proj.build().has_value());
+    }
+}

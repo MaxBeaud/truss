@@ -76,6 +76,13 @@ Result<ModuleUnitInfo> scan_module_unit(const std::string& path);
 Result<std::pair<std::string, std::vector<std::string>>>
 resolve_module_imports(const ModuleUnitInfo& u, const std::map<std::string, std::string, std::less<>>& bmis);
 
+/* Authoritative import closure for one TU via clang-scan-deps (p1689);
+ * fully-qualified module names (clang family only; see modules.cpp). */
+Result<std::vector<std::string>>
+scan_deps_requires(const std::string& compiler, std::string_view compile_flags,
+                   const std::string& source, const std::filesystem::path& cwd,
+                   const std::filesystem::path& scratch);
+
 /* --- compiler flags ------------------------------------------------------ */
 struct FlagSet {
     std::string compile;    /* flags for C++ compile edges */

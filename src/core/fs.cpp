@@ -207,7 +207,8 @@ Result<std::string> read_file(const std::filesystem::path& p) {
 
 Result<void> write_file(const std::filesystem::path& p, std::string_view data) {
     std::error_code ec;
-    std::filesystem::create_directories(p.parent_path(), ec);
+    if (p.has_parent_path())
+        std::filesystem::create_directories(p.parent_path(), ec);
     if (ec)
         return std::unexpected(io_error(ec, p.parent_path()));
 

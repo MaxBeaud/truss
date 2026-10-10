@@ -212,7 +212,7 @@ This is what makes package managers ergonomic: `conan()`/`vcpkg()` return an
 | `lto(...)` | `None, Full, Thin` | off |
 | `harden(...)` | `None, Light, Medium, Max` | **Light** (see below) |
 | `pic(bool)` | position-independent code | on for libs |
-| `modules_mode(...)` | `Off, Auto` (`Manual` reserved) | `Auto` |
+| `modules_mode(...)` | `Off, Auto, Manual` | `Auto` |
 | `cross_target(triple)` | see [Cross-compiling](#cross-compiling--msvc) | host |
 | `is_test(bool)` | mark as a test for the `test` task | false |
 | `flags("...")` | raw compiler flags, verbatim | — |
@@ -341,6 +341,12 @@ proj.add_executable("calc").sources("src/calc.cpp").depends_on(math);
 `modules_mode(Off)` disables the wiring (`.cppm` then errors rather than being
 silently miscompiled). Module BMI wiring is GCC/Clang-only for now; MSVC
 targets with `.cppm` sources get a clear config error.
+
+`modules_mode(Manual)` replaces the regex import scan with `clang-scan-deps`
+(p1689 JSON, run at configure time, ~10 ms per TU, parallel): the import
+lists become the compiler's own — exact partition names, and imports the
+regex cannot see (e.g. line-spliced `import \` continuations). Clang-family
+only. Use it when Auto mis-scans your sources.
 
 ## Dependencies
 
@@ -562,7 +568,7 @@ v0.1.0 — all eleven planned phases complete except benchmarks.
 
 Known limitations: paths containing spaces or `:` are rejected (ninja
 escaping, conservative v0.1); Windows *hosts* (running truss on Windows) are
-not yet exercised; `modules_mode(Manual)` is reserved but unimplemented.
+not yet exercised.
 
 `PLAN.MD` tracks the roadmap; `AGENT.MD` records verified toolchain facts.
 The vendored samurai patches are documented in `vendor/samurai/TRUSS-VENDOR.txt`.

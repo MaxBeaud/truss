@@ -58,9 +58,11 @@ enum class Hardening { Default = 0, None, Light, Medium, Max };
 
 /**
  * \brief How .cppm sources in a user target get compiled and wired.
- * Auto (the default): conservative v0.1 mode — every .cppm becomes a BMI edge and
- * every other unit in the target (and its deps) imports all of them.
- * Manual: precise per-file BMI wiring — not implemented yet.
+ * Auto (the default): BMI edges for every .cppm; consumers are wired from a
+ * fast regex scan of each file's import declarations (heuristic: can miss
+ * macro-generated imports or false-positive on `import` in comments).
+ * Manual: same wiring but the import lists come from clang-scan-deps
+ * (p1689) at configure time — authoritative, at ~10 ms per TU; clang only.
  */
 enum class ModulesMode { Default = 0, Off, Auto, Manual };
 

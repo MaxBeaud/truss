@@ -377,20 +377,20 @@ truss. ✅
    `make -j` floor vs `ninja -n` graph recompute; clean/incremental/no-op medians +
    module Auto-mode incrementality; JSON at `build/bench/results.json`. ✅
 1. Compiler cache launcher: auto-detect `ccache` on PATH (else `sccache`), prefix
-   compile/BMI commands; `Config::launcher(name)` override, `launcher("")` opts out.
+   compile/BMI commands; `Config::launcher(name)` override, `launcher("")` opts out. ✅
 2. Configure skip for package managers: fingerprint (sha256 of inputs) + cached
-   `truss-spec.json` so unchanged conan/vcpkg deps skip the tool invocation entirely.
+   `truss-spec.json` so unchanged conan/vcpkg deps skip the tool invocation entirely. ✅
 3. Hardlink materialization: `copy_tree` uses `create_hard_link` (copy fallback) when
-   materializing cached git trees into the build dir.
+   materializing cached git trees into the build dir. ✅
 4. Parallel fetch: `proj.fetch_all({...})` batch API fetching independent packages
-   concurrently (jthreads, serialized lockfile writes).
+   concurrently (jthreads, serialized lockfile writes). ✅
 5. Precompiled headers: `target.pch(path)` — clang `-include-pch`, GCC `.gch` +
-   `-I`/`-include`; MSVC unsupported in v0.
+   `-I`/`-include`; MSVC unsupported in v0. ✅
 6. Unity builds: `target.unity(true)` — generated batch TUs (16 sources each) under
-   `build/<mode>/unity/`; module units excluded.
+   `build/<mode>/unity/`; module units excluded. ✅
 7. Precise module wiring: `ModulesMode::Manual` via `clang-scan-deps -format=p1689` at
    configure time so editing one `.cppm` rebuilds only its importers (Auto mode stays
-   the conservative default).
+   the conservative default). ✅
 
 ## 6. Risks & mitigations
 

@@ -475,3 +475,21 @@ Read `PLAN.MD` first. This file is the rulebook for any agent/human modifying th
 - Object paths nest the absolute unity path under objdir
   ("objdir//home/...") — valid POSIX (double slash collapses); tests must
   locate unity objects by filename search, not by path guess.
+
+### Step 7: precise module wiring (ModulesMode::Manual)
+- clang-scan-deps on LLVM 23: the trailing `-- <cmd>` driver form and
+  `-deprecated-driver-command` produce NO "requires" entries; only
+  `-compilation-database=<cdb>` does. In CDB mode "primary-output" is empty
+  and rule order is nondeterministic -> scan ONE TU per single-entry CDB
+  (rules[0] is that TU). ~10 ms per invocation; parallelized (8 jthreads).
+- scan-deps requires = direct imports only (partition names fully qualified,
+  impl units report their implicit primary). Consumers of a primary still
+  need the partition-expansion heuristic for the -fmodule-file closure.
+- Macro-expanded `import` is rejected by clang itself (not a differentiator);
+  line-spliced `import \` continuations ARE found by scan-deps and missed by
+  the line-anchored regex — that's the real Auto gap.
+- jthread pool gotcha: locals captured by reference that are declared AFTER
+  the pool vector are destroyed BEFORE the pool's join (reverse destruction
+  order) -> stack-use-after-scope. Declare captured locals above the pool.
+- write_file: create_directories("") sets ec -> bare relative filenames
+  failed; now guarded by has_parent_path().
