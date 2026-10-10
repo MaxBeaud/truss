@@ -2,9 +2,10 @@
 
 > Build your C++ using C++. mate.h API style + xmake-class features + samurai backend.
 
-**Status (2026-10-09):** Phases 0–11 complete (benchmarks still open). `./setup.sh build` bootstraps
+**Status (2026-10-09):** Phases 0–11 complete; phase 12 (performance) in progress —
+benchmark harness (`./setup.sh bench`) done. `./setup.sh build` bootstraps
 `libtruss.a` + BMIs with plain clang++ and compiles `./truss`; truss builds itself
-(`./truss debug` self-host, incremental verified); doctest unit tests green (49 cases:
+(`./truss debug` self-host, incremental verified); doctest unit tests green (66 cases:
 glob, fs, proc, triple, flags, golden ninja manifest, module scanner/resolver, lockfile,
 fetch validation, usage-requirement propagation, MSVC end-to-end); `examples/hello`,
 `examples/shared`, `examples/modules` (primary + partition + impl unit), `examples/fetch`
@@ -369,21 +370,44 @@ truss. ✅
 6. Doxygen reference (`./setup.sh docs` → `build/docs/`), `///` on the public API;
    README stays the user guide. ✅
 
+### Phase 12 — Performance
+
+0. Benchmark harness: `./setup.sh bench` — generated 60-TU fixture (30 core + 20 mid +
+   10 app, 2 static libs + exe) under `build/bench/fixture`; truss vs xmake vs a plain
+   `make -j` floor vs `ninja -n` graph recompute; clean/incremental/no-op medians +
+   module Auto-mode incrementality; JSON at `build/bench/results.json`. ✅
+1. Compiler cache launcher: auto-detect `ccache` on PATH (else `sccache`), prefix
+   compile/BMI commands; `Config::launcher(name)` override, `launcher("")` opts out.
+2. Configure skip for package managers: fingerprint (sha256 of inputs) + cached
+   `truss-spec.json` so unchanged conan/vcpkg deps skip the tool invocation entirely.
+3. Hardlink materialization: `copy_tree` uses `create_hard_link` (copy fallback) when
+   materializing cached git trees into the build dir.
+4. Parallel fetch: `proj.fetch_all({...})` batch API fetching independent packages
+   concurrently (jthreads, serialized lockfile writes).
+5. Precompiled headers: `target.pch(path)` — clang `-include-pch`, GCC `.gch` +
+   `-I`/`-include`; MSVC unsupported in v0.
+6. Unity builds: `target.unity(true)` — generated batch TUs (16 sources each) under
+   `build/<mode>/unity/`; module units excluded.
+7. Precise module wiring: `ModulesMode::Manual` via `clang-scan-deps -format=p1689` at
+   configure time so editing one `.cppm` rebuilds only its importers (Auto mode stays
+   the conservative default).
+
 ## 6. Risks & mitigations
 
 | Risk | Mitigation |
 |---|---|
-| clang C++26 modules churn (`-std=c++26` + named modules still moving) | Pin clang trunk via justfile note; keep `ModulesMode::manual` fallback; isolate all module-flag emission in `flags.cpp`/`modules.cpp`. |
+| clang C++26 modules churn (`-std=c++26` + named modules still moving) | Pin clang trunk via setup.sh note; keep `ModulesMode::Manual` fallback; isolate all module-flag emission in `flags.cpp`/`modules.cpp`. |
 | samurai API drift on vendoring | Pin a tag; shim only uses the documented amalgam surface (same symbols mate.h relies on). |
-| `import std;` + libc++ hardening + sanitizers interactions | truss's own build already configures this in xmake.lua; keep module interface includes minimal. |
-| scan-deps correctness | v0.1 conservative mode stays available; fixture-based rebuild-set assertions. |
+| `import std;` + libc++ hardening + sanitizers interactions | truss's own build already configures this in setup.sh; keep module interface includes minimal. |
+| scan-deps correctness | conservative Auto mode stays the default; fixture-based rebuild-set assertions. |
 | Scope creep (conan/vcpkg) | Strict phase order; phases 5–6 are additive, never block core. |
 
 ## 7. Testing strategy
 
-- **Unit** (Catch2, vendored): glob matcher, path utils, flag tables, ninja emitter (golden
+- **Unit** (doctest, vendored): glob matcher, path utils, flag tables, ninja emitter (golden
   strings), cache/lockfile, triple detection.
-- **Integration**: fixture projects under `tests/fixtures/` driven by a test harness that runs
-  `./truss <mode> <task>` and asserts on outputs, exit codes, and rebuild minimality
-  (file-mtime-based assertions).
-- truss's own debug build keeps ASan/UBSan (already in xmake.lua).
+- **Integration**: scratch projects driven by `tests/unit/usage_test.cpp` plus the
+  `examples/` flows (`./setup.sh examples`) run `./truss <mode> <task>` and assert on
+  outputs, exit codes, and rebuild minimality (file-mtime-based assertions).
+- **Benchmarks**: `./setup.sh bench` (phase 12.0) tracks clean/incremental/no-op against
+  xmake and a raw `make -j` floor.

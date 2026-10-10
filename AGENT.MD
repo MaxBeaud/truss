@@ -382,3 +382,21 @@ Read `PLAN.MD` first. This file is the rulebook for any agent/human modifying th
   comments for those); angle brackets in doc comments need `\<mode\>` escapes;
   markdown anchors (`#getting-truss`) don't resolve as `\ref` — keep README.MD
   out of INPUT.
+
+## 19. Verified toolchain facts (learned during phase 12 — performance)
+
+### Step 0: benchmark harness (`./setup.sh bench`)
+- Baseline (2026-10-09, 60-TU fixture, 32 jobs, medians, JSON at
+  `build/bench/results.json`): truss clean 539 ms / incremental 297 ms / no-op 3 ms;
+  `make -j` floor 543 ms (truss overhead ≈ noise); `ninja -n` graph recompute 1–2 ms;
+  xmake clean 1463 ms / incremental 131 ms; examples/modules touch `math.cppm`
+  69 ms (Auto mode rebuilds the whole module target — the step-7 gap).
+- truss incremental (297 ms) vs xmake incremental (131 ms): truss re-runs its
+  configure (source scan + manifest regen) on every invocation; samu itself is the
+  fast part (no-op 3 ms). Later phase-12 steps attack per-invocation overhead.
+- bench tool gotchas: `xmake -m` is only valid on `xmake f` (mode persists, plain
+  `xmake` builds); GNU make accepts one-line `target: prereq; recipe` (no tabs
+  needed) — handy for generated floor Makefiles; inside bash heredocs/echoes the
+  make automatics `$@`/`$<` must be escaped or the shell expands them.
+- Box tooling: xmake, make, ninja installed; ccache/sccache NOT installed (step 1
+  e2e must use a noop launcher script, not real ccache).

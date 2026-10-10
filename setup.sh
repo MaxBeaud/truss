@@ -11,6 +11,7 @@
 #   ./setup.sh amalgam            generate build/dist/truss_all.hpp + compile/run fixture
 #   ./setup.sh test               unit + examples + installed + amalgam
 #   ./setup.sh install [prefix]   stage libtruss.a + BMIs (default ~/.local)
+#   ./setup.sh bench              benchmark truss vs xmake/make (build/bench/)
 #   ./setup.sh docs               generate the Doxygen reference (build/docs/)
 #   ./setup.sh clean              delete all generated output
 #   ./setup.sh add-package <n>    symlink a local package dir into vendor/ (PKG_ROOT)
@@ -20,7 +21,7 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-usage() { sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'; }
 
 CXX="${CXX:-clang++}"
 CC="${CC:-clang}"
@@ -182,6 +183,132 @@ cmd_test() {
     echo "setup: all tests passed"
 }
 
+# --- benchmarks: truss vs xmake vs make floor (build/bench/) -----------------
+median() { printf '%s\n' "$@" | sort -n | awk '{a[NR]=$1} END{print a[int((NR+1)/2)]}'; }
+
+gen_bench_fixture() {
+    local dir="$1"
+    rm -rf "$dir"
+    mkdir -p "$dir/src/core" "$dir/src/mid" "$dir/src/app"
+
+    # workload: real-ish TUs (STL + template header) so compile time dominates
+    cat > "$dir/src/common.hpp" << 'EOF'
+#pragma once
+#include <string>
+#include <vector>
+#include <map>
+#include <array>
+template <class T> struct Box { T v; int score() const { return static_cast<int>(v) * 2 + 1; } };
+EOF
+    for i in $(seq 0 29); do
+        printf '#include "common.hpp"\nint core%d() { Box<int> b{%d}; return b.score(); }\n' "$i" "$i" \
+            > "$dir/src/core/core$i.cpp"
+    done
+    for i in $(seq 0 19); do
+        printf 'int core%d();\nint mid%d() { return core%d() + %d; }\n' "$i" "$i" "$i" "$i" \
+            > "$dir/src/mid/mid$i.cpp"
+    done
+    for i in $(seq 0 9); do
+        printf 'int mid%d();\nint app%d() { return mid%d() + %d; }\n' "$i" "$i" "$i" "$i" \
+            > "$dir/src/app/app$i.cpp"
+    done
+    printf 'int app0();\nint main() { return app0() > 0 ? 0 : 1; }\n' > "$dir/src/app/main.cpp"
+
+    cat > "$dir/truss.cpp" << 'EOF'
+import truss;
+int main(int argc, char** argv) {
+    truss::Project proj("bench", argc, argv);
+    auto& core = proj.add_static_library("core").include_dirs("src").sources_in("src/core");
+    auto& mid  = proj.add_static_library("mid").sources_in("src/mid").depends_on(core);
+    proj.add_executable("app").sources_in("src/app").depends_on(mid);
+    return proj.build() ? 0 : 1;
+}
+EOF
+    cat > "$dir/xmake.lua" << 'EOF'
+set_languages("c++23")
+target("core"); set_kind("static"); add_includedirs("src"); add_files("src/core/*.cpp")
+target("mid");  set_kind("static"); add_files("src/mid/*.cpp"); add_deps("core")
+target("app");  set_kind("binary"); add_files("src/app/*.cpp"); add_deps("mid")
+EOF
+    # make floor: raw toolchain cost, no dep tracking beyond make itself
+    local objs=""
+    for i in $(seq 0 29); do objs+="obj/core$i.o "; done
+    for i in $(seq 0 19); do objs+="obj/mid$i.o "; done
+    for i in $(seq 0 9);  do objs+="obj/app$i.o "; done
+    objs+="obj/main.o"
+    {
+        echo "CXX=$CXX"
+        echo "CXXFLAGS=-O0 -std=c++23 -Isrc"
+        echo "OBJS=$objs"
+        echo "all: bin/app"
+        echo "bin/app: $objs; mkdir -p bin; \$(CXX) $objs -o \$@"
+        for i in $(seq 0 29); do echo "obj/core$i.o: src/core/core$i.cpp; mkdir -p obj; \$(CXX) \$(CXXFLAGS) -c \$< -o \$@"; done
+        for i in $(seq 0 19); do echo "obj/mid$i.o: src/mid/mid$i.cpp; mkdir -p obj; \$(CXX) \$(CXXFLAGS) -c \$< -o \$@"; done
+        for i in $(seq 0 9);  do echo "obj/app$i.o: src/app/app$i.cpp; mkdir -p obj; \$(CXX) \$(CXXFLAGS) -c \$< -o \$@"; done
+        echo "obj/main.o: src/app/main.cpp; mkdir -p obj; \$(CXX) \$(CXXFLAGS) -c \$< -o \$@"
+    } > "$dir/Makefile"
+}
+
+# timed median of $1 runs of (setup_cmd; build_cmd)
+bench_runs() {
+    local n="$1" setup="$2" build="$3" t=() s e
+    for _ in $(seq "$n"); do
+        [ -n "$setup" ] && eval "$setup"
+        s=$(date +%s%N); eval "$build" >/dev/null 2>&1 || return 1; e=$(date +%s%N)
+        t+=($(( (e - s) / 1000000 )))
+    done
+    median "${t[@]}"
+}
+
+cmd_bench() {
+    [ -f "$OUT/libtruss.a" ] || cmd_bootstrap
+    local dir="build/bench/fixture"
+    gen_bench_fixture "$dir"
+    mapfile -t flags < <(consumer_flags)
+    job "$CXX" -std=c++26 -stdlib=libc++ "${flags[@]}" "$dir/truss.cpp" "$OUT/libtruss.a" -o "$dir/truss" >/dev/null
+    [ -f examples/modules/truss ] || job "$CXX" -std=c++26 -stdlib=libc++ "${flags[@]}" \
+        examples/modules/truss.cpp "$OUT/libtruss.a" -o examples/modules/truss >/dev/null
+
+    echo "bench: 60 TUs (30 core + 20 mid + 10 app), $(nproc) jobs, ms (median)"
+    local r_truss_clean r_truss_incr r_truss_noop r_make_clean r_ninja_incr r_modules_touch
+    local r_xmake_clean="null" r_xmake_incr="null"
+    cd "$dir"
+    r_truss_clean=$(bench_runs 3 "rm -rf build" "./truss debug")
+    r_truss_incr=$(bench_runs 5 "touch src/core/core7.cpp" "./truss debug")
+    r_truss_noop=$(bench_runs 5 "" "./truss debug")
+    r_make_clean=$(bench_runs 3 "rm -rf obj bin" "make -j$(nproc)")
+    r_ninja_incr=$(bench_runs 5 "touch src/core/core7.cpp" "ninja -n -f build/debug/ninja/build.ninja")
+    echo "truss  clean=$r_truss_clean ms  incremental=$r_truss_incr ms  no-op=$r_truss_noop ms"
+    echo "make   clean=$r_make_clean ms (floor, no dep tracking)"
+    echo "ninja  graph-recompute (dry-run)=$r_ninja_incr ms"
+    if command -v xmake >/dev/null 2>&1; then
+        xmake f -m debug -y >/dev/null 2>&1
+        r_xmake_clean=$(bench_runs 3 "rm -rf build .xmake" "xmake f -m debug -y && xmake")
+        r_xmake_incr=$(bench_runs 5 "touch src/core/core7.cpp" "xmake")
+        echo "xmake  clean=$r_xmake_clean ms  incremental=$r_xmake_incr ms"
+    fi
+    # module incrementality baseline (ModulesMode::Auto: one .cppm edit -> whole target)
+    r_modules_touch=$(cd ../../../examples/modules && ./truss debug >/dev/null 2>&1
+        bench_runs 3 "touch src/math.cppm" "./truss debug")
+    echo "modules: touch math.cppm -> rebuild=$r_modules_touch ms (Auto mode: whole target)"
+    cat > ../results.json << EOF
+{
+  "date": "$(date +%F)",
+  "fixture": "60 TUs (30 core + 20 mid + 10 app), 2 static libs + exe",
+  "jobs": $(nproc),
+  "truss_clean_ms": $r_truss_clean,
+  "truss_incremental_ms": $r_truss_incr,
+  "truss_noop_ms": $r_truss_noop,
+  "make_clean_ms": $r_make_clean,
+  "ninja_graph_ms": $r_ninja_incr,
+  "xmake_clean_ms": $r_xmake_clean,
+  "xmake_incremental_ms": $r_xmake_incr,
+  "modules_touch_cppm_ms": $r_modules_touch
+}
+EOF
+    echo "setup: bench done (fixture: $dir, results: build/bench/results.json)"
+}
+
 cmd_docs() {
     command -v doxygen >/dev/null 2>&1 || { echo "setup: doxygen not found" >&2; exit 1; }
     doxygen Doxyfile
@@ -225,6 +352,7 @@ case "${1:-build}" in
     amalgam)   cmd_amalgam ;;
     test)      cmd_test ;;
     install)   shift; cmd_install "${1:-}" ;;
+    bench)     cmd_bench ;;
     docs)      cmd_docs ;;
     clean)     cmd_clean ;;
     add-package) shift; cmd_add_package "$@" ;;
