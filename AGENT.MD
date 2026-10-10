@@ -400,3 +400,14 @@ Read `PLAN.MD` first. This file is the rulebook for any agent/human modifying th
   make automatics `$@`/`$<` must be escaped or the shell expands them.
 - Box tooling: xmake, make, ninja installed; ccache/sccache NOT installed (step 1
   e2e must use a noop launcher script, not real ccache).
+
+### Step 1: compiler-cache launcher
+- `Config::launcher(name)` (override; "" opts out; missing program = Config
+  error) + auto-detect ccache→sccache when unset (`resolve_launcher` in
+  target.cpp). Injected as a literal prefix in the compile rule *command
+  string* — samurai's support for ninja's RULE_LAUNCH_COMPILE is unverified.
+- Launcher prefixes `compile_cxx`/`compile_c` only: `compile_bmi` stays raw
+  (ccache's C++20 module support is unreliable) and MSVC rules never launch.
+- e2e proof without ccache installed: a noop `#!/bin/sh; exec "$@"` script
+  used as launcher — manifest shows `command = ./lk/launcher.sh $cxx` and the
+  script's hit-marker file appears after the build.

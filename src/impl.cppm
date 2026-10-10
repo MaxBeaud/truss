@@ -122,6 +122,9 @@ CompilerFamily family_from_compiler_name(std::string_view name);
  * (g++ + libc++ and MSVC + stdlib() are Config errors). */
 Result<TargetTriple> apply_config(const Config& conf, const TargetTriple& base);
 
+/* compiler-cache launcher resolution (see target.cpp); "" = no launcher */
+Result<std::string> resolve_launcher(const Config& conf);
+
 /* --- ninja manifest emitter ---------------------------------------------- */
 class NinjaWriter {
 public:

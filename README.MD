@@ -391,6 +391,21 @@ explicit calls after `toolchain()` override it. Selections are validated:
 `cross_target(triple)` still overrides the project default completely, and
 `TargetTriple` gained a `stdlib` field for per-target selection too.
 
+### Compiler cache
+
+truss auto-detects `ccache` (then `sccache`) on `PATH` and prefixes it into
+the C/C++ compile commands — no setup needed if a cache is installed. Override
+or disable it with `Config::launcher`:
+
+```cpp
+proj.configure(truss::Config{}.launcher("sccache"));  // pick a specific cache
+proj.configure(truss::Config{}.launcher(""));         // never use a launcher
+```
+
+The launcher applies to GCC/Clang-family compile rules only: MSVC rules and
+module BMI rules stay raw (ccache's C++20 module support is unreliable). A
+named launcher that isn't on `PATH` is a Config error.
+
 ## Cross-compiling & MSVC
 
 Every target defaults to the host triple (`truss::host_triple()`), detected

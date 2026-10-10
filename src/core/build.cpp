@@ -216,17 +216,28 @@ Result<void> emit_manifest(const Project& proj, const std::vector<ResolvedTarget
     w.var("ninja_required_version", "1.3");
     w.var("builddir", ninja_dir.generic_string());
 
+    /* compiler cache (ccache/sccache): prefixed into compile commands rather
+     * than ninja's RULE_LAUNCH_COMPILE special var — samurai support for it
+     * is unverified, the command string always works. MSVC rules stay raw. */
+    auto launcher = detail::resolve_launcher(proj.config());
+    if (!launcher)
+        return std::unexpected(launcher.error());
+    const std::string launch = launcher->empty()
+        ? std::string {}
+        : (launcher->find(' ') == std::string::npos ? *launcher : "'" + *launcher + "'") + " ";
+
     w.rule("compile_cxx", {
-        {"command", "$cxx $flags -MMD -MF $depfile -c $in -o $out"},
+        {"command", launch + "$cxx $flags -MMD -MF $depfile -c $in -o $out"},
         {"deps", "gcc"},
         {"description", "CXX $out"},
     });
     w.rule("compile_c", {
-        {"command", "$cc $flags -MMD -MF $depfile -c $in -o $out"},
+        {"command", launch + "$cc $flags -MMD -MF $depfile -c $in -o $out"},
         {"deps", "gcc"},
         {"description", "CC $out"},
     });
     w.rule("compile_bmi", {
+        /* no launcher: ccache's C++20 module (BMI) support is unreliable */
         {"command", "$cxx $flags -fmodule-output=$bmi -MMD -MF $depfile -c $in -o $out"},
         {"deps", "gcc"},
         {"description", "BMI $out"},

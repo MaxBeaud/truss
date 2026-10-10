@@ -139,6 +139,27 @@ Result<TargetTriple> apply_config(const Config& conf, const TargetTriple& base) 
     return t;
 }
 
+/* compiler-cache launcher: explicit Config::launcher() wins ("" opts out,
+ * a missing program is a config error); otherwise auto-detect ccache then
+ * sccache on PATH. */
+Result<std::string> resolve_launcher(const Config& conf) {
+    if (conf.launcher_set()) {
+        if (conf.launcher().empty())
+            return std::string {};
+        if (!detail::program_exists(conf.launcher()))
+            return std::unexpected(Error {
+                Error::Kind::Config,
+                "launcher '" + conf.launcher() + "' not found (install it or use conf.launcher(\"\") to disable)",
+            });
+        return conf.launcher();
+    }
+    if (detail::program_exists("ccache"))
+        return std::string {"ccache"};
+    if (detail::program_exists("sccache"))
+        return std::string {"sccache"};
+    return std::string {};
+}
+
 } // namespace detail
 
 } // namespace truss

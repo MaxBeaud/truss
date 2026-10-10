@@ -146,6 +146,12 @@ public:
     /// C++ standard library: emitted as -stdlib= on compile + link.
     Config& stdlib(StdLib s) { stdlib_ = s; return *this; }
 
+    /// Compiler cache launcher (e.g. "ccache", "sccache") prefixed to compile
+    /// commands; "" disables it. Default: auto-detect ccache then sccache on PATH.
+    /// GCC/Clang families only (MSVC compile rules never use a launcher);
+    /// module BMI rules are never launched (ccache's module support is unreliable).
+    Config& launcher(std::string name) { launcher_ = std::move(name); launcher_set_ = true; return *this; }
+
     /// Expand a named bundle: LLVM = clang++ + libc++ + llvm-ar, GCC = g++ + libstdc++ + ar.
     Config& toolchain(Toolchain t) {
         switch (t) {
@@ -161,10 +167,13 @@ public:
     const std::string& compiler() const { return compiler_; }
     const std::string& linker() const { return linker_; }
     const std::string& ar() const { return ar_; }
+    const std::string& launcher() const { return launcher_; }
+    bool launcher_set() const { return launcher_set_; }
     StdLib stdlib() const { return stdlib_; }
 
 private:
-    std::string compiler_, linker_, ar_;
+    std::string compiler_, linker_, ar_, launcher_;
+    bool launcher_set_ {false};
     StdLib stdlib_ {StdLib::Default};
 };
 

@@ -230,3 +230,51 @@ TEST_CASE("hooks: failing post_build aborts the build result") {
     REQUIRE_FALSE(r.has_value());
     CHECK(r.error().message.find("post_build") != std::string::npos);
 }
+
+TEST_CASE("launcher: resolve_launcher rules") {
+    auto auto_r = detail::resolve_launcher(Config {});
+    REQUIRE(auto_r.has_value());
+    CHECK((auto_r->empty() || *auto_r == "ccache" || *auto_r == "sccache"));
+
+    CHECK(detail::resolve_launcher(Config().launcher("")).value().empty());
+
+    auto bad = detail::resolve_launcher(Config().launcher("truss-no-such-launcher"));
+    REQUIRE_FALSE(bad.has_value());
+    CHECK(bad.error().kind == Error::Kind::Config);
+}
+
+TEST_CASE("launcher: explicit launcher prefixes compile commands and runs") {
+    ScratchDir scratch {"launcher"};
+    REQUIRE(detail::write_file("lk/launcher.sh",
+                               "#!/bin/sh\necho hit >> lk/launcher-hits.txt\nexec \"$@\"\n").has_value());
+    std::filesystem::permissions("lk/launcher.sh",
+                                 std::filesystem::perms::owner_exec | std::filesystem::perms::owner_read,
+                                 std::filesystem::perm_options::add);
+    char prog[] = "truss-tests";
+    char* argv[] = {prog};
+    Project proj("launcher", 1, argv);
+    proj.configure(Config().launcher("./lk/launcher.sh"));
+    REQUIRE(detail::write_file("lk/app.cpp", "int main() { return 0; }\n").has_value());
+    proj.add_executable("app").sources("lk/app.cpp");
+    REQUIRE(proj.build().has_value());
+
+    auto manifest = detail::read_file("build/debug/ninja/build.ninja");
+    REQUIRE(manifest.has_value());
+    CHECK(manifest->find("command = ./lk/launcher.sh $cxx") != std::string::npos);
+    auto hits = detail::read_file("lk/launcher-hits.txt");
+    CHECK((hits && hits->find("hit") != std::string::npos));
+}
+
+TEST_CASE("launcher: launcher(\"\") keeps compile commands raw") {
+    ScratchDir scratch {"launcher-off"};
+    char prog[] = "truss-tests";
+    char* argv[] = {prog};
+    Project proj("launcher-off", 1, argv);
+    proj.configure(Config().launcher(""));
+    REQUIRE(detail::write_file("lo/app.cpp", "int main() { return 0; }\n").has_value());
+    proj.add_executable("app").sources("lo/app.cpp");
+    REQUIRE(proj.build().has_value());
+    auto manifest = detail::read_file("build/debug/ninja/build.ninja");
+    REQUIRE(manifest.has_value());
+    CHECK(manifest->find("command = $cxx") != std::string::npos);
+}
