@@ -411,3 +411,21 @@ Read `PLAN.MD` first. This file is the rulebook for any agent/human modifying th
 - e2e proof without ccache installed: a noop `#!/bin/sh; exec "$@"` script
   used as launcher — manifest shows `command = ./lk/launcher.sh $cxx` and the
   script's hit-marker file appears after the build.
+
+### Step 2: conan/vcpkg configure-skip
+- conan: sha256 of the conanfile (or the conanfile.txt/.py inside a dir arg)
+  + usage-requirements spec cached in `build/<mode>/packages/conan/truss-spec.json`;
+  fingerprint match + all cached include/link dirs still exist => skip
+  `conan install`. vcpkg: sha256(vcpkg.json)+"-"+triplet in
+  `build/<mode>/packages/vcpkg-truss-spec.json`; match + install tree exists
+  => skip `vcpkg install` (tree rescan is cheap and always runs).
+- The spec is only written after a successful tool run, so a failed run never
+  poisons the cache (verified: invalid ref re-runs conan every time).
+- IMPORTANT toolchain trap (ASan false positive, cost hours): the unit build
+  recompiled impl units with -fsanitize but reused the non-ASan bootstrap BMIs.
+  Inline libc++ bodies (vector container annotations) baked into a non-ASan
+  BMI are no-ops; mixing them with ASan-instantiated ones poisons fresh
+  allocations that never get unpoisoned -> bogus container-overflow on plain
+  `std::vector<std::string> argv {...}` code. Fix: cmd_unit regenerates the
+  BMIs WITH sanitizers (build/unit-bmi) and compiles everything against those.
+  Any future sanitizer flow must regenerate BMIs the same way.

@@ -297,6 +297,33 @@ Result<TargetRef> Project::add_subdirectory(const std::filesystem::path& dir) {
     return TargetRef{*target};
 }
 
+/* --- configure-skip fingerprinting ------------------------------------------
+ * sha256 of a file's contents (via sha256sum); used to detect unchanged
+ * conanfile/vcpkg.json so the tool invocation can be skipped. */
+Result<std::string> file_sha256(const std::filesystem::path& p) {
+    const std::vector<std::string> argv {"sha256sum", p.generic_string()};
+    auto outcome = detail::run_process_stdout(argv);
+    if (!outcome)
+        return std::unexpected(outcome.error());
+    if (outcome->exit_code != 0)
+        return std::unexpected(Error {Error::Kind::Io, "sha256sum failed", p});
+    std::string sum = outcome->output;
+    sum.erase(sum.find_first_of(" \t\n"));
+    return sum;
+}
+
+/* the conanfile a conan install dir argument would consume ("" if none) */
+std::string conanfile_in(const std::filesystem::path& cf) {
+    std::error_code ec;
+    if (std::filesystem::is_regular_file(cf, ec))
+        return cf.generic_string();
+    if (std::filesystem::is_directory(cf, ec))
+        for (const char* name : {"conanfile.txt", "conanfile.py"})
+            if (std::filesystem::is_regular_file(cf / name, ec))
+                return (cf / name).generic_string();
+    return {};
+}
+
 /* --- Project::conan ---------------------------------------------------------
  * Runs conan 2, parses the --format=json dependency graph, and returns one
  * Interface target ("conan") carrying the whole graph's usage requirements. */
@@ -315,6 +342,54 @@ Result<TargetRef> Project::conan(std::string_view conanfile) {
     const std::filesystem::path out = build_dir() / "packages" / "conan";
     if (auto r = detail::make_dirs(out); !r)
         return std::unexpected(r.error());
+    const std::filesystem::path spec_path = out / "truss-spec.json";
+
+    /* configure skip: sha256 of the conanfile + a cached usage-requirements
+     * spec; unchanged input with surviving package dirs means re-running
+     * conan install could not change anything (~1-3 s saved per invocation) */
+    std::string fingerprint;
+    if (const std::string cf_file = conanfile_in(cf); !cf_file.empty())
+        if (auto fp = file_sha256(cf_file); fp)
+            fingerprint = *fp;
+
+    std::vector<std::string> includes, link_paths, libs, defines;
+    const auto apply_spec = [&](const nlohmann::json& spec) {
+        auto& iface = add_interface_library("conan");
+        const auto strings = [](const nlohmann::json& obj, const char* key) {
+            std::vector<std::string> out;
+            if (obj.contains(key) && obj[key].is_array())
+                for (const auto& v : obj[key])
+                    if (v.is_string())
+                        out.push_back(v.get<std::string>());
+            return out;
+        };
+        for (const auto& d : strings(spec, "includes"))
+            iface.include_dirs(d);
+        for (const auto& d : strings(spec, "link_paths"))
+            iface.link_paths(d);
+        for (const auto& l : strings(spec, "libs"))
+            iface.link_libs(l);
+        for (const auto& d : strings(spec, "defines"))
+            iface.defines(d);
+        return TargetRef {iface};
+    };
+    if (!fingerprint.empty() && std::filesystem::exists(spec_path, ec)) {
+        auto cached = detail::read_file(spec_path);
+        const auto j = cached
+            ? nlohmann::json::parse(*cached, nullptr, false)
+            : nlohmann::json {};
+        bool alive = j.is_object() && j.value("fingerprint", std::string {}) == fingerprint;
+        if (alive)
+            for (const char* key : {"includes", "link_paths"})
+                if (j.contains(key) && j[key].is_array())
+                    for (const auto& v : j[key])
+                        if (v.is_string() && !std::filesystem::is_directory(v.get<std::string>(), ec))
+                            alive = false;
+        if (alive) {
+            detail::log_info("conan: up to date (cached spec, skipped conan install)");
+            return apply_spec(j);
+        }
+    }
 
     detail::log_info("conan install " + cf.generic_string());
     const std::vector<std::string> argv {"conan", "install", cf.generic_string(),
@@ -357,7 +432,6 @@ Result<TargetRef> Project::conan(std::string_view conanfile) {
         return out;
     };
 
-    auto& iface = add_interface_library("conan");
     for (const auto& [id, node] : j["graph"]["nodes"].items()) {
         /* skip the consumer root node: it has no package folder */
         std::filesystem::path pkg_folder;
@@ -368,17 +442,29 @@ Result<TargetRef> Project::conan(std::string_view conanfile) {
             continue;
         const auto& root = node["cpp_info"]["root"];
         for (const auto& d : dir_array(root, "includedirs", pkg_folder))
-            iface.include_dirs(d);
+            includes.push_back(d);
         for (const auto& d : dir_array(root, "libdirs", pkg_folder))
-            iface.link_paths(d);
+            link_paths.push_back(d);
         for (const auto& l : str_array(root, "libs"))
-            iface.link_libs(l);
+            libs.push_back(l);
         for (const auto& l : str_array(root, "system_libs"))
-            iface.link_libs(l);
+            libs.push_back(l);
         for (const auto& d : str_array(root, "defines"))
-            iface.defines(d);
+            defines.push_back(d);
     }
-    return TargetRef{iface};
+
+    nlohmann::json spec {
+        {"fingerprint", fingerprint},
+        {"includes", includes},
+        {"link_paths", link_paths},
+        {"libs", libs},
+        {"defines", defines},
+    };
+    if (!fingerprint.empty())
+        if (auto r = detail::write_file(spec_path, spec.dump(2) + "\n"); !r)
+            return std::unexpected(r.error());
+
+    return apply_spec(spec);
 }
 
 /* conan({"zlib/1.3.1", "fmt/11.0.2"}): generates a conanfile.txt under
@@ -456,22 +542,38 @@ Result<TargetRef> Project::vcpkg(std::vector<std::string> packages) {
     const std::string triplet = arch + "-linux";
 
     const std::filesystem::path install_root = build_dir() / "vcpkg_installed";
-    detail::log_info("vcpkg install (" + triplet + ")");
-    /* manifest mode is auto-detected from vcpkg.json in the current directory,
-     * which is the project root (truss runs from cwd_) */
-    const std::vector<std::string> argv {exe, "install", "--triplet", triplet,
-                                         "--x-install-root", install_root.generic_string(),
-                                         "--no-print-usage"};
-    auto outcome = detail::run_process(argv, false);
-    if (!outcome)
-        return std::unexpected(outcome.error());
-    if (outcome->exit_code != 0)
-        return std::unexpected(Error {
-            Error::Kind::Fetch,
-            "vcpkg install failed (exit " + std::to_string(outcome->exit_code) + ")",
-        });
-
     const std::filesystem::path tdir = install_root / triplet;
+
+    /* configure skip: unchanged vcpkg.json + surviving install tree means
+     * re-running vcpkg install could not change anything (~1-3 s saved) */
+    const std::filesystem::path spec_path = build_dir() / "packages" / "vcpkg-truss-spec.json";
+    std::string fingerprint;
+    if (auto fp = file_sha256(manifest); fp)
+        fingerprint = *fp + "-" + triplet;
+    bool skip_install = false;
+    if (!fingerprint.empty() && std::filesystem::is_directory(tdir, ec))
+        if (auto cached = detail::read_file(spec_path); cached) {
+            const auto j = nlohmann::json::parse(*cached, nullptr, false);
+            skip_install = j.is_object() && j.value("fingerprint", std::string {}) == fingerprint;
+        }
+    if (skip_install) {
+        detail::log_info("vcpkg: up to date (skipped vcpkg install)");
+    } else {
+        detail::log_info("vcpkg install (" + triplet + ")");
+        /* manifest mode is auto-detected from vcpkg.json in the current directory,
+         * which is the project root (truss runs from cwd_) */
+        const std::vector<std::string> argv {exe, "install", "--triplet", triplet,
+                                             "--x-install-root", install_root.generic_string(),
+                                             "--no-print-usage"};
+        auto outcome = detail::run_process(argv, false);
+        if (!outcome)
+            return std::unexpected(outcome.error());
+        if (outcome->exit_code != 0)
+            return std::unexpected(Error {
+                Error::Kind::Fetch,
+                "vcpkg install failed (exit " + std::to_string(outcome->exit_code) + ")",
+            });
+    }
     auto& iface = add_interface_library("vcpkg");
     if (std::filesystem::is_directory(tdir / "include", ec))
         iface.include_dirs((tdir / "include").generic_string());
@@ -501,6 +603,11 @@ Result<TargetRef> Project::vcpkg(std::vector<std::string> packages) {
         for (const auto& n : names)
             iface.link_libs(n);
     }
+    if (!fingerprint.empty())
+        if (auto r = detail::write_file(spec_path,
+                                        nlohmann::json {{"fingerprint", fingerprint}}.dump(2) + "\n");
+            !r)
+            return std::unexpected(r.error());
     return TargetRef{iface};
 }
 

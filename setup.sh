@@ -97,29 +97,41 @@ cmd_build() {
 cmd_unit() {
     need_tools
     cmd_bootstrap
-    local TOBJ="build/unit-obj"
-    rm -rf "$TOBJ"; mkdir -p "$TOBJ"
+    local TOBJ="build/unit-obj" UBMI="build/unit-bmi"
+    rm -rf "$TOBJ" "$UBMI"; mkdir -p "$TOBJ" "$UBMI"
     local SAN=(-fsanitize=address,undefined)
-    # truss implementation units recompiled with sanitizers (BMIs are shared)
+    # BMIs are regenerated WITH sanitizers: inline libc++ bodies baked into a
+    # non-ASan BMI have no-op container annotations; mixing them with
+    # ASan-instantiated ones poisons buffers that never get unpoisoned
+    job "$CXX" -c src/api.cppm   "${CXXFLAGS[@]}" "${SAN[@]}" -fno-sanitize-recover=all \
+        -fmodule-output="$UBMI/truss_api.pcm" -o "$TOBJ/iface_api.o"
+    job "$CXX" -c src/impl.cppm  "${CXXFLAGS[@]}" "${SAN[@]}" -fno-sanitize-recover=all \
+        -fmodule-file="truss:api=$UBMI/truss_api.pcm" \
+        -fmodule-output="$UBMI/truss_impl.pcm" -o "$TOBJ/iface_impl.o"
+    job "$CXX" -c src/truss.cppm "${CXXFLAGS[@]}" "${SAN[@]}" -fno-sanitize-recover=all \
+        -fmodule-file="truss:api=$UBMI/truss_api.pcm" \
+        -fmodule-file="truss:impl=$UBMI/truss_impl.pcm" \
+        -fmodule-output="$UBMI/truss.pcm" -o "$TOBJ/iface_truss.o"
+    # truss implementation units recompiled with sanitizers against the ASan BMIs
     for src in src/core/*.cpp; do
         "$CXX" -c "$src" "${CXXFLAGS[@]}" "${SAN[@]}" -fno-sanitize-recover=all -Ivendor/samurai -Ivendor \
-            -fmodule-file="truss=$BMI/truss.pcm" \
-            -fmodule-file="truss:api=$BMI/truss_api.pcm" \
-            -fmodule-file="truss:impl=$BMI/truss_impl.pcm" \
+            -fmodule-file="truss=$UBMI/truss.pcm" \
+            -fmodule-file="truss:api=$UBMI/truss_api.pcm" \
+            -fmodule-file="truss:impl=$UBMI/truss_impl.pcm" \
             -o "$TOBJ/$(basename "${src%.cpp}").o"
     done
     # test units (module truss; implementation units + doctest main TU)
     for src in tests/unit/*.cpp; do
         "$CXX" -c "$src" "${CXXFLAGS[@]}" "${SAN[@]}" -fno-sanitize-recover=all \
             -Itests -Ivendor/samurai -Ivendor \
-            -fmodule-file="truss=$BMI/truss.pcm" \
-            -fmodule-file="truss:api=$BMI/truss_api.pcm" \
-            -fmodule-file="truss:impl=$BMI/truss_impl.pcm" \
+            -fmodule-file="truss=$UBMI/truss.pcm" \
+            -fmodule-file="truss:api=$UBMI/truss_api.pcm" \
+            -fmodule-file="truss:impl=$UBMI/truss_impl.pcm" \
             -o "$TOBJ/test_$(basename "${src%.cpp}").o"
     done
-    # link: interface units (from bootstrap) + sanitized core + samu + tests
-    "$CXX" "${CXXFLAGS[@]}" "$OBJ/api.o" "$OBJ/impl.o" "$OBJ/truss.o" \
-        "$OBJ"/samu_*.o "$TOBJ"/*.o -fsanitize=address,undefined -o build/truss-tests
+    # link: sanitized interface units + sanitized core + samu + tests
+    "$CXX" "${CXXFLAGS[@]}" "$TOBJ"/*.o "$OBJ"/samu_*.o \
+        -fsanitize=address,undefined -o build/truss-tests
     ./build/truss-tests
 }
 

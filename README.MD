@@ -356,6 +356,11 @@ The list form generates a `conanfile.txt` under
 under `build/<mode>/packages/conan/`, and propagates every package's include dirs,
 defines, link libs and link paths.
 
+Repeated invocations are cheap: truss fingerprints the conanfile (sha256) and
+caches the usage requirements in `build/<mode>/packages/conan/truss-spec.json`;
+an unchanged conanfile skips `conan install` entirely (~1–3 s saved). Editing
+the conanfile re-runs it.
+
 ### vcpkg
 
 Manifest mode, same consumption model:
@@ -366,7 +371,9 @@ proj.add_executable("app").sources_in("src").depends_on(*deps);
 ```
 
 Installs into `build/<mode>/vcpkg_installed/` and returns an `Interface`
-target. Requires `VCPKG_ROOT` pointing at a vcpkg tree.
+target. Requires `VCPKG_ROOT` pointing at a vcpkg tree. As with conan, an
+unchanged `vcpkg.json` (sha256 fingerprint) + surviving install tree skips
+`vcpkg install` on later invocations.
 
 ## Toolchain selection (Config)
 

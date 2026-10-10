@@ -278,3 +278,37 @@ TEST_CASE("launcher: launcher(\"\") keeps compile commands raw") {
     REQUIRE(manifest.has_value());
     CHECK(manifest->find("command = $cxx") != std::string::npos);
 }
+
+TEST_CASE("pkg: conan configure-skip caches a spec keyed by conanfile hash") {
+    if (!detail::program_exists("conan")) {
+        MESSAGE("conan not installed, skipping");
+        return;
+    }
+    ScratchDir scratch {"conan-skip"};
+    char prog[] = "truss-tests";
+    char* argv[] = {prog};
+    REQUIRE(detail::write_file("cs/conanfile.txt", "[requires]\nzlib/1.3.1\n").has_value());
+
+    {
+        Project proj("conan-skip", 1, argv);
+        auto z = proj.conan("cs/conanfile.txt");
+        REQUIRE(z.has_value());
+    }
+    const std::filesystem::path spec = "build/debug/packages/conan/truss-spec.json";
+    REQUIRE(std::filesystem::exists(spec));
+    const auto mtime1 = std::filesystem::last_write_time(spec);
+
+    { /* same conanfile: spec hit, conan install skipped (spec not rewritten) */
+        Project proj("conan-skip", 1, argv);
+        auto z = proj.conan("cs/conanfile.txt");
+        REQUIRE(z.has_value());
+        CHECK(std::filesystem::last_write_time(spec) == mtime1);
+    }
+    { /* changed conanfile: fingerprint miss, conan re-runs and rewrites the spec */
+        REQUIRE(detail::write_file("cs/conanfile.txt", "[requires]\nzlib/1.3.1\n# touched\n").has_value());
+        Project proj("conan-skip", 1, argv);
+        auto z = proj.conan("cs/conanfile.txt");
+        REQUIRE(z.has_value());
+        CHECK(std::filesystem::last_write_time(spec) != mtime1);
+    }
+}
