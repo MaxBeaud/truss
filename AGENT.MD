@@ -493,3 +493,11 @@ Read `PLAN.MD` first. This file is the rulebook for any agent/human modifying th
   order) -> stack-use-after-scope. Declare captured locals above the pool.
 - write_file: create_directories("") sets ec -> bare relative filenames
   failed; now guarded by has_parent_path().
+
+### Phase 12 wrap-up (bench re-run, all steps in)
+- truss clean 500 ms (baseline 539), no-op 4 ms, ninja dry-run floor 1 ms,
+  make floor 525 ms, xmake clean 1447 ms.
+- Opt-in wins measured on the same fixture: unity ~285 ms clean (~1.9x),
+  PCH/launcher/scan-deps reduce per-TU and configure cost further but the
+  fixture does not enable them by default.
+- No regressions: 80 unit cases + all examples green.
