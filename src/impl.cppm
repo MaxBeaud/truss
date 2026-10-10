@@ -125,6 +125,9 @@ Result<TargetTriple> apply_config(const Config& conf, const TargetTriple& base);
 /* compiler-cache launcher resolution (see target.cpp); "" = no launcher */
 Result<std::string> resolve_launcher(const Config& conf);
 
+/* materialize a cached tree with hardlinks (copy fallback); see pkg.cpp */
+Result<void> copy_tree(const std::filesystem::path& from, const std::filesystem::path& to);
+
 /* --- ninja manifest emitter ---------------------------------------------- */
 class NinjaWriter {
 public:

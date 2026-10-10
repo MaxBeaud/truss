@@ -97,3 +97,29 @@ TEST_CASE("conan path overload: missing conanfile is a Config error") {
     else
         FAIL("expected failure");
 }
+
+TEST_CASE("copy_tree: hardlink materialization, .git skipped") {
+    const auto root = std::filesystem::temp_directory_path() / "truss-copytree-test";
+    std::filesystem::remove_all(root);
+    std::filesystem::create_directories(root / "src/include");
+    std::filesystem::create_directories(root / ".git/objects");
+    REQUIRE(detail::write_file(root / "src/a.h", "int a();\n").has_value());
+    REQUIRE(detail::write_file(root / "src/include/b.h", "int b();\n").has_value());
+    REQUIRE(detail::write_file(root / ".git/config", "x\n").has_value());
+
+    const auto dest = root / "dest";
+    REQUIRE(detail::copy_tree(root / "src", dest).has_value());
+
+    CHECK(detail::read_file(dest / "a.h").value() == "int a();\n");
+    CHECK(detail::read_file(dest / "include/b.h").value() == "int b();\n");
+    CHECK(!std::filesystem::exists(dest / ".git"));
+    /* same filesystem: files are hardlinks (identical inode) */
+    std::error_code ec;
+    CHECK(std::filesystem::equivalent(root / "src/a.h", dest / "a.h", ec));
+
+    /* idempotent: skip_existing semantics keep existing dest files */
+    REQUIRE(detail::write_file(dest / "a.h", "edited\n").has_value());
+    REQUIRE(detail::copy_tree(root / "src", dest).has_value());
+    CHECK(detail::read_file(dest / "a.h").value() == "edited\n");
+    std::filesystem::remove_all(root);
+}

@@ -340,6 +340,12 @@ Downloads are cached in `~/.cache/truss`, materialized into
 `build/<mode>/packages/<name>`, and pinned in a `truss.lock` file next to your
 build script — so CI gets the same tree without a network round trip.
 
+Git trees are materialized with hardlinks (instant, no extra disk; real copies
+across filesystems). Caveat: a hardlinked fetched file shares its inode with
+the cache, so editing it *in place* inside `build/` also edits the cached copy
+— compilers replace files rather than write in place, so normal builds never
+hit this.
+
 ### conan
 
 Conan 2 graphs, consumed as one `Interface` target:

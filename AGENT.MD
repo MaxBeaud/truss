@@ -429,3 +429,10 @@ Read `PLAN.MD` first. This file is the rulebook for any agent/human modifying th
   `std::vector<std::string> argv {...}` code. Fix: cmd_unit regenerates the
   BMIs WITH sanitizers (build/unit-bmi) and compiles everything against those.
   Any future sanitizer flow must regenerate BMIs the same way.
+
+### Step 3: hardlink materialization
+- `copy_tree` (now `detail::copy_tree`, declared in impl.cppm) walks the tree
+  and `create_hard_link`s each file (copy fallback on cross-fs/EMLINK),
+  skipping `.git` via `disable_recursion_pending()` instead of copying then
+  deleting it. Verified: fetched git packages show link count 2 in
+  `build/<mode>/packages/`; tarball packages stay count 1 (tar extracts fresh).

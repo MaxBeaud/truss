@@ -130,21 +130,6 @@ Result<void> extract_tarball(const std::filesystem::path& tarball, const std::fi
     return run_tool(argv, "tar");
 }
 
-Result<void> copy_tree(const std::filesystem::path& from, const std::filesystem::path& to) {
-    std::error_code ec;
-    std::filesystem::create_directories(to, ec);
-    if (ec)
-        return std::unexpected(Error {Error::Kind::Io, "cannot create directory", to});
-    std::filesystem::copy(from, to,
-                          std::filesystem::copy_options::recursive |
-                              std::filesystem::copy_options::skip_existing,
-                          ec);
-    if (ec)
-        return std::unexpected(Error {Error::Kind::Io, "copy failed", from});
-    std::filesystem::remove_all(to / ".git"); /* vendored copies never carry the repo */
-    return {};
-}
-
 /* Any compilable source directly in this directory (not nested)? */
 bool has_top_level_sources(const std::filesystem::path& dir) {
     std::error_code ec;
@@ -162,6 +147,53 @@ bool has_top_level_sources(const std::filesystem::path& dir) {
 }
 
 } // namespace
+
+namespace detail {
+
+/* materialize a cached tree into the build dir with hardlinks (instant, no
+ * extra disk), falling back to real copies across filesystems. Caveat: linked
+ * files share their inode with the cache, so editing a fetched source in the
+ * build tree also edits the cached copy — compilers replace files rather than
+ * write in place, so normal builds never hit this. */
+Result<void> copy_tree(const std::filesystem::path& from, const std::filesystem::path& to) {
+    std::error_code ec;
+    std::filesystem::create_directories(to, ec);
+    if (ec)
+        return std::unexpected(Error {Error::Kind::Io, "cannot create directory", to});
+    for (auto it = std::filesystem::recursive_directory_iterator(from, ec);
+         it != std::filesystem::recursive_directory_iterator {}; it.increment(ec)) {
+        if (ec)
+            break;
+        const std::filesystem::path rel = std::filesystem::relative(it->path(), from, ec);
+        if (ec)
+            break;
+        if (rel.filename() == ".git") { /* vendored copies never carry the repo */
+            if (it->is_directory(ec))
+                it.disable_recursion_pending();
+            continue;
+        }
+        const std::filesystem::path dest = to / rel;
+        if (it->is_directory(ec)) {
+            std::filesystem::create_directories(dest, ec);
+            if (ec)
+                return std::unexpected(Error {Error::Kind::Io, "cannot create directory", dest});
+        } else if (it->is_regular_file(ec)) {
+            if (std::filesystem::exists(dest, ec))
+                continue; /* skip_existing semantics */
+            std::filesystem::create_hard_link(it->path(), dest, ec);
+            if (ec) {
+                std::filesystem::copy_file(it->path(), dest,
+                                           std::filesystem::copy_options::skip_existing, ec);
+                if (ec)
+                    return std::unexpected(Error {Error::Kind::Io, "copy failed", it->path()});
+            }
+        }
+    }
+    std::filesystem::remove_all(to / ".git"); /* older materializations may have it */
+    return {};
+}
+
+} // namespace detail
 
 /* --- Project::fetch --------------------------------------------------------
  * v0.1 fetches sequentially; parallel fetch is a later optimization (network
@@ -217,7 +249,7 @@ Result<Package> Project::fetch(std::string_view name, const FetchOptions& opts) 
                 return std::unexpected(r.error());
         }
         std::filesystem::remove_all(dest);
-        if (auto r = copy_tree(git_cache, dest); !r)
+        if (auto r = detail::copy_tree(git_cache, dest); !r)
             return std::unexpected(r.error());
     } else {
         std::string ext {".tar.gz"};
