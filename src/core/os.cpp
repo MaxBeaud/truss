@@ -190,6 +190,14 @@ Result<ProcessResult> capture(std::span<const std::string> argv, RunOptions opts
     return spawn(argv, true, opts);
 }
 
+Result<ProcessResult> run(std::initializer_list<std::string> argv, RunOptions opts) {
+    return run(std::span<const std::string> {argv}, opts);
+}
+
+Result<ProcessResult> capture(std::initializer_list<std::string> argv, RunOptions opts) {
+    return capture(std::span<const std::string> {argv}, opts);
+}
+
 /* --- temp_scope ------------------------------------------------------------ */
 
 temp_scope::temp_scope() {

@@ -147,6 +147,7 @@ run_example() {
 cmd_examples() {
     cmd_bootstrap
     run_example hello test
+    run_example hello stats
     run_example shared test
     run_example modules test
     run_example fetch test

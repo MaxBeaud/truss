@@ -61,6 +61,7 @@ ninja manifest that samurai then executes incrementally.
   - [Unity builds](#unity-builds)
   - [Custom tasks](#custom-tasks)
   - [Build hooks](#build-hooks)
+- [Scripting helpers (os / fs / log)](#scripting-helpers-os--fs--log)
 - [C++ modules](#c-modules)
 - [Dependencies](#dependencies)
   - [add_subdirectory](#add_subdirectory)
@@ -324,6 +325,56 @@ When things run, in order:
 Hooks fire once per invocation; `clean` and `compdb` never trigger them.
 Named tasks (`./truss <name>`) stay manual commands — hooks are for what must
 always run around the build itself.
+
+## Scripting helpers (os / fs / log)
+
+Your build script is C++, so truss also gives you the boring parts of shell
+scripting as plain library calls — for `task()` bodies, hooks, and configure
+logic. Everything is `std`-compatible (`path`, `optional`, `span`): "not
+found" is `nullopt`, never an error; `Result<T>` only appears where I/O or
+process spawning can genuinely fail. No exceptions.
+
+```cpp
+proj.task("dist", [](const truss::TaskContext&) -> truss::Result<void> {
+    // os: platform facts, programs, environment, processes
+    if constexpr (truss::os::is_linux()) { /* compiled out elsewhere */ }
+    if (!truss::os::any_program({"git", "tar"}))
+        return std::unexpected(Error {Error::Kind::Config, "need git + tar"});
+    auto version = truss::os::capture({"git", "describe", "--tags"});
+    if (!version) return std::unexpected(version.error());
+    auto jobs = truss::os::env("TRUSS_JOBS", 8u);          // lenient parse
+
+    // fs: find, walk, read/write, hash
+    for (auto f : truss::fs::walk("src", {.depth = 2}))    // lazy, std::ranges-ready
+        truss::log::info(truss::fs::generic_str(f));
+    auto readme = truss::fs::read_text("README.MD");       // Result<string>
+    truss::fs::write_text_if_changed("dist/VERSION", version->output); // mtime-stable
+
+    // log: same colored channel truss itself uses
+    truss::log::success("dist ready for " + *truss::os::hostname());
+    return {};
+});
+```
+
+At a glance:
+
+| Helper | Notes |
+| --- | --- |
+| `os::host_os/host_arch/host_family`, `is_linux/is_windows/is_macos` | `consteval` — usable in `if constexpr` |
+| `os::find_program` / `program_exists` / `all_programs` / `any_program` | fork-free `$PATH` walk, memoized |
+| `os::env(name)` / `os::env(name, def)` | `optional<string>`; typed lenient parse with default |
+| `os::cpu_count` / `memory_bytes` / `os_version` / `hostname` / `temp_dir` | runtime machine facts |
+| `os::run` / `os::capture` (+ `RunOptions{.cwd}`) | spawn; non-zero exit is a result, spawn failure an `Error` |
+| `fs::glob` / `glob({...})` | `*` `**` `?` `{a,b}`, sorted, forgiving |
+| `fs::walk(dir, {.depth, .skip_hidden})` | lazy `truss::generator`, composes with ranges |
+| `fs::find_upward` / `first_existing` / `find_library` | workspace-root discovery, library file lookup |
+| `fs::read_text` / `write_text` / `write_text_if_changed` / `read_lines` | whole-file text I/O |
+| `fs::sha256_file` | the same digest `fetch()` pinning uses |
+| `fs::current_dir` / `copy_tree` / `generic_str` | misc path work |
+| `log::info/warn/success/error` | truss's own colored output channel |
+
+POSIX is fully implemented; Windows-specific probes currently return
+`nullopt`/`0` (v0.2 item).
 
 ## C++ modules
 

@@ -166,6 +166,10 @@ TEST_CASE("os: run / capture") {
     auto err = os::run(nope);
     REQUIRE_FALSE(err.has_value());
     CHECK(err.error().kind == Error::Kind::Command);
+
+    auto sugar = os::capture({"sh", "-c", "echo ilist"}); // brace-list overload
+    REQUIRE(sugar.has_value());
+    CHECK(sugar->output == "ilist\n");
 }
 
 TEST_CASE("log: public channel smoke test") {

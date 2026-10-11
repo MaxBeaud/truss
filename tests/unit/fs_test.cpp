@@ -219,3 +219,44 @@ TEST_CASE("fs: glob / read_lines / sha256_file / generic_str promotions") {
     CHECK(fs::generic_str(p) == "/tmp/truss-test-fs-helpers/lines.txt");
     std::filesystem::remove_all(kFsRoot);
 }
+
+TEST_CASE("fs: write_text / write_text_if_changed / copy_tree") {
+    const auto root = std::filesystem::temp_directory_path() / "truss-test-text-copy";
+    std::filesystem::remove_all(root);
+    std::error_code ec;
+
+    auto w = fs::write_text(root / "deep/nested/file.txt", "v1");
+    REQUIRE(w.has_value());
+    auto r = fs::read_text(root / "deep/nested/file.txt");
+    REQUIRE(r.has_value());
+    CHECK(*r == "v1");
+
+    const auto mtime1 = std::filesystem::last_write_time(root / "deep/nested/file.txt", ec);
+    auto same = fs::write_text_if_changed(root / "deep/nested/file.txt", "v1");
+    REQUIRE(same.has_value());
+    const auto mtime2 = std::filesystem::last_write_time(root / "deep/nested/file.txt", ec);
+    CHECK(mtime1 == mtime2); // identical content: file untouched
+
+    auto diff = fs::write_text_if_changed(root / "deep/nested/file.txt", "v2");
+    REQUIRE(diff.has_value());
+    r = fs::read_text(root / "deep/nested/file.txt");
+    REQUIRE(r.has_value());
+    CHECK(*r == "v2");
+
+    // copy_tree: nested content copied, .git skipped, hardlink materialization
+    detail::write_file(root / "src/a.cpp", "int a;");
+    detail::write_file(root / "src/sub/b.cpp", "int b;");
+    detail::write_file(root / "src/.git/config", "never copied");
+    auto cp = fs::copy_tree(root / "src", root / "out");
+    REQUIRE(cp.has_value());
+    auto a = fs::read_text(root / "out/a.cpp");
+    REQUIRE(a.has_value());
+    CHECK(*a == "int a;");
+    auto b = fs::read_text(root / "out/sub/b.cpp");
+    REQUIRE(b.has_value());
+    CHECK(*b == "int b;");
+    CHECK_FALSE(std::filesystem::exists(root / "out/.git", ec));
+    CHECK(std::filesystem::equivalent(root / "out/a.cpp", root / "src/a.cpp", ec)); // hardlink
+
+    std::filesystem::remove_all(root, ec);
+}

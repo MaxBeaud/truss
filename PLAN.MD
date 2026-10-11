@@ -392,7 +392,7 @@ truss. ✅
    configure time so editing one `.cppm` rebuilds only its importers (Auto mode stays
    the conservative default). ✅
 
-### Phase 13 — Scripting helpers (`truss::os` / `truss::fs` / `truss::log`)
+### Phase 13 — Scripting helpers (`truss::os` / `truss::fs` / `truss::log`) ✅
 
 Std-compatible helpers so build scripts and `task()` bodies can query the
 platform, find programs, traverse the filesystem, and run tools without
@@ -424,24 +424,26 @@ API (final, reviewed in-session):
    `read_text`/`write_text`/`write_text_if_changed` ·
    `read_lines` truss::generator · `sha256_file` (native FIPS-180-4 hasher, replaces
    the `sha256sum` shell-out) · `current_dir` · `copy_tree` (hardlinks, skips
-   .git) · `temp_scope` (RAII
-   mkdtemp, move-only, `release()`) · `generic_str`.
+   .git) · `generic_str` · (`temp_scope` lives in `os` next to `temp_dir`:
+   RAII mkdtemp, move-only, `release()`) · `os::run`/`capture` also take
+   brace-list sugar overloads.
 3. `truss::log` — `info/warn/success/error` (same channel as truss's own
-   output) · `Project::root()`.
+   output) · `Project::root()` (dropped: `Project::cwd()` is already public —
+   no duplicate API).
 
 Locked decisions: single `env` name (no env_flag/env_int); sha256 stays the
 only digest (md5 rejected — fetch pin is a security boundary); no `is_ci()`;
 no wrappers over what std already does (`exists`/`file_size`/join); POSIX
 first, Windows gaps return nullopt/0 (v0.2). New public types:
-`os::ProcessResult`, `os::RunOptions`, `fs::WalkOptions`, `fs::temp_scope`.
+`os::ProcessResult`, `os::RunOptions`, `fs::WalkOptions`, `os::temp_scope`.
 
-Steps (commit each): 1) os core + dogfood pkg/target; 2) fs promotions +
-walk; 3) specs + temp_scope + run/capture + root() + log; 4) tests per helper
-+ README + Doxygen + internals page.
+Steps (commit each): 1) ✅ os core + dogfood pkg/target; 2) ✅ fs promotions +
+walk; 3) ✅ specs + temp_scope + run/capture + log (root() dropped, cwd()
+exists); 4) tests per helper + README + Doxygen + internals page.
 
-**Done when:** unit green per helper; self-host builds; bench no-op unchanged
-or better (fork-free find_program); an example `task()` uses `os::capture` +
-`fs::walk`.
+**Done when:** unit green per helper (95/95); self-host builds; bench no-op
+2 ms (fork-free find_program, no regression); `examples/hello` `stats` task
+uses `os::capture` + `fs::walk`. ✅
 
 ## 6. Risks & mitigations
 

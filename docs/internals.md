@@ -35,16 +35,17 @@ page explains the architecture around them.
 
 | Unit | Role |
 |---|---|
-| `src/core/fs.cpp` | glob engine (brace expansion -> one regex per alternative, literal-prefix walk, hidden entries skipped), file helpers, truss.lock parsing |
+| `src/core/fs.cpp` | glob engine (brace expansion -> one regex per alternative, literal-prefix walk, hidden entries skipped), file helpers, `walk`/`read_lines` coroutines (`truss::generator`; libc++ lacks `std::generator`), native FIPS-180-4 sha256, `find_library` system dirs, truss.lock parsing |
 | `src/core/modules.cpp` | regex module scanner (`export module`/`import` line matching), BMI name resolution, p1689 `scan_deps_requires` fallback |
 | `src/core/flags.cpp` | enum-indexed flag tables per compiler family (GCC/Clang/MSVC), triple/Config resolution, launcher detection |
 | `src/core/ninja.cpp` | `NinjaWriter` + ninja escaping rules |
 | `src/core/samu.cpp` | C shim over vendored samurai (`vendor/samurai`), in-process build + compdb |
-| `src/core/proc.cpp` | `posix_spawn` process runner, memoized `program_exists` |
+| `src/core/proc.cpp` | `posix_spawn` process runner (optional cwd via `addchdir_np`), output capture |
+| `src/core/os.cpp` | `truss::os`: consteval host predicates, memoized fork-free `find_program` `$PATH` walk, lenient `env` parsing, machine specs, `temp_scope` |
 | `src/core/pkg.cpp` | fetch (git/tarball + sha256), `~/.cache/truss` cache, hardlink materialization, conan/vcpkg fingerprint + configure-skip |
 | `src/core/target.cpp` | host triple detection, `Target::depends_on` bookkeeping |
 | `src/core/build.cpp` | the emitter: rules, edges, unity batching, PCH edges, scan-deps wiring, `Project::build()` orchestration |
-| `src/core/log.cpp` | colored stderr logging |
+| `src/core/log.cpp` | colored stdout logging, the public `truss::log` channel |
 
 ## Invariants
 

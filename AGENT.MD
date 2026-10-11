@@ -588,3 +588,8 @@ Verified doxygen 1.18 facts:
   typo + a dropped entry (aggregate init silently zero-fills, no warning).
   Generated K from the spec (cube roots of primes, Decimal) and pinned three
   coreutils-verified vectors in fs_test (abc / empty / 100x'x').
+
+- Phase 13 done: os::run/capture gained initializer_list sugar overloads
+  (brace lists in user code; span stays the canonical form). TaskFn takes
+  const TaskContext& (not Project&) — examples/README snippets must match.
+  Bench after phase 13: no-op 2 ms, clean 489 ms, incremental 279 ms.

@@ -466,6 +466,10 @@ struct RunOptions {
 Result<ProcessResult> run(std::span<const std::string> argv, RunOptions = {});
 /// \\copydoc run, with stdout+stderr captured into ProcessResult::output.
 Result<ProcessResult> capture(std::span<const std::string> argv, RunOptions = {});
+/// run() with a brace-enclosed argument list.
+Result<ProcessResult> run(std::initializer_list<std::string> argv, RunOptions opts = {});
+/// capture() with a brace-enclosed argument list.
+Result<ProcessResult> capture(std::initializer_list<std::string> argv, RunOptions opts = {});
 /**
  * \brief RAII unique temp directory (mkdtemp "truss-XXXXXX" under
  * temp_dir()): removed on destruction, move-only.
