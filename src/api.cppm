@@ -680,14 +680,12 @@ public:
         return *this;
     }
     Target& sources(std::initializer_list<std::string_view> patterns) {
-        for (const auto& p : patterns)
-            source_patterns_.emplace_back(p);
+        append_strings(source_patterns_, patterns);
         return *this;
     }
     template <StringRange R>
     Target& sources(R&& patterns) {
-        for (const auto& p : patterns)
-            source_patterns_.emplace_back(std::string_view(p));
+        append_strings(source_patterns_, std::forward<R>(patterns));
         return *this;
     }
     /// Every .cpp/.cc/.c under `dir`, recursively.
@@ -702,14 +700,12 @@ public:
         return *this;
     }
     Target& include_dirs(std::initializer_list<std::string_view> dirs) {
-        for (const auto& d : dirs)
-            include_dirs_.emplace_back(d);
+        append_strings(include_dirs_, dirs);
         return *this;
     }
     template <StringRange R>
     Target& include_dirs(R&& dirs) {
-        for (const auto& d : dirs)
-            include_dirs_.emplace_back(std::string_view(d));
+        append_strings(include_dirs_, std::forward<R>(dirs));
         return *this;
     }
     /// Add preprocessor defines (-D). Overloads: single, braced list, range.
@@ -718,14 +714,12 @@ public:
         return *this;
     }
     Target& defines(std::initializer_list<std::string_view> defs) {
-        for (const auto& d : defs)
-            defines_.emplace_back(d);
+        append_strings(defines_, defs);
         return *this;
     }
     template <StringRange R>
     Target& defines(R&& defs) {
-        for (const auto& d : defs)
-            defines_.emplace_back(std::string_view(d));
+        append_strings(defines_, std::forward<R>(defs));
         return *this;
     }
     /// Add libraries to link (-l). Overloads: single, braced list, range.
@@ -734,14 +728,12 @@ public:
         return *this;
     }
     Target& link_libs(std::initializer_list<std::string_view> libs) {
-        for (const auto& l : libs)
-            link_libs_.emplace_back(l);
+        append_strings(link_libs_, libs);
         return *this;
     }
     template <StringRange R>
     Target& link_libs(R&& libs) {
-        for (const auto& l : libs)
-            link_libs_.emplace_back(std::string_view(l));
+        append_strings(link_libs_, std::forward<R>(libs));
         return *this;
     }
     /// Add library search directories (-L). Overloads: single, braced list, range.
@@ -750,14 +742,12 @@ public:
         return *this;
     }
     Target& link_paths(std::initializer_list<std::string_view> paths) {
-        for (const auto& p : paths)
-            link_paths_.emplace_back(p);
+        append_strings(link_paths_, paths);
         return *this;
     }
     template <StringRange R>
     Target& link_paths(R&& paths) {
-        for (const auto& p : paths)
-            link_paths_.emplace_back(std::string_view(p));
+        append_strings(link_paths_, std::forward<R>(paths));
         return *this;
     }
     /// Apple-only: link a framework. Overloads: single, braced list, range.
@@ -766,14 +756,12 @@ public:
         return *this;
     }
     Target& link_frameworks(std::initializer_list<std::string_view> fw) {
-        for (const auto& f : fw)
-            frameworks_.emplace_back(f);
+        append_strings(frameworks_, fw);
         return *this;
     }
     template <StringRange R>
     Target& link_frameworks(R&& fw) {
-        for (const auto& f : fw)
-            frameworks_.emplace_back(std::string_view(f));
+        append_strings(frameworks_, std::forward<R>(fw));
         return *this;
     }
     /// Apple-only: framework search directories (-F). Overloads: single, braced list, range.
@@ -782,14 +770,12 @@ public:
         return *this;
     }
     Target& framework_paths(std::initializer_list<std::string_view> paths) {
-        for (const auto& p : paths)
-            framework_paths_.emplace_back(p);
+        append_strings(framework_paths_, paths);
         return *this;
     }
     template <StringRange R>
     Target& framework_paths(R&& paths) {
-        for (const auto& p : paths)
-            framework_paths_.emplace_back(std::string_view(p));
+        append_strings(framework_paths_, std::forward<R>(paths));
         return *this;
     }
 
@@ -887,6 +873,13 @@ public:
     bool is_test_target() const { return test_; }
 
 private:
+    /// Shared append loop behind the braced-list/range builder overloads.
+    template <class R>
+    static void append_strings(std::vector<std::string>& v, R&& range) {
+        for (const auto& s : range)
+            v.emplace_back(std::string_view(s));
+    }
+
     std::string name_;
     TargetKind kind_;
     std::vector<std::string> source_patterns_;

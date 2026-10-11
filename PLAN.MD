@@ -346,7 +346,8 @@ truss. ✅
 3. Docs: README with mate-style guide; `examples/` per feature. ✅ (README.MD is the
    front-page user manual; `examples/` covers hello, shared, modules, fetch, conan,
    vcpkg, installed, amalgam)
-4. Benchmarks: clean + incremental build times vs xmake on a fixture. ⏳ (open)
+4. Benchmarks: clean + incremental build times vs xmake on a fixture. ✅ (shipped in
+   phase 12: `./setup.sh bench`)
 
 ### Phase 11 — Hardening, toolchain Config, API ergonomics ✅
 

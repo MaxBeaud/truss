@@ -2,8 +2,8 @@
 //
 // Build this script once (xmake `truss-cli` target, or bootstrap.sh artifacts),
 // then `./truss debug` produces build/debug/bin/<triple>/truss — truss compiled
-// by itself. Unit tests need Catch2 (an xmake package for now), so they are
-// not part of the self-host graph yet.
+// by itself. Unit tests (doctest) run through ./setup.sh unit and are not part
+// of the self-host graph.
 import truss;
 
 int main(int argc, char** argv) {

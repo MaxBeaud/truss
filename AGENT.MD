@@ -593,3 +593,35 @@ Verified doxygen 1.18 facts:
   (brace lists in user code; span stays the canonical form). TaskFn takes
   const TaskContext& (not Project&) — examples/README snippets must match.
   Bench after phase 13: no-op 2 ms, clean 489 ms, incremental 279 ms.
+
+## 23. Full-codebase audit QC pass (post phase 13)
+
+Line-by-line audit of every source unit; fixes only where there was a real
+gain (D-list deliberately left alone: 2-use patterns, std::regex scanner,
+merge_imports string round-trip, read_lines double-open).
+
+- std::filesystem::relative(p, base) weakly-canonicalizes BOTH sides — one
+  stat/readlink family of syscalls per call. Drop-in replacement when paths
+  are built lexically from the same base (directory iterators do):
+  p.lexically_relative(base), pure string arithmetic. Verified semantics:
+  "src/a.cpp" rel "." -> "src/a.cpp"; "./x" rel "." -> "x"; iterator rooted
+  at "." yields "./x" entries, so lexically_relative(".") strips the prefix
+  exactly like relative() did. Applied in glob_multi (per-entry hot loop) and
+  copy_tree. Bench: no-op 2 ms -> 1 ms.
+- sha256 is now an incremental context (Sha256Ctx: update/final_hex) and
+  sha256_file streams 64 KiB chunks — bounded memory for tarballs. The
+  in-memory sha256_hex wrapper became unused (-Wunused-function caught it)
+  and was deleted; if a string digest is ever needed again, wrap a ctx.
+  New fs_test pins 65536 / 65537 / 200000-byte digests (chunk-boundary and
+  partial-final-block paths) from coreutils sha256sum + hashlib.
+- pkg.cpp file_sha256 (sha256sum shell-out) deleted; conan + vcpkg
+  configure-skip fingerprints use fs::sha256_file natively.
+- Dead code removed: ResolvedTarget::outdir (never read); scan-deps scratch
+  now a dogfooded os::temp_scope (was build_dir/scan, never cleaned);
+  resolve_hardening moved to flags.cpp anonymous namespace.
+- Target builder: 7 fields x {single, ilist, range} overloads share one
+  private static append_strings(vector<string>&, R&&); overload shape kept
+  (deliberate overload resolution), bodies are one-liners.
+- Bench after QC: no-op 1 ms, clean 491 ms, incremental 275 ms.
+  Suite: 96 cases / 556 assertions, examples + installed + amalgam green,
+  docs zero warnings.

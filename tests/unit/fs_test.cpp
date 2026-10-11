@@ -260,3 +260,26 @@ TEST_CASE("fs: write_text / write_text_if_changed / copy_tree") {
 
     std::filesystem::remove_all(root, ec);
 }
+
+TEST_CASE("fs: sha256_file streams big files (chunk boundaries)") {
+    /* deterministic content; digests pinned from coreutils sha256sum /
+     * hashlib — covers the streaming context across 64 KiB chunk boundaries:
+     * exact chunk, chunk+1 byte, and a partial final block */
+    const auto p = std::filesystem::temp_directory_path() / "truss-test-sha-big.bin";
+    std::string content;
+    content.reserve(200000);
+    for (int i = 0; i < 200000; ++i)
+        content.push_back(static_cast<char>((i * 7 + (i >> 8)) & 0xff));
+
+    struct Case { int size; const char* hash; };
+    for (const Case& c : {Case {65536, "5fce37f3129150ce7ec3939b54016d9c1fd01364e27b0a788dc634064aec76b1"},
+                          Case {65537, "662bcb0c13ee4da585a79aceace59f1755da8a51f2da8a1d5726ee3622bb0457"},
+                          Case {200000, "df0f6306fcfb22cadc19e9868af0728ea9444c363c55ac205c4782a827176d9e"}}) {
+        detail::write_file(p, std::string_view(content).substr(0, c.size));
+        auto h = fs::sha256_file(p);
+        REQUIRE(h.has_value());
+        CHECK(*h == c.hash);
+    }
+    std::error_code ec;
+    std::filesystem::remove(p, ec);
+}

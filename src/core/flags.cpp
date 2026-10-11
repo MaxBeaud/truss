@@ -145,6 +145,11 @@ constexpr std::string_view family_name(CompilerFamily f) {
     }
 }
 
+Hardening resolve_hardening(Hardening h) {
+    /* the default hardening stack is Light */
+    return h == Hardening::Default ? Hardening::Light : h;
+}
+
 Result<void> require_supported(const TargetTriple& t) {
     if (t.family != CompilerFamily::Gcc && t.family != CompilerFamily::Clang &&
         t.family != CompilerFamily::Msvc)
@@ -162,11 +167,6 @@ DebugInfo resolve_debug(BuildMode mode, DebugInfo debug) {
     return debug == DebugInfo::Default
                ? (mode == BuildMode::Debug ? DebugInfo::Full : DebugInfo::None)
                : debug;
-}
-
-Hardening resolve_hardening(Hardening h) {
-    /* the default hardening stack is Light */
-    return h == Hardening::Default ? Hardening::Light : h;
 }
 
 Result<FlagSet> build_flags(const TargetTriple& triple, BuildMode mode,

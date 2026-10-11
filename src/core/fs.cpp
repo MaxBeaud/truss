@@ -164,8 +164,12 @@ Result<std::vector<std::filesystem::path>> glob_multi(std::span<const std::strin
         const std::filesystem::recursive_directory_iterator end {};
         for (; it != end; it.increment(ec)) {
             if (ec) break;
-            const std::filesystem::path rel = std::filesystem::relative(it->path(), ".", ec);
-            if (ec) continue;
+            /* lexically_relative (pure path arithmetic) instead of relative():
+             * the latter weakly-canonicalizes both sides, i.e. syscalls per
+             * entry; the iterator builds its paths from base, so the lexical
+             * form is exact and free */
+            const std::filesystem::path rel = it->path().lexically_relative(".");
+            if (rel.empty()) continue;
             if (is_hidden(rel)) {
                 if (it->is_directory(ec))
                     it.disable_recursion_pending();
@@ -326,34 +330,56 @@ void sha256_transform(std::uint32_t h[8], const std::uint8_t* p) {
     h[4] += e; h[5] += f; h[6] += g; h[7] += hh;
 }
 
-std::string sha256_hex(std::string_view data) {
+/* Incremental context: sha256_file streams large tarballs through bounded
+ * memory instead of slurping the whole file. */
+struct Sha256Ctx {
     std::uint32_t h[8] {0x6a09e667u, 0xbb67ae85u, 0x3c6ef372u, 0xa54ff53au,
-                       0x510e527fu, 0x9b05688cu, 0x1f83d9abu, 0x5be0cd19u};
-    const auto* p = reinterpret_cast<const std::uint8_t*>(data.data());
-    std::size_t n = data.size();
-    while (n >= 64) { sha256_transform(h, p); p += 64; n -= 64; }
+                        0x510e527fu, 0x9b05688cu, 0x1f83d9abu, 0x5be0cd19u};
+    std::array<std::uint8_t, 64> buf {};
+    std::size_t buflen {};
+    std::uint64_t total {};
 
-    std::array<std::uint8_t, 128> tail {}; // final block(s): message + 0x80 + length
-    std::memcpy(tail.data(), p, n);
-    tail[n] = 0x80;
-    const std::size_t padded = (n < 56) ? 64 : 128;
-    const std::uint64_t bits = static_cast<std::uint64_t>(data.size()) * 8;
-    for (int i = 0; i < 8; ++i)
-        tail[padded - 1 - i] = static_cast<std::uint8_t>(bits >> (8 * i));
-    for (std::size_t off = 0; off < padded; off += 64)
-        sha256_transform(h, tail.data() + off);
-
-    static constexpr char hexdig[] = "0123456789abcdef";
-    std::string out;
-    out.reserve(64);
-    for (const std::uint32_t word : h)
-        for (int i = 3; i >= 0; --i) {
-            const std::uint8_t byte = (word >> (8 * i)) & 0xff;
-            out.push_back(hexdig[byte >> 4]);
-            out.push_back(hexdig[byte & 0xf]);
+    void update(const std::uint8_t* p, std::size_t n) {
+        total += n;
+        if (buflen) { // complete a partial block first
+            const std::size_t take = std::min<std::size_t>(buf.size() - buflen, n);
+            std::memcpy(buf.data() + buflen, p, take);
+            buflen += take;
+            p += take;
+            n -= take;
+            if (buflen == buf.size()) {
+                sha256_transform(h, buf.data());
+                buflen = 0;
+            }
         }
-    return out;
-}
+        while (n >= buf.size()) { sha256_transform(h, p); p += buf.size(); n -= buf.size(); }
+        if (n) { std::memcpy(buf.data(), p, n); buflen = n; }
+    }
+
+    std::string final_hex() { // padding: message + 0x80 + zeros + 64-bit length
+        std::array<std::uint8_t, 128> tail {};
+        const std::size_t n = buflen;
+        std::memcpy(tail.data(), buf.data(), n);
+        tail[n] = 0x80;
+        const std::size_t padded = (n < 56) ? 64 : 128;
+        const std::uint64_t bits = total * 8;
+        for (int i = 0; i < 8; ++i)
+            tail[padded - 1 - i] = static_cast<std::uint8_t>(bits >> (8 * i));
+        for (std::size_t off = 0; off < padded; off += 64)
+            sha256_transform(h, tail.data() + off);
+
+        static constexpr char hexdig[] = "0123456789abcdef";
+        std::string out;
+        out.reserve(64);
+        for (const std::uint32_t word : h)
+            for (int i = 3; i >= 0; --i) {
+                const std::uint8_t byte = (word >> (8 * i)) & 0xff;
+                out.push_back(hexdig[byte >> 4]);
+                out.push_back(hexdig[byte & 0xf]);
+            }
+        return out;
+    }
+};
 
 } // namespace
 
@@ -523,10 +549,20 @@ Result<generator<std::string>> read_lines(const std::filesystem::path& p) {
 }
 
 Result<std::string> sha256_file(const std::filesystem::path& p) {
-    auto data = detail::read_file(p);
-    if (!data)
-        return data;
-    return detail::sha256_hex(*data);
+    std::ifstream in(p, std::ios::binary);
+    if (!in)
+        return std::unexpected(Error {Error::Kind::Io, "failed to open file for reading", p});
+    detail::Sha256Ctx ctx; // streamed in chunks: bounded memory for big tarballs
+    std::array<char, 65536> chunk {};
+    while (in) {
+        in.read(chunk.data(), static_cast<std::streamsize>(chunk.size()));
+        if (const std::streamsize got = in.gcount(); got > 0)
+            ctx.update(reinterpret_cast<const std::uint8_t*>(chunk.data()),
+                       static_cast<std::size_t>(got));
+    }
+    if (in.bad())
+        return std::unexpected(Error {Error::Kind::Io, "failed to read file", p});
+    return ctx.final_hex();
 }
 
 Result<std::filesystem::path> current_dir() {

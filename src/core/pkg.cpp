@@ -159,9 +159,9 @@ Result<void> copy_tree(const std::filesystem::path& from, const std::filesystem:
          it != std::filesystem::recursive_directory_iterator {}; it.increment(ec)) {
         if (ec)
             break;
-        const std::filesystem::path rel = std::filesystem::relative(it->path(), from, ec);
-        if (ec)
-            break;
+        const std::filesystem::path rel = it->path().lexically_relative(from);
+        if (rel.empty())
+            break; // cannot happen: the iterator builds its paths from `from`
         if (rel.filename() == ".git") { /* vendored copies never carry the repo */
             if (it->is_directory(ec))
                 it.disable_recursion_pending();
@@ -419,19 +419,8 @@ Result<TargetRef> Project::add_subdirectory(const std::filesystem::path& dir) {
 }
 
 /* --- configure-skip fingerprinting ------------------------------------------
- * sha256 of a file's contents (via sha256sum); used to detect unchanged
+ * sha256 of a file's contents (native hasher); used to detect unchanged
  * conanfile/vcpkg.json so the tool invocation can be skipped. */
-Result<std::string> file_sha256(const std::filesystem::path& p) {
-    const std::vector<std::string> argv {"sha256sum", p.generic_string()};
-    auto outcome = detail::run_process_stdout(argv);
-    if (!outcome)
-        return std::unexpected(outcome.error());
-    if (outcome->exit_code != 0)
-        return std::unexpected(Error {Error::Kind::Io, "sha256sum failed", p});
-    std::string sum = outcome->output;
-    sum.erase(sum.find_first_of(" \t\n"));
-    return sum;
-}
 
 /* the conanfile a conan install dir argument would consume ("" if none) */
 std::string conanfile_in(const std::filesystem::path& cf) {
@@ -480,7 +469,7 @@ Result<TargetRef> Project::conan(std::string_view conanfile) {
      * conan install could not change anything (~1-3 s saved per invocation) */
     std::string fingerprint;
     if (const std::string cf_file = conanfile_in(cf); !cf_file.empty())
-        if (auto fp = file_sha256(cf_file); fp)
+        if (auto fp = fs::sha256_file(cf_file); fp)
             fingerprint = *fp;
 
     std::vector<std::string> includes, link_paths, libs, defines;
@@ -664,7 +653,7 @@ Result<TargetRef> Project::vcpkg(std::vector<std::string> packages) {
      * re-running vcpkg install could not change anything (~1-3 s saved) */
     const std::filesystem::path spec_path = build_dir() / "packages" / "vcpkg-truss-spec.json";
     std::string fingerprint;
-    if (auto fp = file_sha256(manifest); fp)
+    if (auto fp = fs::sha256_file(manifest); fp)
         fingerprint = *fp + "-" + triplet;
     bool skip_install = false;
     if (!fingerprint.empty() && std::filesystem::is_directory(tdir, ec))

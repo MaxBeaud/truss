@@ -59,7 +59,7 @@ struct ResolvedTarget {
     std::vector<std::string> cxx_sources, c_sources; /* relative to cwd */
     std::vector<BmiUnit> bmis;
     std::vector<detail::ModuleUnitInfo> units;       /* all sources, scanned */
-    std::string objdir, outdir, output;              /* relative to cwd */
+    std::string objdir, output;                      /* relative to cwd */
     std::string implib;                              /* MSVC import lib for shared libs */
 };
 
@@ -305,7 +305,7 @@ Result<void> emit_manifest(const Project& proj, std::vector<ResolvedTarget>& res
     std::vector<std::string> all_outputs;
     for (auto& r : resolved) {
         const Target& t = *r.target;
-        /* header-only targets contribute usage requirements (via collect_include_dirs)
+        /* header-only targets contribute usage requirements (via collect_usage)
          * but produce no artifact and no edges */
         if (t.kind() == TargetKind::Interface)
             continue;
@@ -337,9 +337,13 @@ Result<void> emit_manifest(const Project& proj, std::vector<ResolvedTarget>& res
                 return std::unexpected(Error {
                     Error::Kind::Toolchain, "modules_mode(Manual): clang-scan-deps not found on PATH",
                 });
-            const std::filesystem::path scratch = build_dir / "scan";
-            if (auto r2 = detail::make_dirs(scratch); !r2)
-                return std::unexpected(r2.error());
+            /* scratch in a temp_scope: unique per run, removed at scope end
+             * (declared before the pool so it outlives the workers) */
+            const os::temp_scope scratch;
+            if (!scratch.valid())
+                return std::unexpected(Error {
+                    Error::Kind::Io, "cannot create scan-deps scratch directory",
+                });
             std::vector<Result<std::vector<std::string>>> scanned(r.units.size());
             const size_t nthreads = std::min<size_t>(r.units.size(), 8);
             {
@@ -348,7 +352,8 @@ Result<void> emit_manifest(const Project& proj, std::vector<ResolvedTarget>& res
                     pool.emplace_back([&, w] {
                         for (size_t i = w; i < r.units.size(); i += nthreads)
                             scanned[i] = detail::scan_deps_requires(
-                                r.triple.compiler, cflags->compile, r.units[i].path, proj.cwd(), scratch);
+                                r.triple.compiler, cflags->compile, r.units[i].path, proj.cwd(),
+                                scratch.path());
                     });
                 /* jthread destructors join at scope end */
             }
@@ -868,7 +873,6 @@ Result<void> Project::build() {
         r.output = output_path_for(*t, bld, tdir, r.triple.family);
         if (r.triple.family == CompilerFamily::Msvc && t->kind() == TargetKind::SharedLibrary)
             r.implib = import_lib_path(r.output);
-        r.outdir = std::filesystem::path(r.output).parent_path().generic_string();
         resolved.push_back(std::move(r));
     }
 
