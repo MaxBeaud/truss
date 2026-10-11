@@ -109,9 +109,7 @@ Result<ProcOutcome> run_process(std::span<const std::string> argv, bool capture)
 /// tool output, e.g. `conan install --format=json`).
 /// \ingroup grp_internals
 Result<ProcOutcome> run_process_stdout(std::span<const std::string> argv);
-/// True when `command -v name` succeeds; memoized (each probe forks a shell).
-/// \ingroup grp_internals
-bool program_exists(std::string_view name);
+/* program probing lives in the public truss::os (os::program_exists). */
 
 /* --- C++ module scanning -------------------------------------------------- */
 

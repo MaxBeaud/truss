@@ -1,7 +1,6 @@
 module;
 #include <algorithm>
 #include <cctype>
-#include <cstdlib>
 #include <expected>
 #include <string>
 #include <string_view>
@@ -14,55 +13,12 @@ namespace truss {
 
 TargetTriple host_triple() {
     TargetTriple t;
+    t.os = os::host_os();
+    t.arch = os::host_arch();
+    t.family = os::host_family();
 
-#if defined(__EMSCRIPTEN__)
-    t.os = Os::Emscripten;
-#elif defined(__ANDROID__)
-    t.os = Os::Android;
-#elif defined(__linux__) || defined(__gnu_linux__)
-    t.os = Os::Linux;
-#elif defined(_WIN32) || defined(__WIN32__)
-    t.os = Os::Windows;
-#elif defined(__APPLE__) || defined(__MACH__)
-    t.os = Os::MacOS;
-#elif defined(__FreeBSD__)
-    t.os = Os::FreeBSD;
-#else
-    t.os = Os::Unknown;
-#endif
-
-#if defined(__x86_64__) || defined(_M_X64)
-    t.arch = Arch::X64;
-#elif defined(__aarch64__) || defined(_M_ARM64)
-    t.arch = Arch::Arm64;
-#elif defined(__i386__) || defined(_M_IX86)
-    t.arch = Arch::X86;
-#elif defined(__arm__) || defined(_M_ARM)
-    t.arch = Arch::Arm32;
-#elif defined(__riscv) && (__riscv_xlen == 64)
-    t.arch = Arch::Riscv64;
-#elif defined(__powerpc64__) || defined(__ppc64__)
-    t.arch = Arch::Ppc64;
-#elif defined(__s390x__)
-    t.arch = Arch::S390x;
-#elif defined(__wasm32__)
-    t.arch = Arch::Wasm32;
-#else
-    t.arch = Arch::Unknown;
-#endif
-
-#if defined(__clang__)
-    t.family = CompilerFamily::Clang;
-#elif defined(__GNUC__)
-    t.family = CompilerFamily::Gcc;
-#elif defined(_MSC_VER)
-    t.family = CompilerFamily::Msvc;
-#else
-    t.family = CompilerFamily::Unknown;
-#endif
-
-    if (const char* cxx = std::getenv("CXX"); cxx != nullptr && *cxx != '\0')
-        t.compiler = cxx;
+    if (auto cxx = os::env("CXX"); cxx)
+        t.compiler = *cxx;
     else {
         switch (t.family) {
         case CompilerFamily::Clang: t.compiler = "clang++"; break;
@@ -72,7 +28,7 @@ TargetTriple host_triple() {
         }
     }
 
-    if (t.family == CompilerFamily::Clang && detail::program_exists("llvm-ar"))
+    if (t.family == CompilerFamily::Clang && os::program_exists("llvm-ar"))
         t.ar = "llvm-ar";
     else if (t.family == CompilerFamily::Msvc)
         t.ar = "lib.exe"; /* MSVC archiver (llvm-lib understands the same syntax) */
@@ -112,7 +68,7 @@ Result<TargetTriple> apply_config(const Config& conf, const TargetTriple& base) 
         /* archiver follows the family unless set explicitly */
         if (conf.ar().empty()) {
             if (t.family == CompilerFamily::Clang)
-                t.ar = detail::program_exists("llvm-ar") ? "llvm-ar" : "ar";
+                t.ar = os::program_exists("llvm-ar") ? "llvm-ar" : "ar";
             else if (t.family == CompilerFamily::Msvc)
                 t.ar = "lib.exe";
             else
@@ -146,16 +102,16 @@ Result<std::string> resolve_launcher(const Config& conf) {
     if (conf.launcher_set()) {
         if (conf.launcher().empty())
             return std::string {};
-        if (!detail::program_exists(conf.launcher()))
+        if (!os::program_exists(conf.launcher()))
             return std::unexpected(Error {
                 Error::Kind::Config,
                 "launcher '" + conf.launcher() + "' not found (install it or use conf.launcher(\"\") to disable)",
             });
         return conf.launcher();
     }
-    if (detail::program_exists("ccache"))
+    if (os::program_exists("ccache"))
         return std::string {"ccache"};
-    if (detail::program_exists("sccache"))
+    if (os::program_exists("sccache"))
         return std::string {"sccache"};
     return std::string {};
 }

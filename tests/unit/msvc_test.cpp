@@ -49,8 +49,8 @@ TargetTriple clang_cl_triple() {
 }
 
 bool msvc_toolchain_available() {
-    return detail::program_exists("clang-cl") && detail::program_exists("lld-link") &&
-           detail::program_exists("llvm-lib");
+    return os::program_exists("clang-cl") && os::program_exists("lld-link") &&
+           os::program_exists("llvm-lib");
 }
 
 /* Catch2 cannot stringify file_time_t; compare integer ns instead */

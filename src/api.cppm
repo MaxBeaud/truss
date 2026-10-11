@@ -7,6 +7,7 @@
  * `truss` cannot import the primary interface of their own module.
  */
 module;
+#include <charconv>
 #include <concepts>
 #include <cstddef>
 #include <expected>
@@ -198,9 +199,144 @@ struct TargetTriple {
 };
 
 /// Triple of the machine truss itself runs on (compiler from $CXX when set).
-/// \return os/arch/family detected from predefined macros, plus default
+/// \\return os/arch/family detected from predefined macros, plus default
 ///         driver and archiver (llvm-ar for clang when available).
 TargetTriple host_triple();
+
+/**
+ * \brief Host introspection + program lookup for build scripts.
+ *
+ * The platform predicates are `consteval` (predefined macros): they describe
+ * the machine the build script is compiled on — truss's distribution model
+ * guarantees the same compiler builds the BMIs and the script — and work in
+ * `if constexpr`. The rest are runtime facts (env, PATH, syscalls).
+ */
+namespace os {
+
+/// OS of the host (compile-time, from predefined macros).
+consteval Os host_os() {
+#if defined(__EMSCRIPTEN__)
+    return Os::Emscripten;
+#elif defined(__ANDROID__)
+    return Os::Android;
+#elif defined(__linux__) || defined(__gnu_linux__)
+    return Os::Linux;
+#elif defined(_WIN32) || defined(__WIN32__)
+    return Os::Windows;
+#elif defined(__APPLE__) || defined(__MACH__)
+    return Os::MacOS;
+#elif defined(__FreeBSD__)
+    return Os::FreeBSD;
+#else
+    return Os::Unknown;
+#endif
+}
+/// ISA of the host (compile-time, from predefined macros).
+consteval Arch host_arch() {
+#if defined(__x86_64__) || defined(_M_X64)
+    return Arch::X64;
+#elif defined(__aarch64__) || defined(_M_ARM64)
+    return Arch::Arm64;
+#elif defined(__i386__) || defined(_M_IX86)
+    return Arch::X86;
+#elif defined(__arm__) || defined(_M_ARM)
+    return Arch::Arm32;
+#elif defined(__riscv) && (__riscv_xlen == 64)
+    return Arch::Riscv64;
+#elif defined(__powerpc64__) || defined(__ppc64__)
+    return Arch::Ppc64;
+#elif defined(__s390x__)
+    return Arch::S390x;
+#elif defined(__wasm32__)
+    return Arch::Wasm32;
+#else
+    return Arch::Unknown;
+#endif
+}
+/// Compiler family of the compiler compiling the script (compile-time).
+consteval CompilerFamily host_family() {
+#if defined(__clang__)
+    return CompilerFamily::Clang;
+#elif defined(__GNUC__)
+    return CompilerFamily::Gcc;
+#elif defined(_MSC_VER)
+    return CompilerFamily::Msvc;
+#else
+    return CompilerFamily::Unknown;
+#endif
+}
+
+/// Host predicates (compile-time; usable in `if constexpr`).
+consteval bool is_linux()   { return host_os() == Os::Linux; }
+/// \\copydoc is_linux
+consteval bool is_windows() { return host_os() == Os::Windows; }
+/// \\copydoc is_linux
+consteval bool is_macos()   { return host_os() == Os::MacOS; }
+
+/**
+ * \brief Locate a program: fork-free $PATH walk + access(X_OK) (a name
+ * containing '/' is checked directly). Results (including misses) are
+ * memoized for the process lifetime.
+ * \param name program name or path.
+ * \return absolute path, or nullopt when not found / not executable.
+ */
+std::optional<std::filesystem::path> find_program(std::string_view name);
+/**
+ * \brief find_program() for several candidates; first hit wins
+ * (e.g. find_program({"clang++-19", "clang++"})).
+ * \param names candidate names, tried in order.
+ * \return the first program found, or nullopt if none is.
+ */
+std::optional<std::filesystem::path> find_program(std::initializer_list<std::string_view> names);
+/// True when find_program(name) succeeds; memoized.
+bool program_exists(std::string_view name);
+
+/// Environment variable value; nullopt when unset or empty.
+std::optional<std::string> env(std::string_view name);
+
+/// Types env(name, def) can parse into.
+template <class T>
+concept EnvParsable = std::same_as<T, bool> || std::integral<T> || std::floating_point<T> ||
+                      std::same_as<T, std::string>;
+
+/**
+ * \brief Environment variable parsed into T (type deduced from `def`).
+ * Lenient by design: unset, empty, or unparseable values yield `def` — a
+ * garbage JOBS=banana must not kill a build script. bool accepts
+ * 1/true/on/yes/y and 0/false/off/no/n (case-insensitive); numbers use
+ * std::from_chars and must consume the whole value.
+ * \param name variable name
+ * \param def default value; also selects the parsed type
+ */
+template <EnvParsable T>
+T env(std::string_view name, T def) {
+    const auto value = env(name);
+    if (!value || value->empty())
+        return def;
+    if constexpr (std::same_as<T, bool>) {
+        std::string lower;
+        lower.reserve(value->size());
+        for (const char c : *value)
+            lower.push_back(c >= 'A' && c <= 'Z' ? static_cast<char>(c - 'A' + 'a') : c);
+        if (lower == "1" || lower == "true" || lower == "on" || lower == "yes" || lower == "y")
+            return true;
+        if (lower == "0" || lower == "false" || lower == "off" || lower == "no" || lower == "n")
+            return false;
+        return def;
+    } else if constexpr (std::same_as<T, std::string>) {
+        return *value;
+    } else {
+        T parsed {};
+        const auto [end, ec] = std::from_chars(value->data(), value->data() + value->size(), parsed);
+        if (ec == std::errc {} && end == value->data() + value->size())
+            return parsed;
+        return def;
+    }
+}
+/// Sugar so `env("CXX", "g++")` deduces std::string instead of char[N].
+inline std::string env(std::string_view name, const char* def) { return env<std::string>(name, std::string(def)); }
+
+} // namespace os
 
 /**
  * \brief Project-wide toolchain selection, applied with proj.configure(conf).

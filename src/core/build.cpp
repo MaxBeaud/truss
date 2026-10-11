@@ -333,7 +333,7 @@ Result<void> emit_manifest(const Project& proj, std::vector<ResolvedTarget>& res
                     Error::Kind::Config,
                     "modules_mode(Manual) requires a clang-family compiler (clang-scan-deps)",
                 });
-            if (!detail::program_exists("clang-scan-deps"))
+            if (!os::program_exists("clang-scan-deps"))
                 return std::unexpected(Error {
                     Error::Kind::Toolchain, "modules_mode(Manual): clang-scan-deps not found on PATH",
                 });

@@ -55,8 +55,8 @@ TEST_CASE("proc: spawn failure is a Command error") {
 }
 
 TEST_CASE("proc: program_exists") {
-    CHECK(detail::program_exists("sh"));
-    CHECK_FALSE(detail::program_exists("definitely-not-a-command-xyzzy"));
+    CHECK(os::program_exists("sh"));
+    CHECK_FALSE(os::program_exists("definitely-not-a-command-xyzzy"));
 }
 
 TEST_CASE("triple: host detection is populated") {

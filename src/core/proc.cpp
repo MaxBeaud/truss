@@ -1,11 +1,8 @@
 module;
 #include <array>
 #include <cerrno>
-#include <cstdlib>
 #include <cstring>
 #include <expected>
-#include <map>
-#include <mutex>
 #include <span>
 #include <string>
 #include <vector>
@@ -89,22 +86,6 @@ Result<ProcOutcome> run_process(std::span<const std::string> argv, bool capture)
 
 Result<ProcOutcome> run_process_stdout(std::span<const std::string> argv) {
     return run_impl(argv, 2);
-}
-
-bool program_exists(std::string_view name) {
-    /* memoized: every build probes the same handful of programs (llvm-ar,
-     * ccache, sccache, clang-scan-deps, conan, ...) and each probe forks a
-     * shell; results cannot change within one truss run */
-    static std::map<std::string, bool, std::less<>> cache;
-    static std::mutex mu;
-    std::lock_guard lk(mu);
-    if (const auto it = cache.find(name); it != cache.end())
-        return it->second;
-    const std::array<std::string, 3> argv {"sh", "-c", "command -v " + std::string(name) + " >/dev/null 2>&1"};
-    const auto outcome = run_process(argv, true);
-    const bool found = outcome && outcome->exit_code == 0;
-    cache.emplace(std::string(name), found);
-    return found;
 }
 
 } // namespace truss::detail

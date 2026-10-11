@@ -30,10 +30,9 @@ std::string lock_key(std::string_view name) { return "pkg." + std::string(name);
 /* --- cache layout ---------------------------------------------------------- */
 
 std::filesystem::path cache_root() {
-    if (const char* xdg = std::getenv("XDG_CACHE_HOME"); xdg && *xdg)
-        return std::filesystem::path(xdg) / "truss";
-    const char* home = std::getenv("HOME");
-    return std::filesystem::path(home ? home : ".") / ".cache" / "truss";
+    if (auto xdg = os::env("XDG_CACHE_HOME"); xdg)
+        return std::filesystem::path(*xdg) / "truss";
+    return std::filesystem::path(os::env("HOME").value_or(".")) / ".cache" / "truss";
 }
 
 bool looks_like_commit(std::string_view ref) {
@@ -468,7 +467,7 @@ Result<TargetRef> Project::conan(std::string_view conanfile) {
     for (const auto& t : targets_)
         if (t->name() == "conan")
             return TargetRef{*t}; /* idempotent */
-    if (!detail::program_exists("conan"))
+    if (!os::program_exists("conan"))
         return std::unexpected(Error {Error::Kind::Toolchain, "conan not found on PATH (conan 2 required)"});
 
     const std::filesystem::path cf = cwd_ / std::filesystem::path(conanfile.empty() ? "." : std::string(conanfile));
@@ -626,13 +625,13 @@ Result<TargetRef> Project::vcpkg(std::vector<std::string> packages) {
             return TargetRef{*t}; /* idempotent */
 
     std::string exe = "vcpkg";
-    if (const char* root = std::getenv("VCPKG_ROOT"); root && *root) {
-        const std::filesystem::path p = std::filesystem::path(root) / "vcpkg";
+    if (auto root = os::env("VCPKG_ROOT"); root) {
+        const std::filesystem::path p = std::filesystem::path(*root) / "vcpkg";
         std::error_code vec;
         if (std::filesystem::exists(p, vec))
             exe = p.generic_string();
     }
-    if (!detail::program_exists(exe))
+    if (!os::program_exists(exe))
         return std::unexpected(Error {Error::Kind::Toolchain, "vcpkg not found (put it on PATH or set VCPKG_ROOT)"});
 
     const std::filesystem::path manifest = cwd_ / "vcpkg.json";

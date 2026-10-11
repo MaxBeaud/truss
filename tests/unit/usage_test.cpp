@@ -281,7 +281,7 @@ TEST_CASE("launcher: launcher(\"\") keeps compile commands raw") {
 }
 
 TEST_CASE("pkg: conan configure-skip caches a spec keyed by conanfile hash") {
-    if (!detail::program_exists("conan")) {
+    if (!os::program_exists("conan")) {
         MESSAGE("conan not installed, skipping");
         return;
     }
@@ -368,7 +368,7 @@ TEST_CASE("pch: missing header is a Config error") {
 }
 
 TEST_CASE("pch: GCC family uses .gch + -I/-include") {
-    if (!detail::program_exists("g++")) {
+    if (!os::program_exists("g++")) {
         MESSAGE("g++ not installed, skipping");
         return;
     }
@@ -468,7 +468,7 @@ TEST_CASE("unity: batches sources and rebuilds the batch on any member edit") {
 }
 
 TEST_CASE("modules: Manual mode wires via clang-scan-deps and builds") {
-    if (!detail::program_exists("clang-scan-deps")) {
+    if (!os::program_exists("clang-scan-deps")) {
         MESSAGE("clang-scan-deps not installed, skipping");
         return;
     }
@@ -490,7 +490,7 @@ TEST_CASE("modules: Manual mode wires via clang-scan-deps and builds") {
 }
 
 TEST_CASE("modules: regex scan misses line-spliced imports, Manual finds them") {
-    if (!detail::program_exists("clang-scan-deps")) {
+    if (!os::program_exists("clang-scan-deps")) {
         MESSAGE("clang-scan-deps not installed, skipping");
         return;
     }

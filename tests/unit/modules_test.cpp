@@ -145,7 +145,7 @@ TEST_CASE("resolve: partition import without module declaration is an error") {
 }
 
 TEST_CASE("scan-deps: authoritative closures replace the regex heuristic") {
-    if (!detail::program_exists("clang-scan-deps")) {
+    if (!os::program_exists("clang-scan-deps")) {
         MESSAGE("clang-scan-deps not installed, skipping");
         return;
     }
