@@ -575,9 +575,16 @@ Verified doxygen 1.18 facts:
   public API. Resolution: truss::generator<T> in :api, shape adapted from
   cppcoro::generator (MIT, Lewis Baker): coroutine-based, range-for
   compatible, T-by-value in the promise. Swap for std::generator when libc++
-  ships it (alias, call sites unchanged).
+  ships it (alias, call sites unchanged). Maintained cppcoro fork for
+  reference: https://github.com/andreasbuhr/cppcoro (upstream lewissbaker
+  is unmaintained); we borrow only the generator design, not the library.
 - os::find_program replaces the `sh -c command -v` probe entirely: manual
   $PATH split + access(X_OK), memoized incl. misses. No shell fork during
   configure.
 - Native sha256 (FIPS 180-4) in fs.cpp replaces the `sha256sum` shell-out in
   tarball_fetch; vectors verified against coreutils (abc, empty, 100x'x').
+
+- Hand-typed constant tables are a trap: the first sha256 pass had a K[23]
+  typo + a dropped entry (aggregate init silently zero-fills, no warning).
+  Generated K from the spec (cube roots of primes, Decimal) and pinned three
+  coreutils-verified vectors in fs_test (abc / empty / 100x'x').

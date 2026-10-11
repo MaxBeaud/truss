@@ -90,3 +90,12 @@ TEST_CASE("os: env lenient parsing") {
     unsetenv("TRUSS_OS_TEST_STR");
     unsetenv("TRUSS_OS_TEST_DBL");
 }
+
+TEST_CASE("os: all_programs / any_program") {
+    CHECK(os::all_programs({"sh", "cat"}));
+    CHECK_FALSE(os::all_programs({"sh", "definitely-not-a-program-xyzzy"}));
+    CHECK(os::any_program({"definitely-not-a-program-xyzzy", "sh"}));
+    CHECK_FALSE(os::any_program({"nope-xyzzy-a", "nope-xyzzy-b"}));
+    CHECK(os::all_programs({})); // vacuous truth
+    CHECK_FALSE(os::any_program({}));
+}

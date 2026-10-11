@@ -408,18 +408,23 @@ API (final, reviewed in-session):
    `if constexpr`; `host_triple()` stays runtime but shares the detection
    core) · `program_exists` · `find_program` (fork-free `$PATH` walk +
    `access(X_OK)`, memoized incl. misses, initializer-list "first hit"
-   overload) · `env(name)` -> `optional<string>` + `env(name, def)` template
+   overload) · `all_programs({...})` / `any_program({...})` precondition
+   checks · `env(name)` -> `optional<string>` + `env(name, def)` template
    (lenient: unset/unparseable -> def; bool truthy `1/true/on/yes/y`;
    `from_chars` numerics; `const char*` sugar) · specs `cpu_count` /
    `memory_bytes` / `os_version` / `hostname` (unsupported -> nullopt/0) ·
    `temp_dir()` query · `run`/`capture` + `RunOptions{.cwd}` + `ProcessResult`
    (spawn failure = Error, non-zero exit = normal result).
 2. `truss::fs` — `glob` / `glob({...})` (promoted) · `walk(dir,
-   WalkOptions{.depth, .skip_hidden})` -> `std::generator` (lazy, depth 0 =
-   listing, hidden skipped incl. no descent, forgiving) · `find_upward` ·
-   `first_existing` · `read_text`/`write_text`/`write_text_if_changed` ·
-   `read_lines` generator · `sha256_file` (fetch verifier promoted) ·
-   `current_dir` · `copy_tree` (hardlinks, skips .git) · `temp_scope` (RAII
+   WalkOptions{.depth, .skip_hidden})` -> `truss::generator` (cppcoro-style
+   coroutine; libc++ lacks std::generator; lazy, depth 0 = listing, hidden
+   skipped incl. no descent, forgiving) · `find_upward` ·
+   `first_existing` · `find_library(name[, dirs])` (libX.a/.so/.dylib/.lib;
+   default dirs = $LD_LIBRARY_PATH/$DYLD_LIBRARY_PATH + system locations) ·
+   `read_text`/`write_text`/`write_text_if_changed` ·
+   `read_lines` truss::generator · `sha256_file` (native FIPS-180-4 hasher, replaces
+   the `sha256sum` shell-out) · `current_dir` · `copy_tree` (hardlinks, skips
+   .git) · `temp_scope` (RAII
    mkdtemp, move-only, `release()`) · `generic_str`.
 3. `truss::log` — `info/warn/success/error` (same channel as truss's own
    output) · `Project::root()`.

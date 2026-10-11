@@ -95,19 +95,14 @@ Result<void> tarball_fetch(const std::string& url, const std::string& sha256,
         std::filesystem::remove(tmp, ec);
         return r;
     }
-    const std::vector<std::string> sum {"sha256sum", tmp.generic_string()};
-    auto outcome = detail::run_process(sum, true);
-    if (!outcome)
-        return std::unexpected(outcome.error());
-    if (outcome->exit_code != 0)
-        return std::unexpected(Error {Error::Kind::Fetch, "sha256sum failed on downloaded file", tmp});
-    std::string actual = outcome->output;
-    actual.erase(actual.find_first_of(" \t\n"));
-    if (actual != sha256) {
+    auto actual = fs::sha256_file(tmp);
+    if (!actual)
+        return std::unexpected(actual.error());
+    if (*actual != sha256) {
         std::filesystem::remove(tmp, ec);
         return std::unexpected(Error {
             Error::Kind::Fetch,
-            "sha256 mismatch for '" + url + "': expected " + sha256 + ", got " + actual,
+            "sha256 mismatch for '" + url + "': expected " + sha256 + ", got " + *actual,
         });
     }
     std::filesystem::rename(tmp, cache_file, ec);

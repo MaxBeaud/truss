@@ -87,6 +87,20 @@ bool program_exists(std::string_view name) {
     return find_program(name).has_value();
 }
 
+bool all_programs(std::initializer_list<std::string_view> names) {
+    for (const std::string_view name : names)
+        if (!find_program(name))
+            return false;
+    return true;
+}
+
+bool any_program(std::initializer_list<std::string_view> names) {
+    for (const std::string_view name : names)
+        if (find_program(name))
+            return true;
+    return false;
+}
+
 std::optional<std::string> env(std::string_view name) {
     const std::string key(name); // getenv needs a NUL-terminated name
     if (const char* value = std::getenv(key.c_str()); value != nullptr && *value != '\0')

@@ -1,9 +1,12 @@
 module;
 #include <doctest/doctest.h>
 
+#include <algorithm>
+#include <array>
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <vector>
 
 module truss;
 import :api;
@@ -77,4 +80,142 @@ TEST_CASE("triple: triple_dir format") {
     t.os = Os::Linux;
     t.family = CompilerFamily::Clang;
     CHECK(detail::triple_dir(t) == "x64-linux-clang");
+}
+
+/* --- phase 13: public truss::fs ------------------------------------------- */
+
+namespace {
+const std::filesystem::path kFsRoot {"/tmp/truss-test-fs-helpers"};
+
+void make_fs_tree() {
+    std::error_code ec;
+    std::filesystem::remove_all(kFsRoot, ec);
+    detail::write_file(kFsRoot / "a/b/c.txt", "c\n");
+    detail::write_file(kFsRoot / "a/top.txt", "top\n");
+    detail::write_file(kFsRoot / "a/.hidden/x.txt", "hx\n");
+    detail::write_file(kFsRoot / "a/b/.dotfile", "dot\n");
+    detail::write_file(kFsRoot / "libs/libfoo.a", "archive");
+    detail::write_file(kFsRoot / "libs/bar.lib", "msvc import lib");
+}
+} // namespace
+
+TEST_CASE("fs: walk depth + hidden policy") {
+    make_fs_tree();
+    std::vector<std::string> all;
+    for (const auto& p : fs::walk(kFsRoot / "a"))
+        all.push_back(fs::generic_str(p));
+    std::ranges::sort(all);
+    /* hidden entry + no descent into hidden dir; dirs are yielded too */
+    CHECK(all == std::vector<std::string> {
+        "/tmp/truss-test-fs-helpers/a/b",
+        "/tmp/truss-test-fs-helpers/a/b/c.txt",
+        "/tmp/truss-test-fs-helpers/a/top.txt",
+    });
+
+    /* depth 0 = plain listing (b yielded but not descended) */
+    std::vector<std::string> flat;
+    for (const auto& p : fs::walk(kFsRoot / "a", {.depth = 0}))
+        flat.push_back(p.filename().string());
+    std::ranges::sort(flat);
+    CHECK(flat == std::vector<std::string> {"b", "top.txt"});
+
+    /* depth 1 reaches b/c.txt but not deeper */
+    std::vector<std::string> d1;
+    for (const auto& p : fs::walk(kFsRoot / "a", {.depth = 1}))
+        d1.push_back(fs::generic_str(p));
+    CHECK(std::ranges::find(d1, "/tmp/truss-test-fs-helpers/a/b/c.txt") != d1.end());
+
+    /* skip_hidden=false includes dot entries */
+    std::vector<std::string> with_hidden;
+    for (const auto& p : fs::walk(kFsRoot / "a", {.skip_hidden = false}))
+        with_hidden.push_back(p.filename().string());
+    CHECK(std::ranges::find(with_hidden, ".dotfile") != with_hidden.end());
+    CHECK(std::ranges::find(with_hidden, ".hidden") != with_hidden.end());
+
+    /* missing root yields nothing (forgiving) */
+    int count = 0;
+    for ([[maybe_unused]] const auto& p : fs::walk(kFsRoot / "nope-xyzzy"))
+        ++count;
+    CHECK(count == 0);
+    std::filesystem::remove_all(kFsRoot);
+}
+
+TEST_CASE("fs: find_upward / first_existing / current_dir") {
+    make_fs_tree();
+    const auto hit = fs::find_upward("marker-xyzzy.txt", kFsRoot / "a/b");
+    CHECK_FALSE(hit.has_value());
+    detail::write_file("/tmp/truss-test-fs-helpers/marker-xyzzy.txt", "x");
+    const auto found = fs::find_upward("marker-xyzzy.txt", kFsRoot / "a/b");
+    REQUIRE(found.has_value());
+    CHECK(*found == "/tmp/truss-test-fs-helpers/marker-xyzzy.txt");
+
+    const auto first = fs::first_existing({kFsRoot / "nope", kFsRoot / "a/top.txt", kFsRoot / "also-nope"});
+    REQUIRE(first.has_value());
+    CHECK(*first == kFsRoot / "a/top.txt");
+    CHECK_FALSE(fs::first_existing({"/nope-1", "/nope-2"}).has_value());
+
+    auto cwd = fs::current_dir();
+    REQUIRE(cwd.has_value());
+    CHECK(*cwd == std::filesystem::current_path());
+    std::filesystem::remove_all(kFsRoot);
+}
+
+TEST_CASE("fs: find_library") {
+    make_fs_tree();
+    const std::array dirs {kFsRoot / "libs", kFsRoot / "a"};
+    const auto foo = fs::find_library("foo", dirs);
+    REQUIRE(foo.has_value());
+    CHECK(*foo == kFsRoot / "libs/libfoo.a");
+    const auto bar = fs::find_library("bar", dirs); /* bare MSVC-style name */
+    REQUIRE(bar.has_value());
+    CHECK(*bar == kFsRoot / "libs/bar.lib");
+    CHECK_FALSE(fs::find_library("nope-xyzzy", dirs).has_value());
+
+    /* default system paths: pick something that exists on any Linux box */
+    if constexpr (os::is_linux()) {
+        const auto c = fs::find_library("c"); /* libc.so lives in a system dir */
+        CHECK(c.has_value());
+    }
+    CHECK_FALSE(fs::find_library("definitely-not-a-system-lib-xyzzy").has_value());
+    std::filesystem::remove_all(kFsRoot);
+}
+
+TEST_CASE("fs: glob / read_lines / sha256_file / generic_str promotions") {
+    auto matches = fs::glob({"src/*.cppm"});
+    REQUIRE(matches.has_value());
+    CHECK(std::ranges::find(*matches, std::filesystem::path {"src/api.cppm"}) != matches->end());
+    auto none = fs::glob("nope-xyzzy/**/*.txt");
+    REQUIRE(none.has_value());
+    CHECK(none->empty());
+
+    const auto p = kFsRoot / "lines.txt";
+    detail::write_file(p, "one\ntwo\nthree\n");
+    auto lines = fs::read_lines(p);
+    REQUIRE(lines.has_value());
+    std::vector<std::string> got;
+    for (auto& line : *lines)
+        got.push_back(line);
+    CHECK(got == std::vector<std::string> {"one", "two", "three"});
+    auto missing = fs::read_lines(kFsRoot / "nope.txt");
+    REQUIRE_FALSE(missing.has_value());
+    CHECK(missing.error().kind == Error::Kind::Io);
+
+    /* FIPS 180-4 known vectors */
+    detail::write_file(kFsRoot / "abc.txt", "abc");
+    auto abc = fs::sha256_file(kFsRoot / "abc.txt");
+    REQUIRE(abc.has_value());
+    CHECK(*abc == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+    detail::write_file(kFsRoot / "empty.txt", "");
+    auto empty = fs::sha256_file(kFsRoot / "empty.txt");
+    REQUIRE(empty.has_value());
+    CHECK(*empty == "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+    /* long input crosses the 56..63 byte padding edge */
+    detail::write_file(kFsRoot / "long.txt", std::string(100, 'x'));
+    auto long_hash = fs::sha256_file(kFsRoot / "long.txt");
+    REQUIRE(long_hash.has_value());
+    CHECK(*long_hash == "09ecb6ebc8bcefc733f6f2ec44f791abeed6a99edf0cc31519637898aebd52d8");
+
+    CHECK(fs::generic_str(std::filesystem::path {"a/b/c"}) == "a/b/c");
+    CHECK(fs::generic_str(p) == "/tmp/truss-test-fs-helpers/lines.txt");
+    std::filesystem::remove_all(kFsRoot);
 }

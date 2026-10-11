@@ -9,11 +9,14 @@
 module;
 #include <charconv>
 #include <concepts>
+#include <coroutine>
 #include <cstddef>
+#include <exception>
 #include <expected>
 #include <filesystem>
 #include <functional>
 #include <initializer_list>
+#include <iterator>
 #include <memory>
 #include <optional>
 #include <ranges>
@@ -187,6 +190,95 @@ struct Error {
 template <class T>
 using Result = std::expected<T, Error>;
 
+/**
+ * \brief Synchronous coroutine generator (range-for compatible).
+ *
+ * Shape adapted from cppcoro::generator (MIT, Lewis Baker). truss uses this
+ * instead of std::generator because libc++ still lacks the `<generator>`
+ * header (P2502R2, llvm/llvm-project#105226) while truss's own stdlib is
+ * libc++; when libc++ ships it this becomes an alias for std::generator and
+ * call sites are unchanged. Move-only; the coroutine produces values lazily
+ * on iteration.
+ */
+template <class T>
+class generator {
+public:
+    struct promise_type {
+        std::optional<T> value;
+        std::exception_ptr exception;
+        generator get_return_object() { return generator {handle_t::from_promise(*this)}; }
+        std::suspend_always initial_suspend() noexcept { return {}; }
+        std::suspend_always final_suspend() noexcept { return {}; }
+        std::suspend_always yield_value(T v) { value.emplace(std::move(v)); return {}; }
+        void return_void() {}
+        void unhandled_exception() { exception = std::current_exception(); }
+    };
+    using handle_t = std::coroutine_handle<promise_type>;
+
+    /// Input iterator over the lazily produced values.
+    class iterator {
+    public:
+        using iterator_category = std::input_iterator_tag;
+        using value_type = T;
+        using difference_type = std::ptrdiff_t;
+        using reference = const T&;
+        using pointer = const T*;
+
+        iterator() = default;
+        explicit iterator(handle_t h) : handle_(h) {}
+        const T& operator*() const { return *handle_.promise().value; }
+        const T* operator->() const { return &*handle_.promise().value; }
+        iterator& operator++() {
+            handle_.resume();
+            if (handle_.done()) {
+                if (handle_.promise().exception)
+                    std::rethrow_exception(handle_.promise().exception);
+                handle_ = {};
+            }
+            return *this;
+        }
+        iterator operator++(int) { const iterator tmp = *this; ++*this; return tmp; }
+        friend bool operator==(const iterator& it, std::default_sentinel_t) {
+            return !it.handle_ || it.handle_.done();
+        }
+        friend bool operator==(std::default_sentinel_t s, const iterator& it) { return it == s; }
+        friend bool operator!=(const iterator& it, std::default_sentinel_t s) { return !(it == s); }
+        friend bool operator!=(std::default_sentinel_t s, const iterator& it) { return !(it == s); }
+
+    private:
+        handle_t handle_ {};
+    };
+
+    explicit generator(handle_t h) : handle_(h) {}
+    generator(const generator&) = delete;
+    generator& operator=(const generator&) = delete;
+    generator(generator&& other) noexcept : handle_(std::exchange(other.handle_, {})) {}
+    generator& operator=(generator&& other) noexcept {
+        if (this != &other) {
+            if (handle_) handle_.destroy();
+            handle_ = std::exchange(other.handle_, {});
+        }
+        return *this;
+    }
+    ~generator() {
+        if (handle_) handle_.destroy();
+    }
+
+    iterator begin() {
+        handle_.resume();
+        if (handle_.done()) {
+            if (handle_.promise().exception)
+                std::rethrow_exception(handle_.promise().exception);
+            return iterator {};
+        }
+        return iterator {handle_};
+    }
+    std::default_sentinel_t end() { return {}; }
+
+private:
+    handle_t handle_ {};
+};
+
 /// A compiler target: host by default, cross-compilable by override.
 struct TargetTriple {
     Os os {Os::Unknown};                        ///< target OS
@@ -290,6 +382,14 @@ std::optional<std::filesystem::path> find_program(std::string_view name);
 std::optional<std::filesystem::path> find_program(std::initializer_list<std::string_view> names);
 /// True when find_program(name) succeeds; memoized.
 bool program_exists(std::string_view name);
+/**
+ * \brief Multi-program precondition checks over find_program (memoized).
+ * \param names program names to check
+ * \return all_programs: every name is installed; any_program: at least one is.
+ */
+bool all_programs(std::initializer_list<std::string_view> names);
+/// \\copydoc all_programs
+bool any_program(std::initializer_list<std::string_view> names);
 
 /// Environment variable value; nullopt when unset or empty.
 std::optional<std::string> env(std::string_view name);
@@ -337,6 +437,101 @@ T env(std::string_view name, T def) {
 inline std::string env(std::string_view name, const char* def) { return env<std::string>(name, std::string(def)); }
 
 } // namespace os
+
+/**
+ * \brief Filesystem helpers for build scripts: globbing, traversal, text I/O.
+ *
+ * Non-throwing throughout (error_code overloads internally); fallible
+ * operations return Result, "not found" queries return nullopt.
+ */
+namespace fs {
+
+/// glob(): single pattern. `*` within one path component, `**` across
+/// components, `?` one char, `{a,b}` alternation. Hidden entries are skipped;
+/// results are sorted, deduplicated, relative to the current directory.
+Result<std::vector<std::filesystem::path>> glob(std::string_view pattern);
+/// glob(): several patterns, one tree walk per distinct scan root.
+Result<std::vector<std::filesystem::path>> glob(std::initializer_list<std::string_view> patterns);
+
+/// walk() depth value for "no limit".
+inline constexpr int walk_unlimited = -1;
+
+/// Options for walk().
+struct WalkOptions {
+    int depth {walk_unlimited}; ///< 0 = dir's direct entries, 1 = one level down, ...
+    bool skip_hidden {true};    ///< skip dot entries and never descend into hidden dirs
+};
+
+/**
+ * \brief Lazy recursive traversal (C++26 generator; composes with std::ranges).
+ * Forgiving like glob(): a missing root yields nothing, unreadable
+ * directories are skipped.
+ * \param dir directory to walk; entries are yielded as dir/entry paths
+ * \param opts depth cap and hidden-entry policy
+ */
+generator<std::filesystem::path> walk(const std::filesystem::path& dir, WalkOptions opts = {});
+
+/**
+ * \brief Search for a file in from_dir and every parent (workspace-root /
+ * .git-style discovery).
+ * \param filename file to look for (e.g. ".git", "vcpkg.json")
+ * \param from_dir starting directory
+ * \return the first hit, or nullopt up to the filesystem root.
+ */
+std::optional<std::filesystem::path> find_upward(std::string_view filename, const std::filesystem::path& from_dir);
+/// find_upward() starting at the current directory.
+std::optional<std::filesystem::path> find_upward(std::string_view filename);
+
+/// The first candidate that exists, in argument order; nullopt when none does.
+std::optional<std::filesystem::path> first_existing(std::initializer_list<std::filesystem::path> candidates);
+
+/**
+ * \brief Locate a library file: lib{name}.a / .so / .dylib / {name}.lib,
+ * searched directory-first (caller's dir priority wins). For "is the system
+ * copy installed" gating only — real dependencies go through
+ * fetch()/conan()/vcpkg(), and pkg-config via os::capture covers the
+ * name≠file case (e.g. boost).
+ * \param name library base name without lib prefix or extension
+ * \param search_dirs directories to scan (e.g. -L dirs, build/{mode}/lib/)
+ * \return the first match, or nullopt.
+ */
+std::optional<std::filesystem::path> find_library(std::string_view name,
+                                                  std::span<const std::filesystem::path> search_dirs);
+/**
+ * \brief find_library() over the default system library paths:
+ * $LD_LIBRARY_PATH / $DYLD_LIBRARY_PATH, /usr/local/lib, /usr/lib, the
+ * host-arch multiarch dir (GNU/Linux), /lib, /opt/homebrew/lib (macOS).
+ * Best-effort convenience — explicit dirs stay the reliable route.
+ */
+std::optional<std::filesystem::path> find_library(std::string_view name);
+
+/// Read a whole file into a string.
+Result<std::string> read_text(const std::filesystem::path&);
+/// Write a whole file, creating parent directories as needed.
+Result<void> write_text(const std::filesystem::path&, std::string_view);
+/// Write only when the content differs (keeps mtimes stable for build inputs).
+Result<void> write_text_if_changed(const std::filesystem::path&, std::string_view);
+/**
+ * \brief Iterate a file line by line (newline terminators stripped).
+ * \return a generator over the lines, or an Error if the file cannot be
+ *         opened; read errors mid-file simply end the iteration.
+ */
+Result<generator<std::string>> read_lines(const std::filesystem::path&);
+
+/// Lowercase hex sha256 of a file (the same digest fetch() pinning uses).
+Result<std::string> sha256_file(const std::filesystem::path&);
+
+/// Current working directory (non-throwing pwd).
+Result<std::filesystem::path> current_dir();
+
+/// Materialize a directory tree with hardlinks (copy fallback across
+/// filesystems); .git directories are skipped.
+Result<void> copy_tree(const std::filesystem::path& from, const std::filesystem::path& to);
+
+/// path -> std::string with generic (forward-slash) separators.
+std::string generic_str(const std::filesystem::path&);
+
+} // namespace fs
 
 /**
  * \brief Project-wide toolchain selection, applied with proj.configure(conf).
