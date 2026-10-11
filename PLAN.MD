@@ -392,6 +392,52 @@ truss. ✅
    configure time so editing one `.cppm` rebuilds only its importers (Auto mode stays
    the conservative default). ✅
 
+### Phase 13 — Scripting helpers (`truss::os` / `truss::fs` / `truss::log`)
+
+Std-compatible helpers so build scripts and `task()` bodies can query the
+platform, find programs, traverse the filesystem, and run tools without
+reaching for `<cstdlib>` or shell-outs. Declarations in `truss:api`;
+implementations in new `src/core/os.cpp` + existing `src/core/fs.cpp`;
+`truss::detail` keeps thin aliases and internal call sites dogfood the
+public helpers.
+
+API (final, reviewed in-session):
+
+1. `truss::os` — `consteval` platform predicates (`host_os`, `host_arch`,
+   `host_family`, `is_linux/is_windows/is_macos`; macro-detected, usable in
+   `if constexpr`; `host_triple()` stays runtime but shares the detection
+   core) · `program_exists` · `find_program` (fork-free `$PATH` walk +
+   `access(X_OK)`, memoized incl. misses, initializer-list "first hit"
+   overload) · `env(name)` -> `optional<string>` + `env(name, def)` template
+   (lenient: unset/unparseable -> def; bool truthy `1/true/on/yes/y`;
+   `from_chars` numerics; `const char*` sugar) · specs `cpu_count` /
+   `memory_bytes` / `os_version` / `hostname` (unsupported -> nullopt/0) ·
+   `temp_dir()` query · `run`/`capture` + `RunOptions{.cwd}` + `ProcessResult`
+   (spawn failure = Error, non-zero exit = normal result).
+2. `truss::fs` — `glob` / `glob({...})` (promoted) · `walk(dir,
+   WalkOptions{.depth, .skip_hidden})` -> `std::generator` (lazy, depth 0 =
+   listing, hidden skipped incl. no descent, forgiving) · `find_upward` ·
+   `first_existing` · `read_text`/`write_text`/`write_text_if_changed` ·
+   `read_lines` generator · `sha256_file` (fetch verifier promoted) ·
+   `current_dir` · `copy_tree` (hardlinks, skips .git) · `temp_scope` (RAII
+   mkdtemp, move-only, `release()`) · `generic_str`.
+3. `truss::log` — `info/warn/success/error` (same channel as truss's own
+   output) · `Project::root()`.
+
+Locked decisions: single `env` name (no env_flag/env_int); sha256 stays the
+only digest (md5 rejected — fetch pin is a security boundary); no `is_ci()`;
+no wrappers over what std already does (`exists`/`file_size`/join); POSIX
+first, Windows gaps return nullopt/0 (v0.2). New public types:
+`os::ProcessResult`, `os::RunOptions`, `fs::WalkOptions`, `fs::temp_scope`.
+
+Steps (commit each): 1) os core + dogfood pkg/target; 2) fs promotions +
+walk; 3) specs + temp_scope + run/capture + root() + log; 4) tests per helper
++ README + Doxygen + internals page.
+
+**Done when:** unit green per helper; self-host builds; bench no-op unchanged
+or better (fork-free find_program); an example `task()` uses `os::capture` +
+`fs::walk`.
+
 ## 6. Risks & mitigations
 
 | Risk | Mitigation |
