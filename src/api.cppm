@@ -393,7 +393,6 @@ bool any_program(std::initializer_list<std::string_view> names);
 
 /// Environment variable value; nullopt when unset or empty.
 std::optional<std::string> env(std::string_view name);
-
 /// Types env(name, def) can parse into.
 template <class T>
 concept EnvParsable = std::same_as<T, bool> || std::integral<T> || std::floating_point<T> ||
@@ -435,6 +434,58 @@ T env(std::string_view name, T def) {
 }
 /// Sugar so `env("CXX", "g++")` deduces std::string instead of char[N].
 inline std::string env(std::string_view name, const char* def) { return env<std::string>(name, std::string(def)); }
+
+// --- machine specs (runtime facts; unsupported probes -> nullopt / 0) ---
+/// Logical CPU count (std::thread::hardware_concurrency; 0 if unknown).
+unsigned cpu_count();
+/// Physical RAM in bytes (0 when the probe is unsupported).
+std::uint64_t memory_bytes();
+/**
+ * \brief Human-readable OS version: Linux PRETTY_NAME from /etc/os-release,
+ * else "<sysname> <release>" from uname.
+ */
+std::optional<std::string> os_version();
+/// Hostname (gethostname); nullopt on failure.
+std::optional<std::string> hostname();
+/// System temp directory ($TMPDIR else /tmp); query only, creates nothing.
+std::filesystem::path temp_dir();
+// --- process (for task() bodies) ---
+/// Outcome of a spawned process.
+struct ProcessResult {
+    int exit_code {0};   ///< waitpid status (128+signal on death by signal)
+    std::string output;  ///< captured stdout+stderr (capture() only)
+};
+/// Where run()/capture() execute; empty cwd = inherit.
+struct RunOptions {
+    std::filesystem::path cwd {};
+};
+/**
+ * \brief Spawn argv (argv[0] searched on PATH); stdio passes through.
+ * Spawn failure is an Error; a non-zero exit_code is a normal result.
+ */
+Result<ProcessResult> run(std::span<const std::string> argv, RunOptions = {});
+/// \\copydoc run, with stdout+stderr captured into ProcessResult::output.
+Result<ProcessResult> capture(std::span<const std::string> argv, RunOptions = {});
+/**
+ * \brief RAII unique temp directory (mkdtemp "truss-XXXXXX" under
+ * temp_dir()): removed on destruction, move-only.
+ * truss uses it internally for scratch work (scan-deps, fetch staging).
+ */
+class temp_scope {
+public:
+    temp_scope();  ///< dir creation failure leaves path() empty; check valid().
+    temp_scope(const temp_scope&) = delete;
+    temp_scope& operator=(const temp_scope&) = delete;
+    temp_scope(temp_scope&&) noexcept;
+    temp_scope& operator=(temp_scope&&) noexcept;
+    ~temp_scope();  ///< removes the tree; never throws
+    const std::filesystem::path& path() const;
+    bool valid() const { return !dir_.empty(); }
+    /// Keep the contents (skip cleanup) — e.g. to hand results to the caller.
+    void release() { dir_.clear(); }
+private:
+    std::filesystem::path dir_;
+};
 
 } // namespace os
 
@@ -520,7 +571,6 @@ Result<generator<std::string>> read_lines(const std::filesystem::path&);
 
 /// Lowercase hex sha256 of a file (the same digest fetch() pinning uses).
 Result<std::string> sha256_file(const std::filesystem::path&);
-
 /// Current working directory (non-throwing pwd).
 Result<std::filesystem::path> current_dir();
 
@@ -532,6 +582,24 @@ Result<void> copy_tree(const std::filesystem::path& from, const std::filesystem:
 std::string generic_str(const std::filesystem::path&);
 
 } // namespace fs
+
+/**
+ * \brief Colored stderr-free logging on truss's own channel.
+ * Use from task() bodies and build-script helpers for output consistent
+ * with truss's own messages.
+ */
+namespace log {
+/// Informational line (cyan).
+void info(std::string_view msg);
+/// Warning line (orange).
+void warn(std::string_view msg);
+/// Success line (green).
+void success(std::string_view msg);
+/// Error line (red).
+void error(std::string_view msg);
+/// Error line including err.path when set.
+void error(const Error& err);
+} // namespace log
 
 /**
  * \brief Project-wide toolchain selection, applied with proj.configure(conf).

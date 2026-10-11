@@ -237,7 +237,7 @@ Result<void> materialize_fetch(const std::string& pkg_name, const FetchOptions& 
         }();
         const std::filesystem::path git_cache = root / "git" / pkg_name / flat_tag;
         if (!std::filesystem::exists(git_cache, ec)) {
-            detail::log_info("fetching " + pkg_name + " (" + opts.git + " @ " + opts.tag + ")");
+            log::info("fetching " + pkg_name + " (" + opts.git + " @ " + opts.tag + ")");
             if (auto r = detail::make_dirs(git_cache.parent_path()); !r)
                 return std::unexpected(r.error());
             if (auto r = git_fetch(opts.git, opts.tag, git_cache); !r)
@@ -256,7 +256,7 @@ Result<void> materialize_fetch(const std::string& pkg_name, const FetchOptions& 
     if (auto r = detail::make_dirs(tar_cache.parent_path()); !r)
         return std::unexpected(r.error());
     if (!std::filesystem::exists(tar_cache, ec)) {
-        detail::log_info("fetching " + pkg_name + " (" + opts.url + ")");
+        log::info("fetching " + pkg_name + " (" + opts.url + ")");
         if (auto r = tarball_fetch(opts.url, opts.sha256, tar_cache); !r)
             return std::unexpected(r.error());
     }
@@ -509,12 +509,12 @@ Result<TargetRef> Project::conan(std::string_view conanfile) {
                         if (v.is_string() && !std::filesystem::is_directory(v.get<std::string>(), ec))
                             alive = false;
         if (alive) {
-            detail::log_info("conan: up to date (cached spec, skipped conan install)");
+            log::info("conan: up to date (cached spec, skipped conan install)");
             return apply_spec(j);
         }
     }
 
-    detail::log_info("conan install " + cf.generic_string());
+    log::info("conan install " + cf.generic_string());
     const std::vector<std::string> argv {"conan", "install", cf.generic_string(),
                                          "--format=json", "--output-folder", out.generic_string(),
                                          "--build=missing"};
@@ -673,9 +673,9 @@ Result<TargetRef> Project::vcpkg(std::vector<std::string> packages) {
             skip_install = j.is_object() && j.value("fingerprint", std::string {}) == fingerprint;
         }
     if (skip_install) {
-        detail::log_info("vcpkg: up to date (skipped vcpkg install)");
+        log::info("vcpkg: up to date (skipped vcpkg install)");
     } else {
-        detail::log_info("vcpkg install (" + triplet + ")");
+        log::info("vcpkg install (" + triplet + ")");
         /* manifest mode is auto-detected from vcpkg.json in the current directory,
          * which is the project root (truss runs from cwd_) */
         const std::vector<std::string> argv {exe, "install", "--triplet", triplet,

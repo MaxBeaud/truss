@@ -8,7 +8,7 @@ module truss;
 import :api;
 import :impl;
 
-namespace truss::detail {
+namespace truss::log {
 namespace {
 
 constexpr const char* kReset = "\x1b[0m";
@@ -32,19 +32,19 @@ void log_line(const char* color, const char* level, std::string_view msg) {
 
 } // namespace
 
-void log_info(std::string_view msg) { log_line(kGray, "[INFO]", msg); }
-void log_warn(std::string_view msg) { log_line(kOrange, "[WARN]", msg); }
-void log_success(std::string_view msg) { log_line(kGreen, "[SUCCESS]", msg); }
-void log_error(std::string_view msg) { log_line(kRed, "[ERROR]", msg); }
+void info(std::string_view msg) { log_line(kGray, "[INFO]", msg); }
+void warn(std::string_view msg) { log_line(kOrange, "[WARN]", msg); }
+void success(std::string_view msg) { log_line(kGreen, "[SUCCESS]", msg); }
+void error(std::string_view msg) { log_line(kRed, "[ERROR]", msg); }
 
-void log_error(const Error& err) {
+void error(const Error& err) {
     std::string msg = err.message;
     if (err.path.has_value()) {
         msg += " (";
-        msg += path_str(*err.path);
+        msg += detail::path_str(*err.path);
         msg += ")";
     }
     log_line(kRed, "[ERROR]", msg);
 }
 
-} // namespace truss::detail
+} // namespace truss::log

@@ -746,7 +746,7 @@ std::filesystem::path Project::build_dir() const {
 Result<void> Project::build() {
     const auto start = std::chrono::steady_clock::now();
     if (cli_error_) {
-        detail::log_error(*cli_error_);
+        log::error(*cli_error_);
         return std::unexpected(*cli_error_);
     }
 
@@ -766,14 +766,14 @@ Result<void> Project::build() {
      * clean also works on a project whose sources are broken */
     if (std::ranges::all_of(tasks, [](const std::string& t) { return t == "clean"; })) {
         if (auto r = detail::remove_tree(bld); !r) {
-            detail::log_error(r.error());
+            log::error(r.error());
             return std::unexpected(r.error());
         }
         return {};
     }
 
     if (auto r = validate(targets_); !r) {
-        detail::log_error(r.error());
+        log::error(r.error());
         return std::unexpected(r.error());
     }
 
@@ -786,7 +786,7 @@ Result<void> Project::build() {
      * cross_target() overrides completely) */
     auto base_triple = detail::apply_config(config_, host_triple());
     if (!base_triple) {
-        detail::log_error(base_triple.error());
+        log::error(base_triple.error());
         return std::unexpected(base_triple.error());
     }
 
@@ -800,7 +800,7 @@ Result<void> Project::build() {
 
         auto sources = resolve_sources(*t);
         if (!sources) {
-            detail::log_error(sources.error());
+            log::error(sources.error());
             return std::unexpected(sources.error());
         }
         if (sources->empty() && t->kind() != TargetKind::Interface)
@@ -875,13 +875,13 @@ Result<void> Project::build() {
     /* generate the manifest */
     NinjaWriter w;
     if (auto r = emit_manifest(*this, resolved, bld, w); !r) {
-        detail::log_error(r.error());
+        log::error(r.error());
         return std::unexpected(r.error());
     }
     const std::filesystem::path manifest = bld / "ninja" / "build.ninja";
     /* if_changed: an unchanged manifest keeps its mtime (no disk churn) */
     if (auto r = detail::write_file_if_changed(manifest, w.str()); !r) {
-        detail::log_error(r.error());
+        log::error(r.error());
         return std::unexpected(r.error());
     }
 
@@ -919,7 +919,7 @@ Result<void> Project::build() {
 
             if (task == "compdb") {
                 auto r = detail::samu_compdb(manifest.generic_string(), (bld / "compile_commands.json").generic_string());
-                if (r) detail::log_success("wrote " + (bld / "compile_commands.json").generic_string());
+                if (r) log::success("wrote " + (bld / "compile_commands.json").generic_string());
                 return r;
             }
 
@@ -929,26 +929,26 @@ Result<void> Project::build() {
                     if (r.target->is_test_target())
                         test_outputs.push_back(r.output);
                 if (test_outputs.empty()) {
-                    detail::log_warn("no targets marked is_test(); nothing to run");
+                    log::warn("no targets marked is_test(); nothing to run");
                     return {};
                 }
                 if (auto r = run_samu(test_outputs); !r)
                     return r;
                 int failures = 0;
                 for (const auto& exe : test_outputs) {
-                    detail::log_info("running " + exe);
+                    log::info("running " + exe);
                     const std::array argv {exe};
                     auto outcome = detail::run_process(argv, false);
                     if (!outcome)
                         return std::unexpected(outcome.error());
                     if (outcome->exit_code != 0) {
-                        detail::log_error("test '" + exe + "' failed with exit code " + std::to_string(outcome->exit_code));
+                        log::error("test '" + exe + "' failed with exit code " + std::to_string(outcome->exit_code));
                         ++failures;
                     }
                 }
                 if (failures)
                     return std::unexpected(Error {Error::Kind::Command, std::to_string(failures) + " test(s) failed"});
-                detail::log_success("all tests passed");
+                log::success("all tests passed");
                 return {};
             }
 
@@ -981,7 +981,7 @@ Result<void> Project::build() {
         }();
 
         if (!step) {
-            detail::log_error(step.error());
+            log::error(step.error());
             return std::unexpected(step.error());
         }
     }
@@ -989,7 +989,7 @@ Result<void> Project::build() {
     const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                              std::chrono::steady_clock::now() - start)
                              .count();
-    detail::log_info("truss: build took " + std::to_string(elapsed) + "ms");
+    log::info("truss: build took " + std::to_string(elapsed) + "ms");
     return {};
 }
 

@@ -99,3 +99,80 @@ TEST_CASE("os: all_programs / any_program") {
     CHECK(os::all_programs({})); // vacuous truth
     CHECK_FALSE(os::any_program({}));
 }
+
+TEST_CASE("os: machine specs") {
+    CHECK(os::cpu_count() >= 1);
+    if constexpr (os::is_linux())
+        CHECK(os::memory_bytes() > 0);
+    auto ver = os::os_version();
+    REQUIRE(ver.has_value());
+    CHECK_FALSE(ver->empty());
+    auto host = os::hostname();
+    REQUIRE(host.has_value());
+    CHECK_FALSE(host->empty());
+    std::error_code ec;
+    CHECK(std::filesystem::is_directory(os::temp_dir(), ec));
+}
+
+TEST_CASE("os: temp_scope RAII") {
+    std::error_code ec;
+    std::filesystem::path dir;
+    {
+        os::temp_scope scope;
+        REQUIRE(scope.valid());
+        dir = scope.path();
+        CHECK(std::filesystem::is_directory(dir, ec));
+        detail::write_file(dir / "inner.txt", "x");
+        {
+            os::temp_scope moved {std::move(scope)};
+            CHECK(moved.path() == dir);
+            CHECK_FALSE(scope.valid());
+        } // moved-to scope's destructor removes the directory
+        CHECK(std::filesystem::exists(dir, ec) == false);
+    }
+    {
+        os::temp_scope scope;
+        REQUIRE(scope.valid());
+        dir = scope.path();
+        scope.release();
+    }
+    CHECK(std::filesystem::is_directory(dir, ec)); // release() kept it
+    std::filesystem::remove_all(dir, ec);
+}
+
+TEST_CASE("os: run / capture") {
+    const std::array<std::string, 3> echo {"sh", "-c", "echo hi"};
+    auto cap = os::capture(echo);
+    REQUIRE(cap.has_value());
+    CHECK(cap->exit_code == 0);
+    CHECK(cap->output == "hi\n");
+
+    const std::array<std::string, 3> fail {"sh", "-c", "exit 3"};
+    auto run = os::run(fail);
+    REQUIRE(run.has_value());
+    CHECK(run->exit_code == 3); // non-zero exit is a result, not an Error
+
+    const std::array<std::string, 3> pwd {"sh", "-c", "pwd"};
+    os::temp_scope scope;
+    REQUIRE(scope.valid());
+    auto in_dir = os::capture(pwd, {.cwd = scope.path()});
+    REQUIRE(in_dir.has_value());
+    auto trimmed = in_dir->output;
+    trimmed.erase(trimmed.find_last_not_of("\n") + 1);
+    CHECK(fs::generic_str(std::filesystem::weakly_canonical(trimmed))
+          == fs::generic_str(std::filesystem::weakly_canonical(scope.path())));
+
+    const std::array<std::string, 1> nope {"/nonexistent/truss-binary-xyzzy"};
+    auto err = os::run(nope);
+    REQUIRE_FALSE(err.has_value());
+    CHECK(err.error().kind == Error::Kind::Command);
+}
+
+TEST_CASE("log: public channel smoke test") {
+    log::info("os_test: info line");
+    log::warn("os_test: warn line");
+    log::success("os_test: success line");
+    log::error("os_test: error line");
+    log::error(Error {Error::Kind::Config, "os_test: error with path", std::filesystem::path {"/some/path"}});
+    CHECK(true); // no crash + visible in the run output
+}

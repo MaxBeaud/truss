@@ -3,6 +3,7 @@ module;
 #include <cerrno>
 #include <cstring>
 #include <expected>
+#include <filesystem>
 #include <span>
 #include <string>
 #include <vector>
@@ -19,7 +20,8 @@ import :impl;
 namespace truss::detail {
 namespace {
 
-Result<ProcOutcome> run_impl(std::span<const std::string> argv, int capture_mode) {
+Result<ProcOutcome> run_impl(std::span<const std::string> argv, int capture_mode,
+                             const std::filesystem::path& cwd) {
     /* capture_mode: 0 = none, 1 = stdout+stderr merged, 2 = stdout only */
     if (argv.empty())
         return std::unexpected(Error {Error::Kind::Config, "cannot run an empty command"});
@@ -34,6 +36,12 @@ Result<ProcOutcome> run_impl(std::span<const std::string> argv, int capture_mode
     int pipe_fd[2] = {-1, -1};
     posix_spawn_file_actions_t actions;
     const bool have_actions = posix_spawn_file_actions_init(&actions) == 0;
+
+    if (!cwd.empty() && have_actions &&
+        posix_spawn_file_actions_addchdir_np(&actions, cwd.c_str()) != 0) {
+        posix_spawn_file_actions_destroy(&actions);
+        return std::unexpected(Error {Error::Kind::Config, "cannot spawn in cwd '" + path_str(cwd) + "'"});
+    }
 
     if (capture_mode && have_actions && pipe(pipe_fd) == 0) {
         posix_spawn_file_actions_adddup2(&actions, pipe_fd[1], STDOUT_FILENO);
@@ -81,11 +89,16 @@ Result<ProcOutcome> run_impl(std::span<const std::string> argv, int capture_mode
 } // namespace
 
 Result<ProcOutcome> run_process(std::span<const std::string> argv, bool capture) {
-    return run_impl(argv, capture ? 1 : 0);
+    return run_impl(argv, capture ? 1 : 0, {});
+}
+
+Result<ProcOutcome> run_process(std::span<const std::string> argv, bool capture,
+                                const std::filesystem::path& cwd) {
+    return run_impl(argv, capture ? 1 : 0, cwd);
 }
 
 Result<ProcOutcome> run_process_stdout(std::span<const std::string> argv) {
-    return run_impl(argv, 2);
+    return run_impl(argv, 2, {});
 }
 
 } // namespace truss::detail

@@ -26,23 +26,7 @@ import :api;
 
 namespace truss::detail {
 
-/* --- logging ------------------------------------------------------------- */
-
-/// Informational log line (gray).
-/// \ingroup grp_internals
-void log_info(std::string_view msg);
-/// Warning log line (orange).
-/// \ingroup grp_internals
-void log_warn(std::string_view msg);
-/// Success log line (green).
-/// \ingroup grp_internals
-void log_success(std::string_view msg);
-/// Error log line (red).
-/// \ingroup grp_internals
-void log_error(std::string_view msg);
-/// Error log line including err.path when set.
-/// \ingroup grp_internals
-void log_error(const Error& err);
+/* --- logging: promoted to the public truss::log (see :api) --------------- */
 
 /* --- filesystem ---------------------------------------------------------- */
 
@@ -105,6 +89,10 @@ struct ProcOutcome {
 /// Spawn argv via posix_spawnp (PATH search); optionally capture merged output.
 /// \ingroup grp_internals
 Result<ProcOutcome> run_process(std::span<const std::string> argv, bool capture);
+/// Spawn argv in cwd ("" = inherit).
+/// \ingroup grp_internals
+Result<ProcOutcome> run_process(std::span<const std::string> argv, bool capture,
+                                const std::filesystem::path& cwd);
 /// Spawn capturing stdout only; stderr passes through (machine-readable
 /// tool output, e.g. `conan install --format=json`).
 /// \ingroup grp_internals
