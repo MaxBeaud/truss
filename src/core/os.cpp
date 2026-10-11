@@ -215,7 +215,7 @@ temp_scope::temp_scope(temp_scope&& other) noexcept : dir_(std::move(other.dir_)
 temp_scope& temp_scope::operator=(temp_scope&& other) noexcept {
     if (this != &other) {
         if (!dir_.empty())
-            detail::remove_tree(dir_);
+            static_cast<void>(detail::remove_tree(dir_)); // best effort
         dir_ = std::move(other.dir_);
         other.dir_.clear();
     }
@@ -224,7 +224,7 @@ temp_scope& temp_scope::operator=(temp_scope&& other) noexcept {
 
 temp_scope::~temp_scope() {
     if (!dir_.empty())
-        detail::remove_tree(dir_); // best effort; never throws
+        static_cast<void>(detail::remove_tree(dir_)); // best effort; never throws
 }
 
 const std::filesystem::path& temp_scope::path() const { return dir_; }
