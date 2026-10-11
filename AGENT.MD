@@ -565,3 +565,19 @@ Verified doxygen 1.18 facts:
   no modules.html is generated.
 - WARN_NO_PARAMDOC=NO + WARN_IF_UNDOCUMENTED=YES: params are documented by
   choice, members are enforced.
+
+## 22. Phase 13 verified facts (scripting helpers)
+
+- libc++ 23.1.1 (Arch, matches clang 23.1.1) has NO <generator>: P2502R2 is
+  still unimplemented in libc++ (llvm issue #105226, Cxx23 status blank).
+  GCC 16 libstdc++ and MSVC STL have it. truss's bootstrap uses libc++, and
+  BMIs are built on the user's machine -> std::generator is NOT usable in the
+  public API. Resolution: truss::generator<T> in :api, shape adapted from
+  cppcoro::generator (MIT, Lewis Baker): coroutine-based, range-for
+  compatible, T-by-value in the promise. Swap for std::generator when libc++
+  ships it (alias, call sites unchanged).
+- os::find_program replaces the `sh -c command -v` probe entirely: manual
+  $PATH split + access(X_OK), memoized incl. misses. No shell fork during
+  configure.
+- Native sha256 (FIPS 180-4) in fs.cpp replaces the `sha256sum` shell-out in
+  tarball_fetch; vectors verified against coreutils (abc, empty, 100x'x').
