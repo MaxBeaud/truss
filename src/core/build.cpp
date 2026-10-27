@@ -15,6 +15,7 @@ module;
 #include <string>
 #include <string_view>
 #include <thread>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -93,19 +94,31 @@ void collect_usage(const ResolvedTarget& r, const TargetIndex& idx,
     if (!seen.insert(r.target).second)
         return;
     const bool interface = r.target->kind() == TargetKind::Interface;
+    
+    // Use local unordered_sets for O(1) deduplication instead of O(n) std::ranges::find
+    std::unordered_set<std::string> seen_includes(out.includes.begin(), out.includes.end());
+    std::unordered_set<std::string> seen_defines;
+    std::unordered_set<std::string> seen_link_paths;
+    std::unordered_set<std::string> seen_link_libs;
+    if (interface) {
+        seen_defines.insert(out.defines.begin(), out.defines.end());
+        seen_link_paths.insert(out.link_paths.begin(), out.link_paths.end());
+        seen_link_libs.insert(out.link_libs.begin(), out.link_libs.end());
+    }
+    
     for (const auto& d : r.target->include_dirs())
-        if (std::ranges::find(out.includes, d) == out.includes.end())
-            out.includes.push_back(d);
+        if (seen_includes.insert(std::string(d)).second)
+            out.includes.push_back(std::string(d));
     if (interface) {
         for (const auto& d : r.target->defines())
-            if (std::ranges::find(out.defines, d) == out.defines.end())
-                out.defines.push_back(d);
+            if (seen_defines.insert(std::string(d)).second)
+                out.defines.push_back(std::string(d));
         for (const auto& p : r.target->link_paths())
-            if (std::ranges::find(out.link_paths, p) == out.link_paths.end())
-                out.link_paths.push_back(p);
+            if (seen_link_paths.insert(std::string(p)).second)
+                out.link_paths.push_back(std::string(p));
         for (const auto& l : r.target->link_libs())
-            if (std::ranges::find(out.link_libs, l) == out.link_libs.end())
-                out.link_libs.push_back(l);
+            if (seen_link_libs.insert(std::string(l)).second)
+                out.link_libs.push_back(std::string(l));
     }
     for (const Target* dep : r.target->deps()) {
         const auto it = idx.find(dep->name());
@@ -723,6 +736,10 @@ Project::Project(std::string name, std::span<char* const> argv) : name_(std::mov
         else if (a == "--build-dir") {
             if (++i >= argv.size()) { cli_error_ = Error {Error::Kind::Config, "--build-dir requires a path"}; continue; }
             build_root_ = argv[i];
+        }
+        else if (a == "--version" || a == "-V") {
+            std::printf("truss %.*s\n", static_cast<int>(kVersion.size()), kVersion.data());
+            std::exit(0);
         }
         else if (a.starts_with('-')) {
             cli_error_ = Error {

@@ -92,6 +92,8 @@ clang++ -std=c++26 -fmodule-file=truss=build/bootstrap/bmi/truss.pcm \
         truss.cpp build/bootstrap/libtruss.a -o truss
 ```
 
+> **Note:** The `setup.sh` script places the `truss` binary in the **directory where you invoked it** (not in the truss source directory). For example, running `./vendor/truss/setup.sh build` from your project root will create `./truss` (not `./vendor/truss/truss`).
+
 **2. Installed tool.** `./setup.sh install /usr/local` stages
 `libtruss.a` + module BMIs; compile your project's `truss.cpp` against them
 (see `examples/installed/`, which contains only a `truss.cpp`).
@@ -123,6 +125,7 @@ Windows hosts are on the roadmap (see [Status](#status--support-matrix)).
 | `--explain` | Print *why* each edge is (re)built — samurai's explain mode. |
 | `--target NAME` | Build only this target (repeatable). |
 | `--build-dir PATH` | Relocate the build root (default `./build`). |
+| `--version` / `-V` | Print truss version and exit. |
 
 Built-in tasks:
 

@@ -19,6 +19,7 @@
 # Env overrides: CXX (default clang++), CC (default clang),
 #                VCPKG_ROOT (required for the vcpkg example), PKG_ROOT (add-package).
 set -euo pipefail
+INVOCATION_DIR=$(pwd)
 cd "$(dirname "$0")"
 
 usage() { sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'; }
@@ -89,8 +90,8 @@ cmd_bootstrap() {
 cmd_build() {
     cmd_bootstrap
     mapfile -t flags < <(consumer_flags)
-    job "$CXX" -std=c++26 -stdlib=libc++ "${flags[@]}" truss.cpp "$OUT/libtruss.a" -o truss
-    echo "setup: built ./truss — run './truss debug' to build truss with truss"
+    job "$CXX" -std=c++26 -stdlib=libc++ "${flags[@]}" truss.cpp "$OUT/libtruss.a" -o "$INVOCATION_DIR/truss"
+    echo "setup: built $INVOCATION_DIR/truss — run './truss debug' to build truss with truss"
 }
 
 # --- unit tests (doctest; truss lib compiled with ASan/UBSan) -----------------

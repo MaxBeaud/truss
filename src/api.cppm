@@ -373,6 +373,10 @@ consteval bool is_macos()   { return host_os() == Os::MacOS; }
  * \return absolute path, or nullopt when not found / not executable.
  */
 std::optional<std::filesystem::path> find_program(std::string_view name);
+/// \brief find_program() for const char* (sugar overload for C-string literals).
+inline std::optional<std::filesystem::path> find_program(const char* name) {
+    return find_program(std::string_view(name));
+}
 /**
  * \brief find_program() for several candidates; first hit wins
  * (e.g. find_program({"clang++-19", "clang++"})).
@@ -393,6 +397,8 @@ bool any_program(std::initializer_list<std::string_view> names);
 
 /// Environment variable value; nullopt when unset or empty.
 std::optional<std::string> env(std::string_view name);
+/// \brief env() for const char* (sugar overload for C-string literals).
+inline std::optional<std::string> env(const char* name) { return env(std::string_view(name)); }
 /// Types env(name, def) can parse into.
 template <class T>
 concept EnvParsable = std::same_as<T, bool> || std::integral<T> || std::floating_point<T> ||
@@ -655,6 +661,9 @@ private:
     StdLib stdlib_ {StdLib::Default};
 };
 
+// Forward declaration for TargetRef (used in Target::depends_on below)
+class TargetRef;
+
 /**
  * \brief A build target: options holder built with method chaining.
  *
@@ -841,6 +850,9 @@ public:
      * Interface targets). Order is tracked in the ninja graph.
      */
     Target& depends_on(const Target& dep);
+    /// \brief Depend on a target from a Result (e.g., from conan()/vcpkg()).
+    /// Declaration only; definition after TargetRef to avoid forward declaration issues.
+    Target& depends_on(Result<TargetRef> dep_result);
     /// Mark as a test executable (built and run by `./truss test`).
     Target& is_test(bool v = true) { test_ = v; return *this; }
 
@@ -935,14 +947,25 @@ public:
  */
 class TargetRef {
 public:
-    explicit TargetRef(Target& t) : target_(&t) {}
-    Target& operator*() const { return *target_; }
-    Target* operator->() const { return target_; }
-    operator Target&() const { return *target_; }
+    explicit TargetRef(Target& t) : ref_(t) {}
+    Target& get() const { return ref_; }
+    Target& operator*() const { return ref_; }
+    Target* operator->() const { return &ref_.get(); }
+    operator Target&() const { return ref_; }
 
 private:
-    Target* target_;
+    std::reference_wrapper<Target> ref_;
 };
+
+// Inline implementation of depends_on(Result<TargetRef>) - TargetRef must be complete
+inline Target& Target::depends_on(Result<TargetRef> dep_result) {
+    if (dep_result) {
+        // Explicitly convert TargetRef to Target& to avoid ambiguity
+        return depends_on(static_cast<const Target&>(*dep_result));
+    }
+    // Error will be caught by build() later
+    return *this;
+}
 
 /// Context handed to tasks and build hooks (the ./truss NAME dispatch).
 /// Built-in tasks: test, run, clean, compdb.
