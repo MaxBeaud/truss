@@ -746,11 +746,14 @@ Project::Project(std::string name, std::span<char* const> argv) : name_(std::mov
                 Error::Kind::Config,
                 "unknown option '" + std::string(a) + "'\n"
                 "usage: truss [debug|release] [task...] [-j N] [-v] [-n] [--explain] [--target NAME] [--build-dir PATH]\n"
-                "tasks: test, run, clean, compdb, or any task defined with proj.task(...)",
+                "tasks: test, run, clean, compdb, reload, or any task defined with proj.task(...)",
             };
         }
         else requested_tasks_.emplace_back(a);
     }
+    
+    // Auto-discover truss modules from standard installation paths
+    truss_module_paths_ = os::find_truss_modules();
 }
 
 Project::Project(std::string name, int argc, char** argv)
@@ -763,6 +766,36 @@ void Project::task(std::string name, TaskFn fn) {
 std::filesystem::path Project::build_dir() const {
     const std::filesystem::path root = build_root_.has_value() ? *build_root_ : cwd_ / "build";
     return root / mode_dir_name(mode_);
+}
+
+Result<void> Project::compile_commands(const std::filesystem::path& path) {
+    // If path is a directory, use compile_commands.json inside it
+    auto output_path = path;
+    if (std::filesystem::is_directory(path)) {
+        output_path = path / "compile_commands.json";
+    }
+    
+    // Get the manifest path
+    const std::filesystem::path bld = build_dir();
+    const std::filesystem::path manifest = bld / "ninja" / "build.ninja";
+    
+    // Run samurai's compdb tool
+    std::error_code ec;
+    if (!std::filesystem::exists(manifest, ec)) {
+        return std::unexpected(Error {
+            Error::Kind::Config,
+            "compile_commands requires a built manifest (run build() first)",
+            manifest,
+        });
+    }
+    
+    // Invoke samurai compdb tool
+    if (auto r = detail::samu_compdb(manifest.generic_string(), output_path.generic_string()); !r) {
+        return r;
+    }
+    
+    log::success("wrote " + output_path.generic_string());
+    return {};
 }
 
 Result<void> Project::build() {
@@ -801,7 +834,7 @@ Result<void> Project::build() {
 
     /* user tasks must not shadow built-ins */
     for (const auto& [name, fn] : user_tasks_)
-        if (name == "test" || name == "run" || name == "clean" || name == "compdb")
+        if (name == "test" || name == "run" || name == "clean" || name == "compdb" || name == "reload")
             return std::unexpected(Error {Error::Kind::Config, "user task '" + name + "' shadows a built-in task"});
 
     /* project-wide toolchain: Config overlaid on the host triple (per-target
@@ -944,6 +977,103 @@ Result<void> Project::build() {
                 return r;
             }
 
+            if (task == "reload") {
+                // reload: rebuild the truss executable and replace current binary
+                // Only works when truss.cpp exists in cwd (self-hosting scenario)
+                if (!std::filesystem::exists(cwd_ / "truss.cpp")) {
+                    return std::unexpected(Error {
+                        Error::Kind::Config,
+                        "reload: truss.cpp not found. This command only works from the truss repository root."
+                    });
+                }
+
+                // Find the truss target's output path BEFORE rebuilding
+                const ResolvedTarget* truss_rt = nullptr;
+                for (const auto& rt : resolved) {
+                    if (rt.target->name() == "truss" && rt.target->kind() == TargetKind::Executable) {
+                        truss_rt = &rt;
+                        break;
+                    }
+                }
+
+                if (!truss_rt) {
+                    return std::unexpected(Error {
+                        Error::Kind::Config,
+                        "reload: no 'truss' executable target found in this project"
+                    });
+                }
+
+                // Rebuild all targets (to ensure dependencies are up to date)
+                // but we only care about the truss output
+                if (auto r = run_samu({}); !r) {
+                    return r;
+                }
+
+                // Verify the truss binary was built
+                if (truss_rt->output.empty() || !std::filesystem::exists(truss_rt->output)) {
+                    return std::unexpected(Error {
+                        Error::Kind::Internal,
+                        "reload: truss executable not found at " + truss_rt->output
+                    });
+                }
+
+                // Replace current binary
+                // On Linux, we cannot overwrite a running executable directly.
+                // Instead, we rename the new binary over the old one atomically.
+                // The running process continues with the old inode (in memory),
+                // while the new file replaces it on disk.
+                std::error_code ec;
+                auto current_exe = std::filesystem::canonical("/proc/self/exe", ec);
+                if (ec || current_exe.empty()) {
+                    return std::unexpected(Error {
+                        Error::Kind::Io,
+                        "reload: cannot determine current executable path"
+                    });
+                }
+
+                // Create a temporary file next to the current executable
+                auto temp_path = current_exe;
+                temp_path += ".tmp_reload";
+                
+                // Copy the new binary to temp location
+                std::filesystem::copy_file(truss_rt->output, temp_path,
+                                          std::filesystem::copy_options::overwrite_existing, ec);
+                if (ec) {
+                    return std::unexpected(Error {
+                        Error::Kind::Io,
+                        "reload: failed to copy new binary to temp: " + ec.message(),
+                        temp_path
+                    });
+                }
+
+                // Make executable
+                std::filesystem::permissions(temp_path, std::filesystem::perms::owner_all, ec);
+                if (ec) {
+                    std::filesystem::remove(temp_path);
+                    return std::unexpected(Error {
+                        Error::Kind::Io,
+                        "reload: failed to set permissions on temp binary: " + ec.message(),
+                        temp_path
+                    });
+                }
+
+                // Atomically replace the running binary with rename
+                // On Linux, rename over an executing file works - the process
+                // continues running from the old inode while the new file replaces it
+                std::filesystem::rename(temp_path, current_exe, ec);
+                if (ec) {
+                    std::filesystem::remove(temp_path);
+                    return std::unexpected(Error {
+                        Error::Kind::Io,
+                        "reload: failed to replace binary: " + ec.message(),
+                        current_exe
+                    });
+                }
+
+                log::success("truss reloaded from source. New binary active for next run.");
+                return {};
+            }
+
             if (task == "test") {
                 std::vector<std::string> test_outputs;
                 for (const auto& r : resolved)
@@ -997,7 +1127,7 @@ Result<void> Project::build() {
 
             return std::unexpected(Error {
                 Error::Kind::Config,
-                "unknown task '" + task + "' (built-ins: test, run, clean, compdb)",
+                "unknown task '" + task + "' (built-ins: test, run, clean, compdb, reload)",
             });
         }();
 

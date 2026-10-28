@@ -7,7 +7,7 @@
 import truss;
 
 int main(int argc, char** argv) {
-    truss::Project proj("truss", argc, argv);
+    truss::Project proj{"truss", argc, argv};
 
     /* vendored samurai (C17): samu.c excluded, its main() is replaced by
      * src/samu/shim.c; warnings off since upstream code is unmodified */
@@ -31,7 +31,9 @@ int main(int argc, char** argv) {
         .sources("truss.cpp")
         .cpp_standard(truss::CppStandard::Cpp26)
         .depends_on(lib);
-
+    
+    proj.compile_commands();
+    
     auto result = proj.build();
     return result ? 0 : 1;
 }

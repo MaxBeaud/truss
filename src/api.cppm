@@ -455,6 +455,14 @@ std::optional<std::string> os_version();
 std::optional<std::string> hostname();
 /// System temp directory ($TMPDIR else /tmp); query only, creates nothing.
 std::filesystem::path temp_dir();
+/**
+ * \brief Search for truss module BMI files in standard installation paths.
+ * Searches in order: TRUSS_INSTALL_PREFIX (if set), same directory as the truss
+ * executable, .local/lib/truss (relative to cwd), ~/.local/lib/truss,
+ * /usr/local/lib/truss, /usr/lib/truss.
+ * \return vector of paths where truss BMIs were found, or empty if not found.
+ */
+std::vector<std::filesystem::path> find_truss_modules();
 // --- process (for task() bodies) ---
 /// Outcome of a spawned process.
 struct ProcessResult {
@@ -1112,6 +1120,12 @@ public:
     /// Generates the ninja manifest, runs samurai, then the requested tasks.
     /// \return success, or the first Error (also logged). Errors are logged.
     Result<void> build();
+    /**
+     * \brief Generate compile_commands.json for the project.
+     * This invokes samurai's compdb tool to generate a compilation database.
+     * \param path Optional output path (defaults to project root's compile_commands.json).
+     */
+    Result<void> compile_commands(const std::filesystem::path& path = ".");
 
     const std::string& name() const { return name_; }
     BuildMode mode() const { return mode_; }
@@ -1120,6 +1134,8 @@ public:
     int jobs() const { return jobs_; }
     bool verbose() const { return verbose_; }
     const std::vector<std::string>& only_targets() const { return only_targets_; }
+    /// Get the auto-discovered truss module paths.
+    const std::vector<std::filesystem::path>& truss_module_paths() const { return truss_module_paths_; }
 
 private:
     template <class T>
@@ -1148,6 +1164,7 @@ private:
     std::optional<std::filesystem::path> build_root_;
     std::optional<Error> cli_error_;
     std::vector<std::string> subdir_target_names_; /* created by add_subdirectory */
+    std::vector<std::filesystem::path> truss_module_paths_; /* auto-discovered truss module paths */
 };
 
 } // namespace truss

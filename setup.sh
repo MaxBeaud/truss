@@ -158,14 +158,25 @@ cmd_examples() {
 
 # --- installed-tool flow: stage a prefix, build against it --------------------
 cmd_install() {
-    local prefix="${1:-$HOME/.local}"
+    local prefix="${1:-.local}"
+    # If prefix is relative, make it absolute relative to INVOCATION_DIR
+    if [[ "$prefix" != /* ]]; then
+        prefix="$INVOCATION_DIR/$prefix"
+    fi
     cmd_bootstrap
-    local dest="$prefix/lib/truss"
-    mkdir -p "$dest"
-    cp "$OUT/libtruss.a" "$dest/libtruss.a"
-    cp "$OUT/bmi/truss.pcm" "$dest/truss.pcm"
-    cp "$OUT/bmi/truss_api.pcm" "$dest/truss_api.pcm"
-    echo "setup: staged libtruss.a + truss.pcm + truss_api.pcm into $dest"
+    local lib_dest="$prefix/lib/truss"
+    local bin_dest="$prefix/bin"
+    mkdir -p "$lib_dest" "$bin_dest"
+    cp "$OUT/libtruss.a" "$lib_dest/libtruss.a"
+    cp "$OUT/bmi/truss.pcm" "$lib_dest/truss.pcm"
+    cp "$OUT/bmi/truss_api.pcm" "$lib_dest/truss_api.pcm"
+    
+    # Build the truss binary and install it
+    mapfile -t flags < <(consumer_flags)
+    job "$CXX" -std=c++26 -stdlib=libc++ "${flags[@]}" truss.cpp "$OUT/libtruss.a" -o "$bin_dest/truss"
+    
+    echo "setup: staged libtruss.a + truss.pcm + truss_api.pcm into $lib_dest"
+    echo "setup: installed truss binary to $bin_dest/truss"
 }
 
 cmd_installed() {

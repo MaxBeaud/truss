@@ -135,6 +135,7 @@ Built-in tasks:
 | `run` | Builds, then runs the first executable target. |
 | `clean` | Deletes the mode's build dir. |
 | `compdb` | Writes `compile_commands.json` (via samurai's compdb tool). |
+| `reload` | Rebuilds the `truss` executable from source and replaces the current binary. Only works from the truss repository root. |
 
 Tasks are composable with modes and flags: `./truss release test -j8 -v`.
 
@@ -326,6 +327,17 @@ When things run, in order:
 ```
 
 Hooks fire once per invocation; `clean` and `compdb` never trigger them.
+
+### Compilation Database
+
+`proj.compile_commands(path)` generates a `compile_commands.json` file (Clangd, VSCode, etc.):
+
+```cpp
+proj.compile_commands();  // writes to project root
+proj.compile_commands("build/compile_commands.json");  // custom path
+```
+
+This is also available as the built-in `compdb` task: `./truss compdb`.
 Named tasks (`./truss <name>`) stay manual commands — hooks are for what must
 always run around the build itself.
 
@@ -609,6 +621,13 @@ Other useful commands: `./setup.sh unit` (doctest, ASan/UBSan), `./setup.sh
 examples`, `./setup.sh installed`, `./setup.sh amalgam`, `./setup.sh install
 [prefix]`, `./setup.sh docs` (Doxygen API reference → `build/docs/html/`),
 `./setup.sh clean`. All generated output lives under `build/`.
+
+`./setup.sh install [prefix]` stages `libtruss.a`, the module BMIs, and the `truss`
+binary into `prefix` (default `.local/` relative to the invocation directory). An
+installed truss automatically discovers its module files from the installation location.
+
+The discovery can be overridden with the `TRUSS_INSTALL_PREFIX` environment variable,
+which should point to the installation prefix (not the lib/truss subdirectory).
 
 ## Status & support matrix
 

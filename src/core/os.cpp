@@ -229,4 +229,72 @@ temp_scope::~temp_scope() {
 
 const std::filesystem::path& temp_scope::path() const { return dir_; }
 
+std::vector<std::filesystem::path> find_truss_modules() {
+    std::vector<std::filesystem::path> result;
+    
+    // Check TRUSS_INSTALL_PREFIX environment variable first
+    if (const char* prefix = std::getenv("TRUSS_INSTALL_PREFIX")) {
+        std::filesystem::path p(prefix);
+        p = p / "lib" / "truss";
+        std::error_code ec;
+        if (std::filesystem::exists(p, ec) && !ec) {
+            if (std::filesystem::exists(p / "truss.pcm", ec) && !ec &&
+                std::filesystem::exists(p / "truss_api.pcm", ec) && !ec) {
+                result.push_back(p);
+            }
+        }
+    }
+    
+    // Get the directory of the current truss executable
+    std::error_code ec;
+    auto self_exe = std::filesystem::canonical("/proc/self/exe", ec);
+    if (!ec && !self_exe.empty()) {
+        auto exe_dir = self_exe.parent_path();
+        auto truss_lib = exe_dir.parent_path() / "lib" / "truss";
+        if (std::filesystem::exists(truss_lib, ec) && !ec) {
+            result.push_back(truss_lib);
+        }
+    }
+    
+    // Standard installation paths
+    const std::vector<std::string_view> search_paths = {
+        "$HOME/.local/lib/truss",
+        ".local/lib/truss",
+        "/usr/local/lib/truss",
+        "/usr/lib/truss",
+        "/usr/lib64/truss",
+    };
+    
+    for (const auto& path_template : search_paths) {
+        std::string path_str = std::string(path_template);
+        // Expand $HOME
+        if (path_str.find("$HOME") != std::string::npos) {
+            if (const char* home = std::getenv("HOME")) {
+                size_t pos = path_str.find("$HOME");
+                path_str.replace(pos, 5, home);
+            }
+        }
+        
+        std::filesystem::path p(path_str);
+        // If the path is relative (like .local/lib/truss), make it absolute from current directory
+        if (!p.is_absolute()) {
+            auto cwd = std::filesystem::current_path(ec);
+            if (ec) {
+                continue;
+            }
+            p = cwd / p;
+        }
+        
+        if (std::filesystem::exists(p, ec) && !ec) {
+            // Check if it contains the required BMI files
+            if (std::filesystem::exists(p / "truss.pcm", ec) && !ec &&
+                std::filesystem::exists(p / "truss_api.pcm", ec) && !ec) {
+                result.push_back(p);
+            }
+        }
+    }
+    
+    return result;
+}
+
 } // namespace truss::os

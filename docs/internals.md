@@ -41,10 +41,10 @@ page explains the architecture around them.
 | `src/core/ninja.cpp` | `NinjaWriter` + ninja escaping rules |
 | `src/core/samu.cpp` | C shim over vendored samurai (`vendor/samurai`), in-process build + compdb |
 | `src/core/proc.cpp` | `posix_spawn` process runner (optional cwd via `addchdir_np`), output capture |
-| `src/core/os.cpp` | `truss::os`: consteval host predicates, memoized fork-free `find_program` `$PATH` walk, lenient `env` parsing, machine specs, `temp_scope` |
+| `src/core/os.cpp` | `truss::os`: consteval host predicates, memoized fork-free `find_program` `$PATH` walk, lenient `env` parsing, machine specs, `temp_scope`, `find_truss_modules` auto-discovery |
 | `src/core/pkg.cpp` | fetch (git/tarball + sha256), `~/.cache/truss` cache, hardlink materialization, conan/vcpkg fingerprint + configure-skip |
 | `src/core/target.cpp` | host triple detection, `Target::depends_on` bookkeeping |
-| `src/core/build.cpp` | the emitter: rules, edges, unity batching, PCH edges, scan-deps wiring, `Project::build()` orchestration |
+| `src/core/build.cpp` | the emitter: rules, edges, unity batching, PCH edges, scan-deps wiring, `Project::build()` orchestration, `compile_commands` generation, `reload` task |
 | `src/core/log.cpp` | colored stdout logging, the public `truss::log` channel |
 
 ## Invariants
