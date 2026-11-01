@@ -10,7 +10,8 @@
 #   ./setup.sh installed          installed-tool flow against a staged prefix
 #   ./setup.sh amalgam            generate build/dist/truss_all.hpp + compile/run fixture
 #   ./setup.sh test               unit + examples + installed + amalgam
-#   ./setup.sh install [prefix]   stage libtruss.a + BMIs (default ~/.local)
+#   ./setup.sh install [prefix]   stage libtruss.a + BMIs + truss CLI (default ./.local)
+#   ./setup.sh dist               portable truss binary (static libstdc++) -> build/dist/bin/truss
 #   ./setup.sh bench              benchmark truss vs xmake/make (build/bench/)
 #   ./setup.sh docs               generate the Doxygen reference (build/docs/)
 #   ./setup.sh clean              delete all generated output
@@ -22,7 +23,7 @@ set -euo pipefail
 INVOCATION_DIR=$(pwd)
 cd "$(dirname "$0")"
 
-usage() { sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//'; }
 
 CXX="${CXX:-clang++}"
 CC="${CC:-clang}"
@@ -171,9 +172,10 @@ cmd_install() {
     cp "$OUT/bmi/truss.pcm" "$lib_dest/truss.pcm"
     cp "$OUT/bmi/truss_api.pcm" "$lib_dest/truss_api.pcm"
     
-    # Build the truss binary and install it
+    # Build the truss CLI (TRUSS_INSTALLED_BIN: `truss init` compiled in)
     mapfile -t flags < <(consumer_flags)
-    job "$CXX" -std=c++26 -stdlib=libc++ "${flags[@]}" truss.cpp "$OUT/libtruss.a" -o "$bin_dest/truss"
+    job "$CXX" -std=c++26 -stdlib=libc++ -DTRUSS_INSTALLED_BIN "${flags[@]}" truss.cpp "$OUT/libtruss.a" \
+        -o "$bin_dest/truss"
     
     echo "setup: staged libtruss.a + truss.pcm + truss_api.pcm into $lib_dest"
     echo "setup: installed truss binary to $bin_dest/truss"
@@ -188,6 +190,28 @@ cmd_installed() {
         examples/installed/truss.cpp "$prefix/lib/truss/libtruss.a" \
         -o examples/installed/truss
     ( cd examples/installed && ./truss test )
+
+    # `truss init` from the installed CLI: scaffold, bootstrap against the
+    # staged modules (found next to the binary), build + run its tests
+    local scratch="$OUT/init-check"
+    local cli="$PWD/$prefix/bin/truss"
+    rm -rf "$scratch"; mkdir -p "$scratch"
+    ( cd "$scratch" && "$cli" init demo-app && cd demo-app && ./bootstrap.sh && ./truss test )
+}
+
+# --- dist: portable truss binary via the self-host graph ------------------------
+# truss-dist (truss.cpp) links every dependency + libstdc++/libgcc statically:
+# the result only needs glibc at runtime.
+cmd_dist() {
+    [ -x ./truss ] || cmd_build
+    ./truss release --target truss-dist
+    local bin
+    bin=$(find build/release/bin -name truss-dist -type f | head -n1)
+    [ -n "$bin" ] || { echo "setup: truss-dist was not produced" >&2; exit 1; }
+    mkdir -p build/dist/bin
+    cp "$bin" build/dist/bin/truss
+    echo "setup: built build/dist/bin/truss; runtime deps:"
+    ldd build/dist/bin/truss || true
 }
 
 # --- amalgamation: single-header drop-in --------------------------------------
@@ -377,6 +401,7 @@ case "${1:-build}" in
     amalgam)   cmd_amalgam ;;
     test)      cmd_test ;;
     install)   shift; cmd_install "${1:-}" ;;
+    dist)      cmd_dist ;;
     bench)     cmd_bench ;;
     docs)      cmd_docs ;;
     clean)     cmd_clean ;;

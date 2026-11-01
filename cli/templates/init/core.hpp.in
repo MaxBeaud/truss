@@ -1,0 +1,11 @@
+#pragma once
+
+#include <string>
+#include <string_view>
+
+namespace @IDENT@ {
+
+/// Greeting used by the app and checked by the tests.
+std::string greeting(std::string_view who);
+
+} // namespace @IDENT@

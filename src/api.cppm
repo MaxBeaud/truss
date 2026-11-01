@@ -132,6 +132,18 @@ enum class Toolchain {
     Default = 0, ///< host defaults (no override)
     LLVM,        ///< clang++ + libc++ + llvm-ar
     GCC,         ///< g++ + libstdc++ + ar
+    Zig,         ///< `zig c++` + zig's bundled libc++ + `zig ar` (clang flag dialect; cross-compiles via Config::target)
+};
+
+/**
+ * \brief C++ runtime linked statically into an executable / shared library
+ * (Target::static_stdlib). The C library stays dynamic except with Musl.
+ */
+enum class StaticStdlib {
+    Default = 0, ///< no static runtime (driver default: everything dynamic)
+    Gcc,         ///< libstdc++ + libgcc: -static-libstdc++ -static-libgcc (g++, or clang with libstdc++)
+    Llvm,        ///< libc++ + libc++abi archives (clang with stdlib(Libcxx); always the case with zig)
+    Musl,        ///< fully static binary (-static) against musl: zig + a *-musl target, or a musl-targeting driver
 };
 
 /**
@@ -288,6 +300,10 @@ struct TargetTriple {
     std::string ar;                             ///< archiver, e.g. "llvm-ar"
     std::string linker;                         ///< -fuse-ld= override ("" = driver default)
     StdLib stdlib {StdLib::Default};            ///< stdlib selection (Default = compiler default)
+    /// Cross-compilation target triple, e.g. "aarch64-linux-musl" ("" = native).
+    /// Emitted as `--target=` (clang/clang-cl) or `-target` (zig); GCC
+    /// cross-compiles through a target-prefixed driver instead (Config error).
+    std::string target;
 };
 
 /// Triple of the machine truss itself runs on (compiler from $CXX when set).
@@ -637,6 +653,15 @@ public:
     Config& ar(std::string name_or_path) { ar_ = std::move(name_or_path); return *this; }
     /// C++ standard library: emitted as -stdlib= on compile + link.
     Config& stdlib(StdLib s) { stdlib_ = s; return *this; }
+    /**
+     * \brief Cross-compile every target for this triple ("" = native), e.g.
+     * "aarch64-linux-gnu", "x86_64-windows-gnu", "x86_64-linux-musl".
+     * os()/arch() of the resolved triple are derived from it, so outputs land in
+     * their own build/{mode}/bin/\<arch\>-\<os\>-... directory. Best paired with
+     * toolchain(Toolchain::Zig) (sysroots bundled); plain clang needs a sysroot
+     * passed through flags("--sysroot=...").
+     */
+    Config& target(std::string triple) { target_ = std::move(triple); return *this; }
 
     /// Compiler cache launcher (e.g. "ccache", "sccache") prefixed to compile
     /// commands; "" disables it. Default: auto-detect ccache then sccache on PATH.
@@ -651,6 +676,8 @@ public:
             compiler_ = "clang++"; ar_ = "llvm-ar"; stdlib_ = StdLib::Libcxx; break;
         case Toolchain::GCC:
             compiler_ = "g++"; ar_ = "ar"; stdlib_ = StdLib::Libstdcxx; break;
+        case Toolchain::Zig: /* zig always links its own libc++: no -stdlib= */
+            compiler_ = "zig c++"; ar_ = "zig ar"; stdlib_ = StdLib::Default; break;
         case Toolchain::Default: break;
         }
         return *this;
@@ -662,9 +689,10 @@ public:
     const std::string& launcher() const { return launcher_; }
     bool launcher_set() const { return launcher_set_; }
     StdLib stdlib() const { return stdlib_; }
+    const std::string& target() const { return target_; }
 
 private:
-    std::string compiler_, linker_, ar_, launcher_;
+    std::string compiler_, linker_, ar_, launcher_, target_;
     bool launcher_set_ {false};
     StdLib stdlib_ {StdLib::Default};
 };
@@ -848,6 +876,41 @@ public:
     /// Position-independent code (on by default for libraries).
     Target& pic(bool v) { pic_ = v; return *this; }
     /**
+     * \brief Link this dependency statically into whatever consumes it.
+     * (`static` is a C++ keyword, hence the name.)
+     * - Interface targets (conan()/vcpkg()/header+prebuilt packages): their
+     *   link_libs are wrapped in `-Wl,-Bstatic ... -Wl,-Bdynamic` (the .a must exist).
+     * - SharedLib targets: built as a static archive instead of a .so.
+     * - Static libraries / executables: no effect (already static / not a dependency).
+     * ELF targets only (Linux, FreeBSD, Android, MinGW); a Config error on macOS/MSVC.
+     * \param v true to enable (default when called with no argument).
+     */
+    Target& static_link(bool v = true) {
+        if (kind_ == TargetKind::SharedLibrary || demoted_shared_) {
+            kind_ = v ? TargetKind::StaticLibrary : TargetKind::SharedLibrary;
+            demoted_shared_ = v;
+        }
+        static_link_ = v;
+        return *this;
+    }
+    /**
+     * \brief Link every dependency of this executable/shared library statically
+     * (transitively): Interface link_libs and this target's own link_libs go
+     * through `-Bstatic`, SharedLib deps are linked from a static twin archive
+     * built from the same (PIC) objects. The C library family (c, m, pthread,
+     * dl, rt, ...) and the C++ runtime stay dynamic — use static_stdlib() for the latter.
+     * \param v true to enable (default when called with no argument).
+     */
+    Target& static_deps(bool v = true) { static_deps_ = v; return *this; }
+    /**
+     * \brief Link the C++ runtime statically (see StaticStdlib). Validated at
+     * build() against the project toolchain: Gcc needs libstdc++, Llvm needs
+     * clang + stdlib(Libcxx) (or zig), Musl needs zig + a *-musl target or a
+     * musl-targeting driver. Typical portable Linux binary:
+     * `.static_deps().static_stdlib(truss::StaticStdlib::Gcc)` -> depends on glibc only.
+     */
+    Target& static_stdlib(StaticStdlib s) { static_stdlib_ = s; return *this; }
+    /**
      * \brief Full triple override for this target (cross-compiling); wins
      * over proj.configure() completely (it is not merged with the Config).
      */
@@ -858,8 +921,12 @@ public:
      * Interface targets). Order is tracked in the ninja graph.
      */
     Target& depends_on(const Target& dep);
+    /// \brief Depend on a target handle (`depends_on(*proj.add_subdirectory(...))`).
+    /// Exact-match overload: without it, a TargetRef converts equally well to
+    /// `const Target&` and to `Result<TargetRef>` (ambiguous call).
+    Target& depends_on(TargetRef dep);
     /// \brief Depend on a target from a Result (e.g., from conan()/vcpkg()).
-    /// Declaration only; definition after TargetRef to avoid forward declaration issues.
+    /// An error Result is kept and reported by Project::build() (never dropped).
     Target& depends_on(Result<TargetRef> dep_result);
     /// Mark as a test executable (built and run by `./truss test`).
     Target& is_test(bool v = true) { test_ = v; return *this; }
@@ -888,6 +955,12 @@ public:
     bool unity() const { return unity_; }
     ModulesMode modules_mode() const { return modules_; }
     bool pic() const { return pic_; }
+    /// static_link() / static_deps() state (named apart: the setters default their bool).
+    bool static_link_enabled() const { return static_link_; }
+    bool static_deps_enabled() const { return static_deps_; }
+    StaticStdlib static_stdlib() const { return static_stdlib_; }
+    /// First error handed to depends_on(Result) (reported by build()).
+    const std::optional<Error>& deferred_error() const { return deferred_error_; }
     const std::optional<TargetTriple>& triple_override() const { return triple_; }
     const std::vector<const Target*>& deps() const { return deps_; }
     bool is_test_target() const { return test_; }
@@ -919,6 +992,11 @@ private:
     ModulesMode modules_ {};
     bool pic_ {false};
     bool test_ {false};
+    bool static_link_ {false};
+    bool demoted_shared_ {false}; /* SharedLib turned into a static archive by static_link() */
+    bool static_deps_ {false};
+    StaticStdlib static_stdlib_ {};
+    std::optional<Error> deferred_error_;
     std::optional<TargetTriple> triple_;
     std::vector<const Target*> deps_;
 };
@@ -966,12 +1044,16 @@ private:
 };
 
 // Inline implementation of depends_on(Result<TargetRef>) - TargetRef must be complete
+inline Target& Target::depends_on(TargetRef dep) {
+    return depends_on(static_cast<const Target&>(dep.get()));
+}
+
 inline Target& Target::depends_on(Result<TargetRef> dep_result) {
-    if (dep_result) {
-        // Explicitly convert TargetRef to Target& to avoid ambiguity
-        return depends_on(static_cast<const Target&>(*dep_result));
-    }
-    // Error will be caught by build() later
+    if (dep_result)
+        return depends_on(static_cast<const Target&>(dep_result->get()));
+    /* keep the first failure: build() reports it instead of linking without the dep */
+    if (!deferred_error_)
+        deferred_error_ = std::move(dep_result.error());
     return *this;
 }
 

@@ -19,6 +19,8 @@ module;
 #include <system_error>
 #include <vector>
 
+#include <unistd.h>
+
 module truss;
 import :api;
 import :impl;
@@ -221,13 +223,28 @@ Result<void> write_file(const std::filesystem::path& p, std::string_view data) {
     if (ec)
         return std::unexpected(io_error(ec, p.parent_path()));
 
-    std::ofstream out(p, std::ios::binary | std::ios::trunc);
-    if (!out)
-        return std::unexpected(Error {Error::Kind::Io, "failed to open file for writing", p});
-    out.write(data.data(), static_cast<std::streamsize>(data.size()));
-    out.close();
-    if (!out)
-        return std::unexpected(Error {Error::Kind::Io, "failed to write file", p});
+    /* write a sibling temp file then rename over the target: an interrupted
+     * run never leaves a truncated manifest/lockfile/spec behind (rename is
+     * atomic within a filesystem); the pid keeps concurrent truss runs apart */
+    std::filesystem::path tmp = p;
+    tmp += ".truss-tmp." + std::to_string(getpid());
+    {
+        std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
+        if (!out)
+            return std::unexpected(Error {Error::Kind::Io, "failed to open file for writing", p});
+        out.write(data.data(), static_cast<std::streamsize>(data.size()));
+        out.close();
+        if (!out) {
+            std::filesystem::remove(tmp, ec);
+            return std::unexpected(Error {Error::Kind::Io, "failed to write file", p});
+        }
+    }
+    std::filesystem::rename(tmp, p, ec);
+    if (ec) {
+        const Error err = io_error(ec, p);
+        std::filesystem::remove(tmp, ec);
+        return std::unexpected(err);
+    }
     return {};
 }
 

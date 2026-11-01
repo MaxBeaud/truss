@@ -1,0 +1,11 @@
+#include "@NAME@/core.hpp"
+
+#include <format>
+
+namespace @IDENT@ {
+
+std::string greeting(std::string_view who) {
+    return std::format("hello, {}!", who);
+}
+
+} // namespace @IDENT@

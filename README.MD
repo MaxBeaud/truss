@@ -59,6 +59,7 @@ ninja manifest that samurai then executes incrementally.
   - [Hardening](#hardening)
   - [Precompiled headers](#precompiled-headers)
   - [Unity builds](#unity-builds)
+  - [Static linking](#static-linking)
   - [Custom tasks](#custom-tasks)
   - [Build hooks](#build-hooks)
 - [Scripting helpers (os / fs / log)](#scripting-helpers-os--fs--log)
@@ -95,8 +96,19 @@ clang++ -std=c++26 -fmodule-file=truss=build/bootstrap/bmi/truss.pcm \
 > **Note:** The `setup.sh` script places the `truss` binary in the **directory where you invoked it** (not in the truss source directory). For example, running `./vendor/truss/setup.sh build` from your project root will create `./truss` (not `./vendor/truss/truss`).
 
 **2. Installed tool.** `./setup.sh install /usr/local` stages
-`libtruss.a` + module BMIs; compile your project's `truss.cpp` against them
-(see `examples/installed/`, which contains only a `truss.cpp`).
+`libtruss.a` + module BMIs + the `truss` CLI; compile your project's
+`truss.cpp` against them (see `examples/installed/`, which contains only a
+`truss.cpp`). The installed CLI scaffolds new projects:
+
+```sh
+truss init my-app        # my-app/{truss.cpp, include/, src/core, src/app, tests/, bootstrap.sh}
+cd my-app && ./bootstrap.sh && ./truss test
+```
+
+`bootstrap.sh` is pre-wired to the modules next to the `truss` binary
+(`TRUSS_LIB=... ./bootstrap.sh` overrides it). `init` only exists in installed
+binaries (`-DTRUSS_INSTALLED_BIN`): the templates are `#embed`ded from
+`cli/templates/init/`, so vendored and single-header users never carry them.
 
 **3. Single header (mate.h-style drop-in).** No modules, no link step:
 
@@ -282,6 +294,38 @@ rebuilds its whole batch, and same-named `static` functions or anonymous
 namespace entities in different sources can now collide. Module units
 (`.cppm`) are never batched; batch files are only rewritten when their
 membership changes, so unchanged builds stay no-ops.
+
+### Static linking
+
+Three opt-ins, validated at `build()` against the toolchain:
+
+```cpp
+auto zlib = proj.vcpkg({"zlib"});
+zlib->static_link();                       // this dependency: -Wl,-Bstatic -lz -Wl,-Bdynamic
+
+proj.add_executable("tool")
+    .sources_in("src")
+    .depends_on(zlib)
+    .static_deps()                         // every dependency, transitively
+    .static_stdlib(truss::StaticStdlib::Gcc);   // + libstdc++/libgcc -> only glibc stays dynamic
+```
+
+- `static_link()` (on the dependency; `static` is a keyword): Interface
+  targets get their `link_libs` wrapped in `-Bstatic`/`-Bdynamic`; a
+  `SharedLib` is built as a static archive instead of a `.so`.
+- `static_deps()` (on the consumer): its own and inherited `link_libs` go
+  through `-Bstatic`, and `SharedLib` dependencies are linked from a *static
+  twin* — an extra archive over the same PIC objects, no recompilation. The C
+  runtime family (`c`, `m`, `pthread`, `dl`, `rt`, …) stays dynamic.
+- `static_stdlib(StaticStdlib)`: `Gcc` = `-static-libstdc++ -static-libgcc`;
+  `Llvm` = libc++ + libc++abi archives (needs clang + `stdlib(Libcxx)`, or zig);
+  `Musl` = fully static (`-static`) and needs a musl toolchain — zig with a
+  `*-linux-musl` target, or a `*-musl-g++` driver. Mixing runtimes is refused
+  (e.g. `Gcc` on a libc++ toolchain) since it would be an ABI break.
+
+`-Bstatic` needs GNU-ld semantics (Linux, BSD, Android, MinGW): macOS and MSVC
+targets get a Config error. The `.a` files must exist — distro packages often
+ship only the `.so`.
 
 ### Custom tasks
 
@@ -516,7 +560,10 @@ proj.configure(truss::Config{}.toolchain(truss::Toolchain::LLVM));
 ```
 
 `toolchain(Toolchain::GCC)` is the matching `g++` + libstdc++ + `ar` bundle;
-explicit calls after `toolchain()` override it. Selections are validated:
+`toolchain(Toolchain::Zig)` uses `zig c++` / `zig cc` / `zig ar` (clang flag
+dialect, zig's bundled libc++; `stdlib()` is refused, the compiler cache is
+skipped since ccache does not recognize zig). Explicit calls after
+`toolchain()` override it. Selections are validated:
 `g++` + `libc++` and any `stdlib()` on MSVC targets are clear Config errors.
 `-stdlib=` is emitted on both compile and link lines. Per-target
 `cross_target(triple)` still overrides the project default completely, and
@@ -539,8 +586,25 @@ named launcher that isn't on `PATH` is a Config error.
 
 ## Cross-compiling & MSVC
 
-Every target defaults to the host triple (`truss::host_triple()`), detected
-from the compiler. Override per target with a `TargetTriple`:
+The project-wide route is `Config::target`: the triple is passed to the
+driver (`--target=` for clang/clang-cl, `-target` for zig), and arch/OS are
+derived from it so outputs land in their own directory
+(`bin/arm64-linux-musl-zig/…`) and get the target's naming (`app.exe`,
+`libx.dll`, `libx.dylib`) and link conventions (no `-z relro`/`-soname`/
+`$ORIGIN` off ELF):
+
+```cpp
+// zig bundles libc headers + libc++ for every target: no sysroot to install
+proj.configure(truss::Config{}.toolchain(truss::Toolchain::Zig).target("aarch64-linux-musl"));
+```
+
+Plain clang works too with a sysroot (`.flags("--sysroot=...")`); GCC
+cross-compiles through a prefixed driver (`compiler("aarch64-linux-gnu-g++")`)
+and rejects `target()`. The design and roadmap are in
+[docs/cross-compilation.md](docs/cross-compilation.md).
+
+Every target defaults to that project triple (`truss::host_triple()` + the
+Config). Override per target with a `TargetTriple`:
 
 ```cpp
 truss::TargetTriple win;
@@ -622,6 +686,11 @@ examples`, `./setup.sh installed`, `./setup.sh amalgam`, `./setup.sh install
 [prefix]`, `./setup.sh docs` (Doxygen API reference → `build/docs/html/`),
 `./setup.sh clean`. All generated output lives under `build/`.
 
+`./setup.sh dist` produces the shippable CLI, `build/dist/bin/truss`: the
+self-host `truss-dist` target in release mode (`truss init` built in,
+`.static_deps().static_stdlib(StaticStdlib::Gcc)`), whose only runtime
+dependency is glibc.
+
 `./setup.sh install [prefix]` stages `libtruss.a`, the module BMIs, and the `truss`
 binary into `prefix` (default `.local/` relative to the invocation directory). An
 installed truss automatically discovers its module files from the installation location.
@@ -640,6 +709,8 @@ v0.1.0 — all eleven planned phases complete except benchmarks.
 | Sanitizers, LTO, per-target options | ✅ | ✅ | ✅ (no ThinLTO — maps to `/GL`) |
 | C++ modules for your project | ✅ | ✅ | ❌ (clear error) |
 | fetch / add_subdirectory / conan / vcpkg | ✅ | ✅ | host-side, same |
+| static_link / static_deps / static_stdlib | ✅ | ✅ | ❌ (clear error) |
+| zig (`Toolchain::Zig`, cross targets) | — | manifest-tested, not run in CI | — |
 
 Known limitations: paths containing spaces or `:` are rejected (ninja
 escaping, conservative v0.1); Windows *hosts* (running truss on Windows) are

@@ -1,0 +1,13 @@
+#!/usr/bin/env sh
+# Compile this project's build script (truss.cpp) into ./truss.
+# TRUSS_LIB: directory holding libtruss.a + truss.pcm + truss_api.pcm
+# (found by `truss init` at generation time; override if truss moved).
+set -eu
+cd "$(dirname "$0")"
+TRUSS_LIB="${TRUSS_LIB:-@TRUSS_LIB@}"
+CXX="${CXX:-clang++}"
+# the installed BMIs were built with clang + libc++: the script must match
+exec "$CXX" -std=c++26 -stdlib=libc++ \
+    -fmodule-file=truss="$TRUSS_LIB/truss.pcm" \
+    -fmodule-file=truss:api="$TRUSS_LIB/truss_api.pcm" \
+    truss.cpp "$TRUSS_LIB/libtruss.a" -o truss

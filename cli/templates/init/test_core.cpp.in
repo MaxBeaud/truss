@@ -1,0 +1,11 @@
+#include "@NAME@/core.hpp"
+
+#include <cstdio>
+
+int main() {
+    if (@IDENT@::greeting("truss") != "hello, truss!") {
+        std::fputs("greeting: unexpected result\n", stderr);
+        return 1;
+    }
+    std::puts("ok");
+}

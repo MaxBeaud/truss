@@ -625,3 +625,48 @@ merge_imports string round-trip, read_lines double-open).
 - Bench after QC: no-op 1 ms, clean 491 ms, incremental 275 ms.
   Suite: 96 cases / 556 assertions, examples + installed + amalgam green,
   docs zero warnings.
+
+## 24. Static linking, zig, cross targets, `truss init` (post phase 13)
+
+- **`static` is a keyword**: the per-dependency opt-in is `static_link()`.
+  Getters are `static_link_enabled()`/`static_deps_enabled()` because the
+  setters default their bool: `t.static_link()` on a non-const Target picks
+  the setter (compile error "Target not convertible to bool"). Same trap as
+  `unity()`.
+- `static_link()` on a SharedLib flips `kind_` to StaticLibrary (reversible via
+  `demoted_shared_`); every `kind()` consumer then just works.
+- `static_deps()`: SharedLib deps get a *static twin* archive (`lib<name>.a`
+  next to the `.so`, same PIC objects, extra `archive` edge only when some
+  static consumer reaches it). Libs route through `-Wl,-Bstatic ... -Bdynamic`
+  emitted BEFORE dynamic libs (GNU ld single pass); `detail::is_runtime_lib`
+  keeps c/m/pthread/dl/rt/... and the C++ runtime dynamic.
+- Verified on this box (clang 23.1.4, gcc 16.2.1, glibc): `-static-libstdc++
+  -static-libgcc` works for g++ and clang+libstdc++ (ldd: libc/libm only).
+  clang + libc++ `-static-libstdc++` swaps libc++ but NOT libc++abi (undefined
+  `__cxxabiv1::__si_class_type_info`); the working recipe is driver
+  `-nostdlib++ -static-libgcc` + after-the-objects `-Wl,-Bstatic -lc++
+  -lc++abi -Wl,-Bdynamic` (link_exe puts `$flags $link` after `$in`).
+- `link_shared` rule takes `$soname_flag` (ELF `-Wl,-soname,`, macOS
+  `-Wl,-install_name,@rpath/`, Windows none). GNU-ld hardening flags
+  (`-z relro` ...) are gated by `detail::is_elf(os)` (unknown OS = ELF).
+- zig: `zig c++` is clang underneath (family Clang, `detail::is_zig` for the
+  differences): `-target <t>` (clang: `--target=<t>`), no `-stdlib=`, no
+  ccache launcher (any zig target disables it for the manifest — rules are
+  shared), `triple_dir` family part "zig". Zig is NOT installed on this box:
+  zig paths are covered by dry-run (`-n`) manifest tests only.
+- C driver for `.c` sources: `detail::c_driver` (clang++-19 -> clang-19,
+  `zig c++` -> `zig cc`, *-g++ -> *-gcc). The old exact-match on "clang++"
+  compiled C as C++ for any other spelling.
+- `#embed` (clang 23, C++26): works in constexpr char arrays, warns
+  `-Wc23-extensions` only under -Wpedantic (silenced locally). Paths resolve
+  relative to the including file (cli/). Templates must stay ASCII (bytes
+  >127 narrow into `char`).
+- `TRUSS_INSTALLED_BIN` is defined on the *CLI TU* only (truss.cpp), never on
+  the library: amalgam/vendored users don't carry the templates.
+- Review fixes: pipes are O_CLOEXEC (threads spawn concurrently in fetch_all /
+  scan-deps), write_file is temp+rename atomic, depends_on(Result) keeps the
+  error for build() (it used to drop it), fetch refuses '-'-prefixed
+  url/git/tag (git/curl option injection), `-j` uses from_chars, $CXX drives
+  the compiler family.
+- Tests: tests/unit/static_test.cpp (113 cases total). `./setup.sh installed`
+  now also runs installed-CLI `init` -> bootstrap.sh -> `./truss test`.

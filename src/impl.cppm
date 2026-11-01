@@ -168,6 +168,10 @@ Result<FlagSet> build_flags(const TargetTriple& triple, BuildMode mode,
                             std::span<const std::string> includes,
                             std::string_view user_flags);
 /// Build the link flag strings (sanitizers/LTO/hardening/stdlib/libs/frameworks).
+/// `static_libs` are linked through `-Wl,-Bstatic ... -Wl,-Bdynamic` (before the
+/// dynamic `libs`, so a static archive's own -l needs resolve to the right);
+/// `static_stdlib` adds the static C++ runtime flags (validated: Config errors
+/// for unsupported toolchain/stdlib combinations).
 /// \ingroup grp_internals
 Result<LinkFlags> link_flags(const TargetTriple& triple, BuildMode mode, DebugInfo debug,
                              Sanitizer sanitizer, Lto lto, Hardening hardening,
@@ -175,7 +179,43 @@ Result<LinkFlags> link_flags(const TargetTriple& triple, BuildMode mode, DebugIn
                              std::span<const std::string> libs,
                              std::span<const std::string> frameworks,
                              std::span<const std::string> framework_paths,
-                             std::string_view user_linker_flags);
+                             std::string_view user_linker_flags,
+                             std::span<const std::string> static_libs = {},
+                             StaticStdlib static_stdlib = StaticStdlib::Default);
+
+/// True for libraries of the C runtime family (c, m, pthread, dl, rt, ...) and
+/// the C++ runtime: static_deps() keeps them dynamic (glibc does not support
+/// mixing a static libc piecemeal; the C++ runtime belongs to static_stdlib()).
+/// \ingroup grp_internals
+bool is_runtime_lib(std::string_view lib);
+
+/// True when the driver is zig (`zig c++`, `zig cc`, a path to zig).
+/// \ingroup grp_internals
+bool is_zig(const TargetTriple& t);
+
+/// True for object formats with GNU-ld semantics (-Bstatic, -z relro, -soname,
+/// $ORIGIN rpaths): Linux, FreeBSD, Android.
+/// \ingroup grp_internals
+bool is_elf(Os os);
+
+/// The C driver matching a C++ driver: clang++ -> clang, g++ -> gcc,
+/// x86_64-linux-musl-g++ -> x86_64-linux-musl-gcc, `zig c++` -> `zig cc`,
+/// paths and version suffixes preserved (clang++-19 -> clang-19). MSVC
+/// drivers compile both languages and are returned unchanged.
+/// \ingroup grp_internals
+std::string c_driver(std::string_view cxx);
+
+/// Arch/OS/ABI parsed from a target triple ("aarch64-linux-musl",
+/// "x86_64-unknown-linux-gnu", "x86_64-windows-gnu", "arm64-apple-macos").
+/// \ingroup grp_internals
+struct ParsedTarget {
+    Arch arch {Arch::Unknown}; ///< from the first component
+    Os os {Os::Unknown};       ///< first recognized OS component
+    std::string abi;           ///< environment component ("gnu", "musl", ...; "" if none)
+};
+/// Parse a target triple; unknown components stay Unknown / empty.
+/// \ingroup grp_internals
+ParsedTarget parse_target(std::string_view triple);
 
 /// "<arch>-<os>-<family>" build-dir component, e.g. "x64-linux-clang".
 /// \ingroup grp_internals

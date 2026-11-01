@@ -6,7 +6,29 @@
 // of the self-host graph.
 import truss;
 
+#ifdef TRUSS_INSTALLED_BIN
+#include <cstdio>
+#include <filesystem>
+#include <span>
+#include <string_view>
+
+#include "cli/init.hpp"
+#endif
+
 int main(int argc, char** argv) {
+#ifdef TRUSS_INSTALLED_BIN
+    /* installed binary: CLI verbs first; outside a truss checkout the
+     * self-build below has nothing to build */
+    const std::span<char* const> args(argv, static_cast<std::size_t>(argc));
+    if (args.size() >= 2 && std::string_view(args[1]) == "init")
+        return truss::cli::init(args.subspan(2));
+    if (std::error_code ec; !std::filesystem::exists("src/api.cppm", ec)) {
+        std::fputs("usage: truss init <project-name>   scaffold a new truss project\n"
+                   "       truss [debug|release] ...   (inside a truss checkout) rebuild truss\n",
+                   stderr);
+        return args.size() >= 2 ? 2 : 0;
+    }
+#endif
     truss::Project proj{"truss", argc, argv};
 
     /* vendored samurai (C17): samu.c excluded, its main() is replaced by
@@ -30,6 +52,17 @@ int main(int argc, char** argv) {
     proj.add_executable("truss")
         .sources("truss.cpp")
         .cpp_standard(truss::CppStandard::Cpp26)
+        .depends_on(lib);
+
+    /* the shippable binary: `truss init` compiled in, every dependency and
+     * the C++ runtime (libstdc++/libgcc) linked statically -> needs only
+     * glibc at runtime. Build just this one: ./truss release --target truss-dist */
+    proj.add_executable("truss-dist")
+        .sources("truss.cpp")
+        .cpp_standard(truss::CppStandard::Cpp26)
+        .defines("TRUSS_INSTALLED_BIN")
+        .static_deps()
+        .static_stdlib(truss::StaticStdlib::Gcc)
         .depends_on(lib);
     
     proj.compile_commands();

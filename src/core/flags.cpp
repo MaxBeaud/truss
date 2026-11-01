@@ -1,4 +1,5 @@
 module;
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <expected>
@@ -154,13 +155,109 @@ Result<void> require_supported(const TargetTriple& t) {
     if (t.family != CompilerFamily::Gcc && t.family != CompilerFamily::Clang &&
         t.family != CompilerFamily::Msvc)
         return std::unexpected(Error {Error::Kind::Toolchain, "unknown compiler family for target '" + t.compiler + "'"});
+    if (!t.target.empty() && t.family == CompilerFamily::Gcc)
+        return std::unexpected(Error {
+            Error::Kind::Config,
+            "target('" + t.target + "'): GCC cross-compiles through a target-prefixed driver, not a flag, e.g:\n"
+            "  correct:   Config().compiler(\"aarch64-linux-gnu-g++\")\n"
+            "  correct:   Config().toolchain(truss::Toolchain::Zig).target(\"aarch64-linux-gnu\")\n"
+            "  incorrect: Config().toolchain(truss::Toolchain::GCC).target(\"aarch64-linux-gnu\")",
+        });
     return {};
+}
+
+/* `-target` is zig's spelling; clang and clang-cl take `--target=` */
+std::string target_flag(const TargetTriple& t) {
+    if (t.target.empty())
+        return {};
+    return is_zig(t) ? "-target " + t.target : "--target=" + t.target;
+}
+
+/* Static C++ runtime flags (driver side / linker side, the latter placed
+ * after the libraries that need it). Mixing runtimes across objects is an
+ * ABI break, so every combination that would need a different stdlib than
+ * the one the objects were compiled against is a Config error. */
+Result<LinkFlags> static_stdlib_flags(const TargetTriple& t, StaticStdlib s) {
+    LinkFlags lf;
+    if (s == StaticStdlib::Default)
+        return lf;
+    if (t.family == CompilerFamily::Msvc || t.os == Os::MacOS)
+        return std::unexpected(Error {
+            Error::Kind::Config,
+            "static_stdlib() is not supported on MSVC/macOS targets yet (MSVC: use flags(\"/MT\"); "
+            "macOS ships no static libc++)",
+        });
+    const bool zig = is_zig(t);
+    switch (s) {
+    case StaticStdlib::Gcc:
+        if (zig || (t.family == CompilerFamily::Clang && t.stdlib == StdLib::Libcxx))
+            return std::unexpected(Error {
+                Error::Kind::Config,
+                "static_stdlib(Gcc) needs libstdc++, but this toolchain uses libc++ "
+                "(zig bundles libc++ only); use static_stdlib(truss::StaticStdlib::Llvm)",
+            });
+        lf.driver = "-static-libstdc++ -static-libgcc";
+        break;
+    case StaticStdlib::Llvm:
+        if (zig)
+            break; /* zig always links its libc++/libc++abi statically */
+        if (t.family != CompilerFamily::Clang || t.stdlib != StdLib::Libcxx)
+            return std::unexpected(Error {
+                Error::Kind::Config,
+                "static_stdlib(Llvm) needs every object compiled against libc++, e.g:\n"
+                "  correct:   proj.configure(Config().toolchain(truss::Toolchain::LLVM))\n"
+                "  correct:   proj.configure(Config().stdlib(truss::StdLib::Libcxx))   // clang\n"
+                "  incorrect: g++ / clang with its default stdlib",
+            });
+        /* clang's -static-libstdc++ only swaps libc++ and misses libc++abi
+         * (undefined __cxxabiv1 typeinfo): drop the default C++ link and
+         * name both archives explicitly, after the user's libraries */
+        lf.driver = "-nostdlib++ -static-libgcc";
+        lf.linker = "-Wl,-Bstatic -lc++ -lc++abi -Wl,-Bdynamic";
+        break;
+    case StaticStdlib::Musl:
+        if (!t.target.contains("musl") && !t.compiler.contains("musl"))
+            return std::unexpected(Error {
+                Error::Kind::Config,
+                "static_stdlib(Musl) produces a fully static musl binary and needs a musl toolchain, e.g:\n"
+                "  correct:   Config().toolchain(truss::Toolchain::Zig).target(\"x86_64-linux-musl\")\n"
+                "  correct:   Config().compiler(\"x86_64-linux-musl-g++\")\n"
+                "  incorrect: a glibc toolchain (static glibc breaks NSS/dlopen at runtime)",
+            });
+        lf.driver = "-static";
+        break;
+    case StaticStdlib::Default:
+        break;
+    }
+    return lf;
 }
 
 } // namespace
 
+bool is_elf(Os os) {
+    /* unknown hosts are assumed ELF (truss's historical default) */
+    return os != Os::MacOS && os != Os::Windows && os != Os::Emscripten;
+}
+
+bool is_runtime_lib(std::string_view lib) {
+    constexpr std::array<std::string_view, 14> kRuntime {
+        "c", "m", "pthread", "dl", "rt", "util", "resolv", "crypt",
+        "gcc_s", "gcc", "stdc++", "c++", "c++abi", "unwind",
+    };
+    return std::ranges::find(kRuntime, lib) != kRuntime.end();
+}
+
 std::string triple_dir(const TargetTriple& t) {
-    return std::string(arch_name(t.arch)) + "-" + std::string(os_name(t.os)) + "-" + std::string(family_name(t.family));
+    /* cross builds keep a non-default ABI apart (x64-linux-musl-zig vs
+     * x64-linux-zig), and zig gets its own family dir: same clang dialect,
+     * different bundled libc/libc++ */
+    std::string out = std::string(arch_name(t.arch)) + "-" + std::string(os_name(t.os));
+    if (!t.target.empty())
+        if (const std::string abi = parse_target(t.target).abi; !abi.empty() && abi != "gnu")
+            out += "-" + abi;
+    out += "-";
+    out += is_zig(t) ? std::string_view {"zig"} : family_name(t.family);
+    return out;
 }
 
 DebugInfo resolve_debug(BuildMode mode, DebugInfo debug) {
@@ -193,6 +290,7 @@ Result<FlagSet> build_flags(const TargetTriple& triple, BuildMode mode,
      * and GCC+libc++ is rejected earlier, so only clang gets it. */
     if (triple.stdlib != StdLib::Default && !msvc && triple.family == CompilerFamily::Clang)
         add_both(triple.stdlib == StdLib::Libcxx ? "-stdlib=libc++" : "-stdlib=libstdc++");
+    add_both(target_flag(triple));
     if (msvc) add_both("/utf-8 /EHsc /nologo");
     add_both(msvc ? kWarningFlagsMsvc[static_cast<std::size_t>(warnings)]
                   : kWarningFlags[static_cast<std::size_t>(warnings)]);
@@ -240,11 +338,18 @@ Result<LinkFlags> link_flags(const TargetTriple& triple, BuildMode mode, DebugIn
                              std::span<const std::string> libs,
                              std::span<const std::string> frameworks,
                              std::span<const std::string> framework_paths,
-                             std::string_view user_linker_flags) {
+                             std::string_view user_linker_flags,
+                             std::span<const std::string> static_libs,
+                             StaticStdlib static_stdlib) {
     if (auto r = require_supported(triple); !r)
         return std::unexpected(r.error());
 
+    auto runtime = static_stdlib_flags(triple, static_stdlib);
+    if (!runtime)
+        return std::unexpected(runtime.error());
+
     LinkFlags lf;
+    add(lf.driver, target_flag(triple));
     if (!triple.linker.empty())
         add(lf.driver, "-fuse-ld=" + triple.linker);
     const Hardening hard = resolve_hardening(hardening);
@@ -263,6 +368,12 @@ Result<LinkFlags> link_flags(const TargetTriple& triple, BuildMode mode, DebugIn
             add(lf.linker, "/DEBUG");
         for (const auto& p : link_paths) add(lf.linker, "/LIBPATH:" + p);
         for (const auto& l : libs) add(lf.linker, l + ".lib");
+        if (!static_libs.empty())
+            return std::unexpected(Error {
+                Error::Kind::Config,
+                "static_link()/static_deps() are not supported on MSVC targets (a .lib is "
+                "already either static or an import lib: pick the file with link_libs)",
+            });
         if (!frameworks.empty() || !framework_paths.empty())
             return std::unexpected(Error {
                 Error::Kind::Config, "link_frameworks/framework_paths are Apple-only and cannot be used on MSVC targets",
@@ -270,13 +381,31 @@ Result<LinkFlags> link_flags(const TargetTriple& triple, BuildMode mode, DebugIn
     } else {
         add(lf.driver, kSanitizerLinkFlags[static_cast<std::size_t>(sanitizer)]);
         add(lf.driver, kLtoLinkFlags[static_cast<std::size_t>(lto)]);
-        add(lf.driver, kHardeningLinkFlags[hi]);
+        /* -z relro/now/noexecstack + --as-needed are GNU ld (ELF) options:
+         * ld64 and the MinGW linker reject them */
+        if (is_elf(triple.os))
+            add(lf.driver, kHardeningLinkFlags[hi]);
         if (triple.stdlib != StdLib::Default && triple.family == CompilerFamily::Clang)
             add(lf.driver, triple.stdlib == StdLib::Libcxx ? "-stdlib=libc++" : "-stdlib=libstdc++");
+        add(lf.driver, runtime->driver);
         for (const auto& p : link_paths) add(lf.linker, "-L\"" + p + "\"");
         for (const auto& p : framework_paths) add(lf.linker, "-F\"" + p + "\"");
+        if (!static_libs.empty()) {
+            if (triple.os == Os::MacOS)
+                return std::unexpected(Error {
+                    Error::Kind::Config,
+                    "static_link()/static_deps(): macOS ld64 has no -Bstatic; link the .a by path "
+                    "instead, e.g. linker_flags(\"/opt/homebrew/lib/libz.a\")",
+                });
+            /* static archives first: their own -l needs resolve against the
+             * dynamic libraries to their right (GNU ld is single-pass) */
+            add(lf.linker, "-Wl,-Bstatic");
+            for (const auto& l : static_libs) add(lf.linker, "-l" + l);
+            add(lf.linker, "-Wl,-Bdynamic");
+        }
         for (const auto& l : libs) add(lf.linker, "-l" + l);
         for (const auto& f : frameworks) add(lf.linker, "-framework " + f);
+        add(lf.linker, runtime->linker);
     }
     add(lf.linker, user_linker_flags);
     return lf;

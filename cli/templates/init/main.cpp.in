@@ -1,0 +1,7 @@
+#include "@NAME@/core.hpp"
+
+#include <print>
+
+int main() {
+    std::println("{}", @IDENT@::greeting("@NAME@"));
+}

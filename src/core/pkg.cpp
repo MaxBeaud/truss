@@ -214,6 +214,17 @@ Result<void> validate_fetch(const std::string& pkg_name, const FetchOptions& opt
             Error::Kind::Config,
             "fetch('" + pkg_name + "'): set exactly one of git+tag or url+sha256",
         });
+    /* a leading '-' would be parsed as an option by git/curl (e.g.
+     * --upload-pack=<cmd>): URLs and refs never start with one */
+    for (const std::string* v : {&opts.git, &opts.tag, &opts.url})
+        if (v->starts_with('-'))
+            return std::unexpected(Error {
+                Error::Kind::Config, "fetch('" + pkg_name + "'): '" + *v + "' must not start with '-'",
+            });
+    if (opts.tag == "." || opts.tag == ".." || opts.tag.contains('\\'))
+        return std::unexpected(Error {
+            Error::Kind::Config, "fetch('" + pkg_name + "'): invalid tag '" + opts.tag + "'",
+        });
     if (use_git && opts.tag.empty())
         return std::unexpected(Error {Error::Kind::Config, "fetch('" + pkg_name + "'): git source needs a tag"});
     if (use_tarball && opts.sha256.empty())

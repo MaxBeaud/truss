@@ -20,6 +20,20 @@ import :impl;
 namespace truss::detail {
 namespace {
 
+int cloexec_pipe(int fds[2]) {
+#if defined(__APPLE__)
+    /* no pipe2 on macOS: the fork-window race is acceptable there (truss's
+     * concurrent spawners are Linux-first; posix_spawn on macOS is atomic) */
+    if (pipe(fds) != 0)
+        return -1;
+    fcntl(fds[0], F_SETFD, FD_CLOEXEC);
+    fcntl(fds[1], F_SETFD, FD_CLOEXEC);
+    return 0;
+#else
+    return pipe2(fds, O_CLOEXEC);
+#endif
+}
+
 Result<ProcOutcome> run_impl(std::span<const std::string> argv, int capture_mode,
                              const std::filesystem::path& cwd) {
     /* capture_mode: 0 = none, 1 = stdout+stderr merged, 2 = stdout only */
@@ -43,7 +57,15 @@ Result<ProcOutcome> run_impl(std::span<const std::string> argv, int capture_mode
         return std::unexpected(Error {Error::Kind::Config, "cannot spawn in cwd '" + path_str(cwd) + "'"});
     }
 
-    if (capture_mode && have_actions && pipe(pipe_fd) == 0) {
+    /* O_CLOEXEC: fetch_all and scan-deps spawn from several threads at once;
+     * an inheritable pipe end leaks into the sibling children, which then hold
+     * the write end open and delay this reader's EOF until they exit. The
+     * dup2 file action clears the flag on the child's stdout/stderr copy. */
+    if (capture_mode && have_actions && cloexec_pipe(pipe_fd) != 0) {
+        posix_spawn_file_actions_destroy(&actions);
+        return std::unexpected(Error {Error::Kind::Io, std::string("cannot create capture pipe: ") + std::strerror(errno)});
+    }
+    if (capture_mode && have_actions) {
         posix_spawn_file_actions_adddup2(&actions, pipe_fd[1], STDOUT_FILENO);
         if (capture_mode == 1)
             posix_spawn_file_actions_adddup2(&actions, pipe_fd[1], STDERR_FILENO);

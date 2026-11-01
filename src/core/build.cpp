@@ -1,6 +1,7 @@
 module;
 #include <algorithm>
 #include <array>
+#include <charconv>
 #include <chrono>
 #include <cstddef>
 #include <cstdlib>
@@ -14,6 +15,7 @@ module;
 #include <span>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <thread>
 #include <unordered_set>
 #include <utility>
@@ -62,6 +64,7 @@ struct ResolvedTarget {
     std::vector<detail::ModuleUnitInfo> units;       /* all sources, scanned */
     std::string objdir, output;                      /* relative to cwd */
     std::string implib;                              /* MSVC import lib for shared libs */
+    std::string static_twin;                         /* shared lib archived for static_deps() consumers */
 };
 
 /* name -> resolved target, built once per build (avoids repeated linear scans) */
@@ -87,45 +90,50 @@ void collect_bmis(const ResolvedTarget& r, const TargetIndex& idx,
  * so user static libs never leak private defines into consumers. */
 struct Usage {
     std::vector<std::string> includes, defines, link_paths, link_libs;
+    std::vector<std::string> static_link_libs; /* from Interface deps marked static_link() */
 };
 
-void collect_usage(const ResolvedTarget& r, const TargetIndex& idx,
-                   Usage& out, std::set<const Target*>& seen) {
-    if (!seen.insert(r.target).second)
-        return;
-    const bool interface = r.target->kind() == TargetKind::Interface;
-    
-    // Use local unordered_sets for O(1) deduplication instead of O(n) std::ranges::find
-    std::unordered_set<std::string> seen_includes(out.includes.begin(), out.includes.end());
-    std::unordered_set<std::string> seen_defines;
-    std::unordered_set<std::string> seen_link_paths;
-    std::unordered_set<std::string> seen_link_libs;
-    if (interface) {
-        seen_defines.insert(out.defines.begin(), out.defines.end());
-        seen_link_paths.insert(out.link_paths.begin(), out.link_paths.end());
-        seen_link_libs.insert(out.link_libs.begin(), out.link_libs.end());
+/* One walk per consumer; the dedupe sets live for the whole walk (rebuilding
+ * them from `out` at every recursion level made deep graphs quadratic). */
+class UsageWalk {
+public:
+    explicit UsageWalk(const TargetIndex& idx) : idx_(idx) {}
+
+    Usage run(const ResolvedTarget& r) {
+        visit(r);
+        return std::move(out_);
     }
-    
-    for (const auto& d : r.target->include_dirs())
-        if (seen_includes.insert(std::string(d)).second)
-            out.includes.push_back(std::string(d));
-    if (interface) {
-        for (const auto& d : r.target->defines())
-            if (seen_defines.insert(std::string(d)).second)
-                out.defines.push_back(std::string(d));
-        for (const auto& p : r.target->link_paths())
-            if (seen_link_paths.insert(std::string(p)).second)
-                out.link_paths.push_back(std::string(p));
-        for (const auto& l : r.target->link_libs())
-            if (seen_link_libs.insert(std::string(l)).second)
-                out.link_libs.push_back(std::string(l));
+
+private:
+    static void add(std::vector<std::string>& v, std::unordered_set<std::string>& seen, const std::string& x) {
+        if (seen.insert(x).second)
+            v.push_back(x);
     }
-    for (const Target* dep : r.target->deps()) {
-        const auto it = idx.find(dep->name());
-        if (it != idx.end())
-            collect_usage(*it->second, idx, out, seen);
+
+    void visit(const ResolvedTarget& r) {
+        if (!visited_.insert(r.target).second)
+            return;
+        for (const auto& d : r.target->include_dirs())
+            add(out_.includes, includes_, d);
+        if (r.target->kind() == TargetKind::Interface) {
+            for (const auto& d : r.target->defines())
+                add(out_.defines, defines_, d);
+            for (const auto& p : r.target->link_paths())
+                add(out_.link_paths, link_paths_, p);
+            auto& libs = r.target->static_link_enabled() ? out_.static_link_libs : out_.link_libs;
+            for (const auto& l : r.target->link_libs())
+                add(libs, link_libs_, l);
+        }
+        for (const Target* dep : r.target->deps())
+            if (const auto it = idx_.find(dep->name()); it != idx_.end())
+                visit(*it->second);
     }
-}
+
+    const TargetIndex& idx_;
+    Usage out_;
+    std::set<const Target*> visited_;
+    std::unordered_set<std::string> includes_, defines_, link_paths_, link_libs_;
+};
 
 Result<std::vector<std::string>> resolve_sources(const Target& t) {
     std::vector<std::string> files;
@@ -165,6 +173,11 @@ Result<std::vector<std::string>> resolve_sources(const Target& t) {
 Result<void> validate(const std::vector<std::unique_ptr<Target>>& targets) {
     for (const auto& t : targets) {
         const std::string& name = t->name();
+        if (const auto& err = t->deferred_error(); err) {
+            Error e = *err;
+            e.message = "target '" + name + "': depends_on() was given a failed result:\n" + e.message;
+            return std::unexpected(std::move(e));
+        }
         if (name.empty())
             return std::unexpected(Error {Error::Kind::Config, "target with an empty name"});
         if (name.find_first_of("/\\") != std::string::npos)
@@ -193,17 +206,22 @@ constexpr std::string_view obj_ext(CompilerFamily family) {
     return family == CompilerFamily::Msvc ? ".obj" : ".o";
 }
 
+/* Artifact naming follows the target OS (a zig/clang cross build to
+ * windows-gnu still wants app.exe), the lib prefix/.lib suffix the family. */
 std::string output_path_for(const Target& t, const std::filesystem::path& build_dir,
-                            const std::string& triple_dir, CompilerFamily family) {
-    const std::string name = t.name();
-    const bool msvc = family == CompilerFamily::Msvc;
+                            const std::string& triple_dir, const TargetTriple& triple) {
+    const std::string& name = t.name();
+    const bool msvc = triple.family == CompilerFamily::Msvc;
+    const bool windows = msvc || triple.os == Os::Windows;
     switch (t.kind()) {
     case TargetKind::Executable:
-        return (build_dir / "bin" / triple_dir / (name + (msvc ? ".exe" : ""))).generic_string();
+        return (build_dir / "bin" / triple_dir / (name + (windows ? ".exe" : ""))).generic_string();
     case TargetKind::StaticLibrary:
         return (build_dir / "lib" / triple_dir / (msvc ? name + ".lib" : "lib" + name + ".a")).generic_string();
-    case TargetKind::SharedLibrary:
-        return (build_dir / "lib" / triple_dir / (msvc ? name + ".dll" : "lib" + name + ".so")).generic_string();
+    case TargetKind::SharedLibrary: {
+        const std::string_view ext = windows ? ".dll" : triple.os == Os::MacOS ? ".dylib" : ".so";
+        return (build_dir / "lib" / triple_dir / ((msvc ? name : "lib" + name) + std::string(ext))).generic_string();
+    }
     case TargetKind::Interface:
         return {}; /* header-only: no artifact */
     }
@@ -237,6 +255,10 @@ Result<void> emit_manifest(const Project& proj, std::vector<ResolvedTarget>& res
     auto launcher = detail::resolve_launcher(proj.config());
     if (!launcher)
         return std::unexpected(launcher.error());
+    /* ccache/sccache do not recognize `zig c++` as a compiler: no launcher
+     * when any target compiles with zig (rules are shared by all targets) */
+    if (std::ranges::any_of(resolved, [](const ResolvedTarget& r) { return detail::is_zig(r.triple); }))
+        launcher->clear();
     const std::string launch = launcher->empty()
         ? std::string {}
         : (launcher->find(' ') == std::string::npos ? *launcher : "'" + *launcher + "'") + " ";
@@ -266,7 +288,8 @@ Result<void> emit_manifest(const Project& proj, std::vector<ResolvedTarget>& res
         {"description", "LINK $out"},
     });
     w.rule("link_shared", {
-        {"command", "$cxx -shared -Wl,-soname,$soname -o $out $in $flags $link"},
+        /* $soname_flag: -Wl,-soname (ELF), -Wl,-install_name (macOS), "" (Windows) */
+        {"command", "$cxx -shared $soname_flag -o $out $in $flags $link"},
         {"description", "LINK $out"},
     });
 
@@ -315,6 +338,29 @@ Result<void> emit_manifest(const Project& proj, std::vector<ResolvedTarget>& res
         });
     }
 
+    /* static twins: a SharedLib reached (transitively) by a static_deps()
+     * consumer also gets an archive over the same PIC objects — linked
+     * statically there, no recompilation */
+    {
+        std::set<const Target*> twins, walked;
+        const auto mark = [&](this const auto& self, const Target& t) -> void {
+            for (const Target* dep : t.deps()) {
+                if (!walked.insert(dep).second)
+                    continue;
+                if (dep->kind() == TargetKind::SharedLibrary)
+                    twins.insert(dep);
+                self(*dep);
+            }
+        };
+        for (const auto& r : resolved)
+            if (r.target->static_deps_enabled())
+                mark(*r.target);
+        for (auto& r : resolved)
+            if (twins.contains(r.target))
+                r.static_twin = (build_dir / "lib" / detail::triple_dir(r.triple) /
+                                 ("lib" + r.target->name() + ".a")).generic_string();
+    }
+
     std::vector<std::string> all_outputs;
     for (auto& r : resolved) {
         const Target& t = *r.target;
@@ -324,10 +370,12 @@ Result<void> emit_manifest(const Project& proj, std::vector<ResolvedTarget>& res
             continue;
         const bool msvc = r.triple.family == CompilerFamily::Msvc;
         const bool pic = t.pic() || t.kind() != TargetKind::Executable;
+        if (msvc && t.static_deps_enabled())
+            return std::unexpected(Error {
+                Error::Kind::Config, "target '" + t.name() + "': static_deps() is not supported on MSVC targets yet",
+            });
 
-        Usage usage;
-        std::set<const Target*> usage_seen;
-        collect_usage(r, by_name, usage, usage_seen);
+        const Usage usage = UsageWalk(by_name).run(r);
 
         std::vector<std::string> defines = t.defines();
         defines.insert(defines.end(), usage.defines.begin(), usage.defines.end());
@@ -557,6 +605,7 @@ Result<void> emit_manifest(const Project& proj, std::vector<ResolvedTarget>& res
             w.build(std::move(e));
             objects.push_back(obj);
         }
+        const std::string cc = detail::c_driver(r.triple.compiler);
         for (const auto& src : r.c_sources) {
             const std::string obj = r.objdir + "/" + src + obj_ext(r.triple.family);
             NinjaWriter::Edge e;
@@ -564,7 +613,7 @@ Result<void> emit_manifest(const Project& proj, std::vector<ResolvedTarget>& res
             e.rule = msvc ? "compile_c_msvc" : "compile_c";
             e.inputs = {src};
             e.vars = {
-                {"cc", r.triple.compiler == "clang++" ? "clang" : r.triple.compiler == "g++" ? "gcc" : r.triple.compiler},
+                {"cc", cc},
                 {"flags", cflags->compile_c},
             };
             if (!msvc)
@@ -579,6 +628,7 @@ Result<void> emit_manifest(const Project& proj, std::vector<ResolvedTarget>& res
          * need them. */
         std::vector<std::string> dep_outputs;
         bool has_shared_dep = false;
+        const bool static_consumer = t.static_deps_enabled();
         std::set<const Target*> dep_seen {&t};
         std::function<Result<void>(const Target&)> add_dep_outputs =
             [&](const Target& d) -> Result<void> {
@@ -593,12 +643,16 @@ Result<void> emit_manifest(const Project& proj, std::vector<ResolvedTarget>& res
                         Error::Kind::Config,
                         "target '" + d.name() + "' depends on unknown target '" + dep->name() + "'",
                     });
-                /* MSVC links against a dll's import lib, never the dll */
-                dep_outputs.push_back(msvc && dep->kind() == TargetKind::SharedLibrary
-                                          ? it->second->implib
-                                          : it->second->output);
-                if (dep->kind() == TargetKind::SharedLibrary)
+                /* MSVC links against a dll's import lib, never the dll;
+                 * static_deps() consumers link a shared lib's static twin */
+                if (dep->kind() != TargetKind::SharedLibrary)
+                    dep_outputs.push_back(it->second->output);
+                else if (static_consumer)
+                    dep_outputs.push_back(it->second->static_twin);
+                else {
+                    dep_outputs.push_back(msvc ? it->second->implib : it->second->output);
                     has_shared_dep = true;
+                }
                 if (auto sub = add_dep_outputs(*dep); !sub)
                     return std::unexpected(sub.error());
             }
@@ -616,26 +670,45 @@ Result<void> emit_manifest(const Project& proj, std::vector<ResolvedTarget>& res
             w.build(std::move(e));
         } else {
             std::vector<std::string> extra_link;
-            if (has_shared_dep && !msvc) {
+            if (has_shared_dep && !msvc && r.triple.os != Os::Windows) {
                 /* exe lives in bin/<tdir>, shared libs in lib/<tdir>;
                  * single-quote $ORIGIN so the shell passes it through to ld.
                  * (Windows has no rpath: dlls are found next to the exe.) */
-                extra_link.push_back("-Wl,-rpath,'$ORIGIN'/../../lib/" + detail::triple_dir(r.triple));
+                const std::string origin = r.triple.os == Os::MacOS ? "@loader_path" : "'$ORIGIN'";
+                extra_link.push_back("-Wl,-rpath," + origin + "/../../lib/" + detail::triple_dir(r.triple));
             }
             std::vector<std::string> link_paths = t.link_paths();
             link_paths.insert(link_paths.end(), usage.link_paths.begin(), usage.link_paths.end());
-            std::vector<std::string> link_libs = t.link_libs();
-            link_libs.insert(link_libs.end(), usage.link_libs.begin(), usage.link_libs.end());
+            /* static_deps() routes every library through -Bstatic except the C
+             * runtime family; static_link() Interface deps always do */
+            std::vector<std::string> link_libs, static_libs;
+            const auto route = [&](const std::string& lib, bool want_static) {
+                (want_static && !detail::is_runtime_lib(lib) ? static_libs : link_libs).push_back(lib);
+            };
+            for (const auto& l : t.link_libs()) route(l, static_consumer);
+            for (const auto& l : usage.link_libs) route(l, static_consumer);
+            for (const auto& l : usage.static_link_libs) route(l, true);
             auto link_res = detail::link_flags(r.triple, proj.mode(), t.debug_info(), t.sanitizer(),
                                                t.lto(), t.hardening(), link_paths, link_libs,
                                                t.frameworks(),
-                                               t.framework_paths(), t.linker_flags());
+                                               t.framework_paths(), t.linker_flags(),
+                                               static_libs, t.static_stdlib());
             if (!link_res)
                 return std::unexpected(link_res.error());
             std::string link = link_res->linker;
             for (const auto& x : extra_link) link += " " + x;
 
             const bool shared = t.kind() == TargetKind::SharedLibrary;
+            if (!r.static_twin.empty()) {
+                /* the twin archives this target's own objects only: its deps'
+                 * artifacts reach the consumer's link through the dep walk */
+                NinjaWriter::Edge twin;
+                twin.outputs = {r.static_twin};
+                twin.rule = "archive";
+                twin.inputs = objects;
+                twin.vars = {{"ar", r.triple.ar}};
+                w.build(std::move(twin));
+            }
             NinjaWriter::Edge e;
             e.outputs = {r.output};
             e.rule = msvc ? (shared ? "link_shared_msvc" : "link_exe_msvc")
@@ -655,7 +728,10 @@ Result<void> emit_manifest(const Project& proj, std::vector<ResolvedTarget>& res
                     e.implicit_outs = {r.implib}; /* the import lib the linker writes */
                 } else {
                     const std::string soname = std::filesystem::path(r.output).filename().generic_string();
-                    e.vars.emplace_back("soname", soname);
+                    if (r.triple.os == Os::MacOS)
+                        e.vars.emplace_back("soname_flag", "-Wl,-install_name,@rpath/" + soname);
+                    else if (detail::is_elf(r.triple.os))
+                        e.vars.emplace_back("soname_flag", "-Wl,-soname," + soname);
                 }
             }
             w.build(std::move(e));
@@ -725,8 +801,9 @@ Project::Project(std::string name, std::span<char* const> argv) : name_(std::mov
         else if (a == "--explain") explain_ = true;
         else if (a == "-j" || a == "--jobs") {
             if (++i >= argv.size()) { cli_error_ = Error {Error::Kind::Config, "-j requires a number"}; continue; }
-            jobs_ = std::atoi(argv[i]);
-            if (jobs_ <= 0)
+            const std::string_view n = argv[i];
+            const auto [end, ec] = std::from_chars(n.data(), n.data() + n.size(), jobs_);
+            if (ec != std::errc {} || end != n.data() + n.size() || jobs_ <= 0)
                 cli_error_ = Error {Error::Kind::Config, "-j requires a positive number"};
         }
         else if (a == "--target") {
@@ -771,7 +848,7 @@ std::filesystem::path Project::build_dir() const {
 Result<void> Project::compile_commands(const std::filesystem::path& path) {
     // If path is a directory, use compile_commands.json inside it
     auto output_path = path;
-    if (std::filesystem::is_directory(path)) {
+    if (std::error_code dir_ec; std::filesystem::is_directory(path, dir_ec)) {
         output_path = path / "compile_commands.json";
     }
     
@@ -920,7 +997,7 @@ Result<void> Project::build() {
                 "implemented for MSVC targets (it relies on clang's -fmodule-output/-fmodule-file)",
             });
 
-        r.output = output_path_for(*t, bld, tdir, r.triple.family);
+        r.output = output_path_for(*t, bld, tdir, r.triple);
         if (r.triple.family == CompilerFamily::Msvc && t->kind() == TargetKind::SharedLibrary)
             r.implib = import_lib_path(r.output);
         resolved.push_back(std::move(r));
@@ -980,7 +1057,8 @@ Result<void> Project::build() {
             if (task == "reload") {
                 // reload: rebuild the truss executable and replace current binary
                 // Only works when truss.cpp exists in cwd (self-hosting scenario)
-                if (!std::filesystem::exists(cwd_ / "truss.cpp")) {
+                std::error_code ec;
+                if (!std::filesystem::exists(cwd_ / "truss.cpp", ec)) {
                     return std::unexpected(Error {
                         Error::Kind::Config,
                         "reload: truss.cpp not found. This command only works from the truss repository root."
@@ -1010,7 +1088,7 @@ Result<void> Project::build() {
                 }
 
                 // Verify the truss binary was built
-                if (truss_rt->output.empty() || !std::filesystem::exists(truss_rt->output)) {
+                if (truss_rt->output.empty() || !std::filesystem::exists(truss_rt->output, ec)) {
                     return std::unexpected(Error {
                         Error::Kind::Internal,
                         "reload: truss executable not found at " + truss_rt->output
@@ -1022,7 +1100,6 @@ Result<void> Project::build() {
                 // Instead, we rename the new binary over the old one atomically.
                 // The running process continues with the old inode (in memory),
                 // while the new file replaces it on disk.
-                std::error_code ec;
                 auto current_exe = std::filesystem::canonical("/proc/self/exe", ec);
                 if (ec || current_exe.empty()) {
                     return std::unexpected(Error {
@@ -1049,10 +1126,11 @@ Result<void> Project::build() {
                 // Make executable
                 std::filesystem::permissions(temp_path, std::filesystem::perms::owner_all, ec);
                 if (ec) {
-                    std::filesystem::remove(temp_path);
+                    const std::string why = ec.message();
+                    std::filesystem::remove(temp_path, ec);
                     return std::unexpected(Error {
                         Error::Kind::Io,
-                        "reload: failed to set permissions on temp binary: " + ec.message(),
+                        "reload: failed to set permissions on temp binary: " + why,
                         temp_path
                     });
                 }
@@ -1062,10 +1140,11 @@ Result<void> Project::build() {
                 // continues running from the old inode while the new file replaces it
                 std::filesystem::rename(temp_path, current_exe, ec);
                 if (ec) {
-                    std::filesystem::remove(temp_path);
+                    const std::string why = ec.message();
+                    std::filesystem::remove(temp_path, ec);
                     return std::unexpected(Error {
                         Error::Kind::Io,
-                        "reload: failed to replace binary: " + ec.message(),
+                        "reload: failed to replace binary: " + why,
                         current_exe
                     });
                 }

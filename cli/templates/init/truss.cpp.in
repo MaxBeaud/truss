@@ -1,0 +1,31 @@
+// @NAME@ — build script (truss: build your C++ using C++).
+//
+// Compile it once with ./bootstrap.sh, then:
+//   ./truss            build (debug)
+//   ./truss release    optimized build
+//   ./truss test       build + run the is_test() executables
+//   ./truss run        build + run the app
+import truss;
+
+int main(int argc, char** argv) {
+    truss::Project proj("@NAME@", argc, argv);
+
+    auto& core = proj.add_static_library("@NAME@-core")
+                     .include_dirs("include")
+                     .sources_in("src/core")
+                     .cpp_standard(truss::CppStandard::Cpp23);
+
+    proj.add_executable("@NAME@")
+        .sources_in("src/app")
+        .cpp_standard(truss::CppStandard::Cpp23)
+        .depends_on(core);
+
+    proj.add_executable("@NAME@-tests")
+        .sources_in("tests")
+        .cpp_standard(truss::CppStandard::Cpp23)
+        .depends_on(core)
+        .is_test();
+
+    proj.compile_commands();
+    return proj.build() ? 0 : 1;
+}

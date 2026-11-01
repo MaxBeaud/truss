@@ -9,20 +9,18 @@ import :api;
 import :impl;
 
 namespace truss::detail {
+namespace {
 
-std::string esc_value(std::string_view v) {
-    std::string out;
-    out.reserve(v.size());
+/* escaping appends straight into the manifest buffer: the emitter is the
+ * per-edge hot path, so no temporary string per token */
+void append_value(std::string& out, std::string_view v) {
     for (const char c : v) {
         if (c == '$') out += "$$";
         else out += c;
     }
-    return out;
 }
 
-std::string esc_path(std::string_view p) {
-    std::string out;
-    out.reserve(p.size());
+void append_path(std::string& out, std::string_view p) {
     for (const char c : p) {
         switch (c) {
         case '$': out += "$$"; break;
@@ -31,47 +29,80 @@ std::string esc_path(std::string_view p) {
         default: out += c; break;
         }
     }
+}
+
+void append_paths(std::string& out, const std::vector<std::string>& paths) {
+    for (const auto& p : paths) {
+        out += ' ';
+        append_path(out, p);
+    }
+}
+
+void append_binding(std::string& out, std::string_view key, std::string_view value, bool escape) {
+    out += "  ";
+    out += key;
+    out += " = ";
+    if (escape) append_value(out, value);
+    else out += value;
+    out += '\n';
+}
+
+} // namespace
+
+std::string esc_value(std::string_view v) {
+    std::string out;
+    out.reserve(v.size());
+    append_value(out, v);
+    return out;
+}
+
+std::string esc_path(std::string_view p) {
+    std::string out;
+    out.reserve(p.size());
+    append_path(out, p);
     return out;
 }
 
 void NinjaWriter::comment(std::string_view text) {
     buf_ += "# ";
-    buf_.append(text);
+    buf_ += text;
     buf_ += '\n';
 }
 
 void NinjaWriter::var(std::string_view name, std::string_view value) {
-    buf_ += std::string(name) + " = " + esc_value(value) + '\n';
+    buf_ += name;
+    buf_ += " = ";
+    append_value(buf_, value);
+    buf_ += '\n';
 }
 
 void NinjaWriter::rule(std::string_view name, std::vector<std::pair<std::string, std::string>> body) {
-    buf_ += "rule " + std::string(name) + '\n';
+    buf_ += "rule ";
+    buf_ += name;
+    buf_ += '\n';
     // NOTE: rule bodies carry ninja $placeholders verbatim — do not escape.
     for (const auto& [k, v] : body)
-        buf_ += "  " + k + " = " + v + '\n';
+        append_binding(buf_, k, v, false);
     buf_ += '\n';
 }
 
 void NinjaWriter::build(Edge e) {
     buf_ += "build";
-    for (const auto& out : e.outputs)
-        buf_ += " " + esc_path(out);
+    append_paths(buf_, e.outputs);
     if (!e.implicit_outs.empty()) {
         buf_ += " |";
-        for (const auto& out : e.implicit_outs)
-            buf_ += " " + esc_path(out);
+        append_paths(buf_, e.implicit_outs);
     }
-    buf_ += ": " + e.rule;
-    for (const auto& in : e.inputs)
-        buf_ += " " + esc_path(in);
+    buf_ += ": ";
+    buf_ += e.rule;
+    append_paths(buf_, e.inputs);
     if (!e.implicit_ins.empty()) {
         buf_ += " |";
-        for (const auto& in : e.implicit_ins)
-            buf_ += " " + esc_path(in);
+        append_paths(buf_, e.implicit_ins);
     }
     buf_ += '\n';
     for (const auto& [k, v] : e.vars)
-        buf_ += "  " + k + " = " + esc_value(v) + '\n';
+        append_binding(buf_, k, v, true);
     buf_ += '\n';
 }
 
@@ -85,8 +116,7 @@ void NinjaWriter::phony(std::string_view name, std::vector<std::string> ins) {
 
 void NinjaWriter::default_targets(std::vector<std::string> names) {
     buf_ += "default";
-    for (const auto& n : names)
-        buf_ += " " + esc_path(n);
+    append_paths(buf_, names);
     buf_ += '\n';
 }
 
