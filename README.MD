@@ -138,18 +138,21 @@ Windows hosts are on the roadmap (see [Status](#status--support-matrix)).
 | `--target NAME` | Build only this target (repeatable). |
 | `--build-dir PATH` | Relocate the build root (default `./build`). |
 | `--version` / `-V` | Print truss version and exit. |
+| `--help` / `-h` / `help` | Print the full usage and exit. |
+| `-- ARGS...` | Everything after `--` is passed to the program started by `run`. |
 
 Built-in tasks:
 
 | Task | What it does |
 |---|---|
 | `test` | Builds, then runs every target marked `.is_test()`. |
-| `run` | Builds, then runs the first executable target. |
+| `run` | Builds, then runs the first non-test executable (or the one named by `--target`), forwarding the arguments after `--`. |
 | `clean` | Deletes the mode's build dir. |
 | `compdb` | Writes `compile_commands.json` (via samurai's compdb tool). |
 | `reload` | Rebuilds the `truss` executable from source and replaces the current binary. Only works from the truss repository root. |
 
-Tasks are composable with modes and flags: `./truss release test -j8 -v`.
+Tasks are composable with modes and flags: `./truss release test -j8 -v`,
+`./truss run release --target server -- --port 8080`.
 
 ## The build script
 

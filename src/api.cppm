@@ -1082,7 +1082,8 @@ public:
      * \brief Parse truss's CLI from argv (span form).
      * \param name project name (used in messages and generated vcpkg.json)
      * \param argv full process argv; truss parses `debug|release`, tasks,
-     *             `-j`, `-v`, `-n`, `--explain`, `--target`, `--build-dir`
+     *             `-j`, `-v`, `-n`, `--explain`, `--target`, `--build-dir`,
+     *             `-h`/`--help`, and `--` (rest forwarded to `run`)
      *             (see README "Tasks & flags"); unknown options become a
      *             Config error reported by build().
      */
@@ -1243,6 +1244,7 @@ private:
     bool explain_ {false};
     std::vector<std::string> requested_tasks_;
     std::vector<std::string> only_targets_;
+    std::vector<std::string> run_args_; /* after `--`, forwarded by run */
     std::optional<std::filesystem::path> build_root_;
     std::optional<Error> cli_error_;
     std::vector<std::string> subdir_target_names_; /* created by add_subdirectory */

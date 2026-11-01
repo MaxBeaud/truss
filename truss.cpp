@@ -22,11 +22,14 @@ int main(int argc, char** argv) {
     const std::span<char* const> args(argv, static_cast<std::size_t>(argc));
     if (args.size() >= 2 && std::string_view(args[1]) == "init")
         return truss::cli::init(args.subspan(2));
+    const bool want_help = args.size() >= 2
+        && (std::string_view(args[1]) == "-h" || std::string_view(args[1]) == "--help"
+            || std::string_view(args[1]) == "help");
     if (std::error_code ec; !std::filesystem::exists("src/api.cppm", ec)) {
         std::fputs("usage: truss init <project-name>   scaffold a new truss project\n"
                    "       truss [debug|release] ...   (inside a truss checkout) rebuild truss\n",
-                   stderr);
-        return args.size() >= 2 ? 2 : 0;
+                   want_help ? stdout : stderr);
+        return args.size() >= 2 && !want_help ? 2 : 0;
     }
 #endif
     truss::Project proj{"truss", argc, argv};

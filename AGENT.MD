@@ -99,7 +99,9 @@ Read `PLAN.MD` first. This file is the rulebook for any agent/human modifying th
 - Build dirs: default `build/debug/` and `build/release/`, overridable via
   `--build-dir` / Project options. Packages: `build/<mode>/packages/`.
 - CLI contract: `./truss [debug|release] [tasks...] [-j N] [-v] [--target NAME]
-  [--build-dir PATH]`; built-ins `test`, `run`, `clean`, `compdb`; unknown ⇒ user task.
+  [--build-dir PATH] [-- ARGS...]`; built-ins `test`, `run`, `clean`, `compdb`, `reload`;
+  `-h`/`--help`/`help` print `kHelp` (build.cpp) and exit; unknown ⇒ user task.
+  `run` honours `--target` and forwards the args after `--`.
 - Compiler flag enums map through constexpr tables in `flags.cpp`; GCC + Clang complete,
   MSVC stubs return a `Toolchain` "not yet supported" `Error` (never silent wrong flags).
 

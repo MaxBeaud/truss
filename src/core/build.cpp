@@ -784,6 +784,37 @@ Target& Target::depends_on(const Target& dep) {
 
 /* --- Project ------------------------------------------------------------ */
 
+constexpr std::string_view kHelp =
+    "usage: truss [debug|release] [task...] [options] [-- program-args...]\n"
+    "\n"
+    "modes (default: debug):\n"
+    "  debug            -O0 -g, assertions on; outputs in build/debug/\n"
+    "  release          optimized, NDEBUG; outputs in build/release/\n"
+    "\n"
+    "tasks (default: build everything):\n"
+    "  test             build and run every test executable\n"
+    "  run              build and run an executable (pick one with --target)\n"
+    "  clean            remove the mode's build directory\n"
+    "  compdb           write compile_commands.json\n"
+    "  reload           rebuild the truss binary (truss checkout only)\n"
+    "  <name>           any task registered with proj.task(name, fn)\n"
+    "\n"
+    "options:\n"
+    "  -j, --jobs N     parallel jobs (default: CPU count)\n"
+    "  -v, --verbose    print full command lines\n"
+    "  -n, --dry-run    show what would run without running it\n"
+    "      --explain    explain why each step is rebuilt\n"
+    "      --target NAME  build (or run) only NAME; repeatable\n"
+    "      --build-dir PATH  build root (default: build)\n"
+    "  -V, --version    print the truss version\n"
+    "  -h, --help       show this help\n"
+    "  --               pass the remaining arguments to the program started by run\n"
+    "\n"
+    "examples:\n"
+    "  truss release run -- --port 8080\n"
+    "  truss test -j 8\n"
+    "  truss run --target server\n";
+
 Project::Project(std::string name, std::span<char* const> argv) : name_(std::move(name)) {
     std::error_code ec;
     cwd_ = std::filesystem::current_path(ec);
@@ -814,6 +845,15 @@ Project::Project(std::string name, std::span<char* const> argv) : name_(std::mov
             if (++i >= argv.size()) { cli_error_ = Error {Error::Kind::Config, "--build-dir requires a path"}; continue; }
             build_root_ = argv[i];
         }
+        else if (a == "--") {
+            /* everything after `--` goes to the program started by `run` */
+            for (++i; i < argv.size(); ++i)
+                run_args_.emplace_back(argv[i]);
+        }
+        else if (a == "-h" || a == "--help" || a == "help") {
+            std::fputs(kHelp.data(), stdout);
+            std::exit(0);
+        }
         else if (a == "--version" || a == "-V") {
             std::printf("truss %.*s\n", static_cast<int>(kVersion.size()), kVersion.data());
             std::exit(0);
@@ -821,9 +861,7 @@ Project::Project(std::string name, std::span<char* const> argv) : name_(std::mov
         else if (a.starts_with('-')) {
             cli_error_ = Error {
                 Error::Kind::Config,
-                "unknown option '" + std::string(a) + "'\n"
-                "usage: truss [debug|release] [task...] [-j N] [-v] [-n] [--explain] [--target NAME] [--build-dir PATH]\n"
-                "tasks: test, run, clean, compdb, reload, or any task defined with proj.task(...)",
+                "unknown option '" + std::string(a) + "' (see truss --help)",
             };
         }
         else requested_tasks_.emplace_back(a);
@@ -911,7 +949,7 @@ Result<void> Project::build() {
 
     /* user tasks must not shadow built-ins */
     for (const auto& [name, fn] : user_tasks_)
-        if (name == "test" || name == "run" || name == "clean" || name == "compdb" || name == "reload")
+        if (name == "test" || name == "run" || name == "clean" || name == "compdb" || name == "reload" || name == "help")
             return std::unexpected(Error {Error::Kind::Config, "user task '" + name + "' shadows a built-in task"});
 
     /* project-wide toolchain: Config overlaid on the host triple (per-target
@@ -1183,15 +1221,26 @@ Result<void> Project::build() {
             }
 
             if (task == "run") {
-                std::vector<std::string> exe_outputs;
-                for (const auto& r : resolved)
-                    if (r.target->kind() == TargetKind::Executable && !r.target->is_test_target())
-                        exe_outputs.push_back(r.output);
+                /* --target narrows the candidates; otherwise the first
+                 * declared executable runs */
+                std::vector<std::string> exe_outputs, exe_names;
+                for (const auto& r : resolved) {
+                    if (r.target->kind() != TargetKind::Executable || r.target->is_test_target())
+                        continue;
+                    if (!only_targets_.empty() && std::ranges::find(only_targets_, r.target->name()) == only_targets_.end())
+                        continue;
+                    exe_outputs.push_back(r.output);
+                    exe_names.push_back(r.target->name());
+                }
                 if (exe_outputs.empty())
                     return std::unexpected(Error {Error::Kind::Config, "no executable to run (test executables are excluded)"});
-                if (auto r = run_samu(exe_outputs); !r)
+                if (exe_outputs.size() > 1)
+                    log::info("running '" + exe_names.front() + "' (" + std::to_string(exe_outputs.size())
+                              + " executables; pick one with --target NAME)");
+                if (auto r = run_samu(std::span(exe_outputs).first(1)); !r)
                     return r;
-                const std::array argv {exe_outputs.front()};
+                std::vector<std::string> argv {exe_outputs.front()};
+                argv.insert(argv.end(), run_args_.begin(), run_args_.end());
                 auto outcome = detail::run_process(argv, false);
                 if (!outcome)
                     return std::unexpected(outcome.error());
