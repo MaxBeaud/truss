@@ -672,3 +672,23 @@ merge_imports string round-trip, read_lines double-open).
   the compiler family.
 - Tests: tests/unit/static_test.cpp (113 cases total). `./setup.sh installed`
   now also runs installed-CLI `init` -> bootstrap.sh -> `./truss test`.
+
+## 25. CLI quick wins + build-script self-rebuild
+
+- `-h`/`--help`/`help` print `kHelp` (build.cpp) and exit 0; `help` is a
+  reserved task name. `--` forwards the rest of argv to `run`; `run` honours
+  `--target` and builds only the executable it starts.
+- Self-rebuild (`refresh_build_script`, Project ctor, nob-style): compares
+  `<exe dir>/truss.cpp` with the running executable (`/proc/self/exe`, else
+  argv[0]). Newer script + `bootstrap.sh` present ⇒ run it in that dir, set
+  `TRUSS_REBUILT=1`, `execv` with the same argv. No bootstrap.sh ⇒ Config
+  error through `cli_error_` (reported by build()). Still newer after a
+  re-exec (clock skew) ⇒ warning, no loop. `TRUSS_NO_REBUILD=1` disables it.
+  Executables without a truss.cpp next to them (unit tests, installed CLI)
+  are untouched. Not compared: headers the script includes, libtruss/BMIs.
+- Motivation (user feedback): a stale `./truss` built the old graph silently;
+  with a system copy of the new dependency's headers, only the link failed,
+  pointing away from the cause. bootstrap.sh now prints
+  `bootstrap: rebuilt ./truss from truss.cpp`.
+- `./setup.sh installed` touches the init project's truss.cpp and checks the
+  rebuild happened.

@@ -161,6 +161,14 @@ you declare targets, and `proj.build()` generates the manifest and runs the
 build. Everything returns `truss::Result<T>` (a `std::expected<T, Error>`) —
 no exceptions.
 
+**The script rebuilds itself.** On startup, when `truss.cpp` (next to the
+executable) is newer than the executable, truss runs `bootstrap.sh` from the
+same directory and re-executes with the same arguments, so an edited script
+never builds a stale graph. Without a `bootstrap.sh` it stops with an error
+asking for a rebuild instead. `TRUSS_NO_REBUILD=1` turns the check off.
+Only `truss.cpp` is compared: after editing a header it includes, or upgrading
+truss, run `./bootstrap.sh` yourself.
+
 ### Targets
 
 | Factory | Artifact (GCC/Clang) | Artifact (MSVC) |

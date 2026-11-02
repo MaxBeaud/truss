@@ -3,8 +3,10 @@ module;
 #include <array>
 #include <charconv>
 #include <chrono>
+#include <cerrno>
 #include <cstddef>
 #include <cstdlib>
+#include <cstring>
 #include <expected>
 #include <filesystem>
 #include <functional>
@@ -20,6 +22,8 @@ module;
 #include <unordered_set>
 #include <utility>
 #include <vector>
+
+#include <unistd.h>
 
 module truss;
 import :api;
@@ -784,6 +788,72 @@ Target& Target::depends_on(const Target& dep) {
 
 /* --- Project ------------------------------------------------------------ */
 
+namespace {
+
+/* Path of the running executable: /proc/self/exe, else argv[0] when it is a path. */
+std::filesystem::path self_exe(std::span<char* const> argv) {
+    std::error_code ec;
+    if (auto p = std::filesystem::canonical("/proc/self/exe", ec); !ec)
+        return p;
+    if (!argv.empty() && argv[0] != nullptr && std::string_view(argv[0]).find('/') != std::string_view::npos)
+        if (auto p = std::filesystem::canonical(argv[0], ec); !ec)
+            return p;
+    return {};
+}
+
+/* nob-style self-rebuild: when the build script (truss.cpp next to the
+ * executable) is newer than the executable, a stale build graph would be
+ * generated — run bootstrap.sh and re-exec with the same argv. Without a
+ * bootstrap.sh, report it (via build()) instead of building the stale graph.
+ * TRUSS_NO_REBUILD=1 disables the check; TRUSS_REBUILT guards the re-exec loop. */
+std::optional<Error> refresh_build_script(std::span<char* const> argv) {
+    if (const char* off = std::getenv("TRUSS_NO_REBUILD"); off != nullptr && *off != '\0' && *off != '0')
+        return std::nullopt;
+    const auto exe = self_exe(argv);
+    if (exe.empty())
+        return std::nullopt;
+    const auto dir = exe.parent_path();
+    const auto script = dir / "truss.cpp";
+    std::error_code ec;
+    const auto script_time = std::filesystem::last_write_time(script, ec);
+    if (ec)
+        return std::nullopt; /* not a build-script executable (tests, installed CLI) */
+    const auto exe_time = std::filesystem::last_write_time(exe, ec);
+    if (ec || script_time <= exe_time)
+        return std::nullopt;
+
+    const auto bootstrap = dir / "bootstrap.sh";
+    if (std::getenv("TRUSS_REBUILT") != nullptr) {
+        log::warn("truss.cpp still looks newer than " + exe.string() + " after a rebuild (clock skew?); continuing");
+        return std::nullopt;
+    }
+    if (!std::filesystem::is_regular_file(bootstrap, ec))
+        return Error {
+            Error::Kind::Config,
+            "build script is stale: " + script.string() + " is newer than " + exe.string()
+                + "\nrebuild it first (no bootstrap.sh next to it), or set TRUSS_NO_REBUILD=1 to use it anyway",
+            script,
+        };
+
+    log::info("truss.cpp changed: rebuilding " + exe.filename().string() + " (bootstrap.sh)");
+    const std::array cmd {std::string("sh"), bootstrap.string()};
+    auto outcome = detail::run_process(cmd, false, dir);
+    if (!outcome)
+        return outcome.error();
+    if (outcome->exit_code != 0)
+        return Error {Error::Kind::Command, "rebuilding the build script failed (bootstrap.sh exited with "
+                                                + std::to_string(outcome->exit_code) + ")"};
+
+    /* execv needs a NULL-terminated array; argv spans need not be */
+    std::vector<char*> args(argv.begin(), argv.end());
+    args.push_back(nullptr);
+    ::setenv("TRUSS_REBUILT", "1", 1);
+    ::execv(exe.c_str(), args.data());
+    return Error {Error::Kind::Io, "re-exec of the rebuilt build script failed: " + std::string(std::strerror(errno))};
+}
+
+} // namespace
+
 constexpr std::string_view kHelp =
     "usage: truss [debug|release] [task...] [options] [-- program-args...]\n"
     "\n"
@@ -816,6 +886,9 @@ constexpr std::string_view kHelp =
     "  truss run --target server\n";
 
 Project::Project(std::string name, std::span<char* const> argv) : name_(std::move(name)) {
+    if (auto stale = refresh_build_script(argv))
+        cli_error_ = std::move(*stale);
+
     std::error_code ec;
     cwd_ = std::filesystem::current_path(ec);
     if (ec) {

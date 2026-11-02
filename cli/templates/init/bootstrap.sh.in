@@ -7,7 +7,9 @@ cd "$(dirname "$0")"
 TRUSS_LIB="${TRUSS_LIB:-@TRUSS_LIB@}"
 CXX="${CXX:-clang++}"
 # the installed BMIs were built with clang + libc++: the script must match
-exec "$CXX" -std=c++26 -stdlib=libc++ \
+# ./truss runs this itself whenever truss.cpp is newer than it
+"$CXX" -std=c++26 -stdlib=libc++ \
     -fmodule-file=truss="$TRUSS_LIB/truss.pcm" \
     -fmodule-file=truss:api="$TRUSS_LIB/truss_api.pcm" \
     truss.cpp "$TRUSS_LIB/libtruss.a" -o truss
+echo "bootstrap: rebuilt ./truss from truss.cpp"

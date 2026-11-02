@@ -197,6 +197,13 @@ cmd_installed() {
     local cli="$PWD/$prefix/bin/truss"
     rm -rf "$scratch"; mkdir -p "$scratch"
     ( cd "$scratch" && "$cli" init demo-app && cd demo-app && ./bootstrap.sh && ./truss test )
+
+    # self-rebuild: an edited truss.cpp is recompiled (bootstrap.sh) + re-exec'd
+    local out
+    out=$(cd "$scratch/demo-app" && sleep 1 && touch truss.cpp && ./truss test 2>&1)
+    printf '%s\n' "$out"
+    [[ $out == *"rebuilt ./truss from truss.cpp"* ]] \
+        || { echo "setup: stale build script was not rebuilt" >&2; return 1; }
 }
 
 # --- dist: portable truss binary via the self-host graph ------------------------
