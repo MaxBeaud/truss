@@ -149,7 +149,9 @@ run_example() {
 cmd_examples() {
     cmd_bootstrap
     run_example hello test
-    run_example hello stats
+    run_example hello task stats
+    ( cd examples/hello && ./truss task list | grep -q "stats  count the files" ) \
+        || { echo "setup: './truss task list' did not list 'stats'" >&2; return 1; }
     run_example shared test
     run_example modules test
     run_example fetch test

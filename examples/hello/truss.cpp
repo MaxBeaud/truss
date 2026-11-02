@@ -26,8 +26,8 @@ int main(int argc, char** argv) {
         .depends_on(core)
         .is_test();
 
-    // Scripting-helper showcase: ./truss stats
-    proj.task("stats", [](const truss::TaskContext&) -> truss::Result<void> {
+    // Scripting-helper showcase: ./truss task stats
+    proj.task("stats", "count the files and bytes under src/", [](const truss::TaskContext&) -> truss::Result<void> {
         std::size_t files = 0;
         std::uint64_t bytes = 0;
         for (const auto& f : truss::fs::walk("src")) {

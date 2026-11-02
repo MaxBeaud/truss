@@ -150,6 +150,8 @@ Built-in tasks:
 | `clean` | Deletes the mode's build dir. |
 | `compdb` | Writes `compile_commands.json` (via samurai's compdb tool). |
 | `reload` | Rebuilds the `truss` executable from source and replaces the current binary. Only works from the truss repository root. |
+| `task NAME` | Builds, then runs a task registered with `proj.task(...)` (see [Custom tasks](#custom-tasks)). |
+| `task list` | Lists the registered tasks with their descriptions; builds nothing. |
 
 Tasks are composable with modes and flags: `./truss release test -j8 -v`,
 `./truss run release --target server -- --port 8080`.
@@ -360,16 +362,29 @@ ship only the `.so`.
 
 ### Custom tasks
 
-`proj.task(name, fn)` registers `./truss <name>`:
+`proj.task(name, description, fn)` registers `./truss task <name>`; the
+description is optional and shown by `./truss task list`:
 
 ```cpp
-proj.task("hello", [](const truss::TaskContext& ctx) -> truss::Result<void> {
+proj.task("hello", "print the task context", [](const truss::TaskContext& ctx) -> truss::Result<void> {
     std::printf("[TASK] project=%s mode=%s build_dir=%s\n", ctx.project.c_str(),
                 ctx.mode == truss::BuildMode::Debug ? "debug" : "release",
                 ctx.build_dir.string().c_str());
     return {};
 });
 ```
+
+```text
+$ ./truss task list
+tasks (run with ./truss task <name>):
+  hello  print the task context
+$ ./truss release task hello -j8   # builds first, then runs the task
+```
+
+User tasks have their own namespace, so a task may be called `test` or `run`
+without clashing with the built-ins. Typing a task name without `task`
+(`./truss hello`) is an error that points to the right command; `list` is a
+reserved name and registering a name twice is a Config error.
 
 `TaskContext` carries the project name, mode, build dir, cwd, and job count.
 

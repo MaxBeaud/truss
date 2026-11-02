@@ -21,8 +21,8 @@ int main(int argc, char** argv) {
         .depends_on(greet)
         .is_test();
 
-    // User-defined task: `./truss hello`
-    proj.task("hello", [](const truss::TaskContext& ctx) -> truss::Result<void> {
+    // User-defined task: `./truss task hello`
+    proj.task("hello", "print the task context", [](const truss::TaskContext& ctx) -> truss::Result<void> {
         std::printf("[TASK] project=%s mode=%s build_dir=%s\n", ctx.project.c_str(),
                     ctx.mode == truss::BuildMode::Debug ? "debug" : "release",
                     ctx.build_dir.string().c_str());

@@ -2,6 +2,8 @@ module;
 #include <doctest/doctest.h>
 
 #include <filesystem>
+#include <memory>
+#include <span>
 #include <chrono>
 #include <expected>
 #include <string>
@@ -242,6 +244,72 @@ TEST_CASE("hooks: pre_build/post_build run in order around the build") {
     auto r = proj.build();
     REQUIRE(r.has_value());
     CHECK(log == std::vector<std::string> {"pre1", "pre2", "post"});
+}
+
+TEST_CASE("tasks: `task NAME` runs a user task; the bare name is rejected with a hint") {
+    ScratchDir scratch {"tasks"};
+    REQUIRE(detail::write_file("tk/app.cpp", "int main() { return 0; }\n").has_value());
+    int runs = 0;
+    const auto make = [&](std::span<char* const> argv) {
+        auto proj = std::make_unique<Project>("tasks", argv);
+        proj->add_executable("app").sources("tk/app.cpp");
+        proj->task("gen", "generate things", [&](const TaskContext&) { ++runs; return Result<void> {}; });
+        /* a user task may reuse a built-in's name: they live apart */
+        proj->task("test", [&](const TaskContext&) { runs += 10; return Result<void> {}; });
+        return proj;
+    };
+
+    char prog[] = "truss-tests", task[] = "task", gen[] = "gen", test[] = "test", nope[] = "nope";
+    {
+        char* argv[] = {prog, task, gen};
+        REQUIRE(make(argv)->build().has_value());
+        CHECK(runs == 1);
+    }
+    {
+        char* argv[] = {prog, task, test};
+        REQUIRE(make(argv)->build().has_value());
+        CHECK(runs == 11);
+    }
+    {
+        char* argv[] = {prog, gen};
+        auto r = make(argv)->build();
+        REQUIRE_FALSE(r.has_value());
+        CHECK(r.error().message.find("./truss task gen") != std::string::npos);
+        CHECK(runs == 11);
+    }
+    {
+        char* argv[] = {prog, task, nope};
+        auto r = make(argv)->build();
+        REQUIRE_FALSE(r.has_value());
+        CHECK(r.error().message.find("task list") != std::string::npos);
+    }
+}
+
+TEST_CASE("tasks: `task list` builds nothing; reserved and duplicate names are errors") {
+    ScratchDir scratch {"tasks-list"};
+    char prog[] = "truss-tests", task[] = "task", list[] = "list";
+    {
+        char* argv[] = {prog, task, list};
+        Project proj {"tasks-list", argv};
+        proj.add_executable("app").sources("tl/missing.cpp"); /* would fail if built */
+        proj.task("gen", "generate things", [](const TaskContext&) { return Result<void> {}; });
+        CHECK(proj.build().has_value());
+    }
+    {
+        char* argv[] = {prog, task};
+        Project proj {"tasks-list", argv};
+        proj.task("list", [](const TaskContext&) { return Result<void> {}; });
+        CHECK_FALSE(proj.build().has_value());
+    }
+    {
+        char* argv[] = {prog, task};
+        Project proj {"tasks-list", argv};
+        proj.task("gen", [](const TaskContext&) { return Result<void> {}; });
+        proj.task("gen", [](const TaskContext&) { return Result<void> {}; });
+        auto r = proj.build();
+        REQUIRE_FALSE(r.has_value());
+        CHECK(r.error().message.find("twice") != std::string::npos);
+    }
 }
 
 TEST_CASE("hooks: failing pre_build aborts before compiling") {

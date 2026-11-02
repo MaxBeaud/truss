@@ -5,6 +5,7 @@ module;
 #include <chrono>
 #include <cerrno>
 #include <cstddef>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <expected>
@@ -13,6 +14,7 @@ module;
 #include <iterator>
 #include <map>
 #include <memory>
+#include <ranges>
 #include <set>
 #include <span>
 #include <string>
@@ -881,7 +883,8 @@ constexpr std::string_view kHelp =
     "  clean            remove the mode's build directory\n"
     "  compdb           write compile_commands.json\n"
     "  reload           rebuild the truss binary (truss checkout only)\n"
-    "  <name>           any task registered with proj.task(name, fn)\n"
+    "  task NAME        build, then run a task registered with proj.task(...)\n"
+    "  task list        list the registered tasks with their descriptions\n"
     "\n"
     "options:\n"
     "  -j, --jobs N     parallel jobs (default: CPU count)\n"
@@ -951,6 +954,16 @@ Project::Project(std::string name, std::span<char* const> argv) : name_(std::mov
                 "unknown option '" + std::string(a) + "' (see truss --help)",
             };
         }
+        else if (a == "task") {
+            /* `task NAME` runs a user task; `task` / `task list` lists them */
+            if (i + 1 >= argv.size() || std::string_view(argv[i + 1]) == "list" || std::string_view(argv[i + 1]).starts_with('-')) {
+                list_tasks_ = true;
+                if (i + 1 < argv.size() && std::string_view(argv[i + 1]) == "list")
+                    ++i;
+            } else {
+                requested_tasks_.push_back("task:" + std::string(argv[++i]));
+            }
+        }
         else requested_tasks_.emplace_back(a);
     }
     
@@ -961,8 +974,8 @@ Project::Project(std::string name, std::span<char* const> argv) : name_(std::mov
 Project::Project(std::string name, int argc, char** argv)
     : Project(std::move(name), std::span<char* const>(argv, static_cast<std::size_t>(argc))) {}
 
-void Project::task(std::string name, TaskFn fn) {
-    user_tasks_.emplace_back(std::move(name), std::move(fn));
+void Project::task(std::string name, std::string description, TaskFn fn) {
+    user_tasks_.push_back({std::move(name), std::move(description), std::move(fn)});
 }
 
 std::filesystem::path Project::build_dir() const {
@@ -1015,6 +1028,35 @@ Result<void> Project::build() {
             cwd_,
         });
 
+    /* user task registry: checked first so `task list` reports it too */
+    for (std::size_t i = 0; i < user_tasks_.size(); ++i) {
+        const auto& name = user_tasks_[i].name;
+        Error bad {Error::Kind::Config, ""};
+        if (name.empty() || name == "list" || name.starts_with('-'))
+            bad.message = "invalid task name '" + name + "' (empty, 'list' and '-'-prefixed names are reserved)";
+        else if (std::ranges::any_of(user_tasks_ | std::views::take(i), [&](const UserTask& u) { return u.name == name; }))
+            bad.message = "task '" + name + "' is registered twice";
+        if (!bad.message.empty()) {
+            log::error(bad);
+            return std::unexpected(bad);
+        }
+    }
+
+    if (list_tasks_) {
+        if (user_tasks_.empty()) {
+            std::puts("no tasks defined (register one with proj.task(name, \"description\", fn))");
+            return {};
+        }
+        std::size_t width = 0;
+        for (const auto& u : user_tasks_)
+            width = std::max(width, u.name.size());
+        std::puts("tasks (run with ./truss task <name>):");
+        for (const auto& u : user_tasks_)
+            std::printf("  %-*s  %s\n", static_cast<int>(width), u.name.c_str(),
+                        u.description.empty() ? "" : u.description.c_str());
+        return {};
+    }
+
     std::vector<std::string> tasks = requested_tasks_;
     if (tasks.empty())
         tasks.push_back("build");
@@ -1033,11 +1075,6 @@ Result<void> Project::build() {
         log::error(r.error());
         return std::unexpected(r.error());
     }
-
-    /* user tasks must not shadow built-ins */
-    for (const auto& [name, fn] : user_tasks_)
-        if (name == "test" || name == "run" || name == "clean" || name == "compdb" || name == "reload" || name == "help")
-            return std::unexpected(Error {Error::Kind::Config, "user task '" + name + "' shadows a built-in task"});
 
     /* project-wide toolchain: Config overlaid on the host triple (per-target
      * cross_target() overrides completely) */
@@ -1336,13 +1373,26 @@ Result<void> Project::build() {
                 return {};
             }
 
-            const auto it = std::ranges::find(user_tasks_, task, [](const auto& p) -> const std::string& { return p.first; });
-            if (it != user_tasks_.end())
-                return it->second(ctx);
-
+            const auto find_user = [&](std::string_view name) {
+                return std::ranges::find(user_tasks_, name, &UserTask::name);
+            };
+            if (task.starts_with("task:")) {
+                const std::string_view name = std::string_view(task).substr(5);
+                if (const auto it = find_user(name); it != user_tasks_.end())
+                    return it->fn(ctx);
+                return std::unexpected(Error {
+                    Error::Kind::Config, "unknown task '" + std::string(name) + "' (see ./truss task list)",
+                });
+            }
+            if (find_user(task) != user_tasks_.end())
+                return std::unexpected(Error {
+                    Error::Kind::Config,
+                    "'" + task + "' is a user task: run it with ./truss task " + task,
+                });
             return std::unexpected(Error {
                 Error::Kind::Config,
-                "unknown task '" + task + "' (built-ins: test, run, clean, compdb, reload)",
+                "unknown command '" + task + "' (built-ins: test, run, clean, compdb, reload; "
+                    "user tasks: ./truss task list; see ./truss --help)",
             });
         }();
 

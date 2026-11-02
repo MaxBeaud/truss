@@ -1133,7 +1133,8 @@ public:
     /**
      * \brief Parse truss's CLI from argv (span form).
      * \param name project name (used in messages and generated vcpkg.json)
-     * \param argv full process argv; truss parses `debug|release`, tasks,
+     * \param argv full process argv; truss parses `debug|release`, built-in
+     *             tasks, `task NAME` / `task list`,
      *             `-j`, `-v`, `-n`, `--explain`, `--target`, `--build-dir`,
      *             `-h`/`--help`, and `--` (rest forwarded to `run`)
      *             (see README "Tasks & flags"); unknown options become a
@@ -1160,8 +1161,18 @@ public:
     SharedLib& add_shared_library(std::string name) { return add_target<SharedLib>(std::move(name)); }
     /// \copydoc add_executable
     Interface& add_interface_library(std::string name) { return add_target<Interface>(std::move(name)); }
-    /// Register a named task: `./truss <name>` builds first, then runs fn.
-    void task(std::string name, TaskFn fn);
+    /**
+     * \brief Register a named task: `./truss task <name>` builds first, then
+     * runs fn. `./truss task list` prints every task with its description.
+     * Task names live apart from the built-ins (`task test` is fine); `list`
+     * is reserved and duplicates are a Config error reported by build().
+     * \param name task name, as typed after `./truss task`
+     * \param description one line shown by `./truss task list`
+     * \param fn the task body
+     */
+    void task(std::string name, std::string description, TaskFn fn);
+    /// \copydoc task(std::string, std::string, TaskFn)
+    void task(std::string name, TaskFn fn) { task(std::move(name), {}, std::move(fn)); }
 
     /**
      * \brief Build hooks, run in registration order: pre_build fires once before
@@ -1284,7 +1295,11 @@ private:
     std::string name_;
     std::filesystem::path cwd_;
     std::vector<std::unique_ptr<Target>> targets_;
-    std::vector<std::pair<std::string, TaskFn>> user_tasks_;
+    struct UserTask {
+        std::string name, description;
+        TaskFn fn;
+    };
+    std::vector<UserTask> user_tasks_;
     std::vector<TaskFn> pre_build_, post_build_;
     Config config_;
 
@@ -1294,7 +1309,8 @@ private:
     bool verbose_ {false};
     bool dry_run_ {false};
     bool explain_ {false};
-    std::vector<std::string> requested_tasks_;
+    bool list_tasks_ {false};                   /* `task list` / bare `task` */
+    std::vector<std::string> requested_tasks_;  /* user tasks as "task:<name>" */
     std::vector<std::string> only_targets_;
     std::vector<std::string> run_args_; /* after `--`, forwarded by run */
     std::optional<std::filesystem::path> build_root_;

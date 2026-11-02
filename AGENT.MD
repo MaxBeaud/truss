@@ -100,7 +100,9 @@ Read `PLAN.MD` first. This file is the rulebook for any agent/human modifying th
   `--build-dir` / Project options. Packages: `build/<mode>/packages/`.
 - CLI contract: `./truss [debug|release] [tasks...] [-j N] [-v] [--target NAME]
   [--build-dir PATH] [-- ARGS...]`; built-ins `test`, `run`, `clean`, `compdb`, `reload`;
-  `-h`/`--help`/`help` print `kHelp` (build.cpp) and exit; unknown ⇒ user task.
+  `-h`/`--help`/`help` print `kHelp` (build.cpp) and exit. User tasks run via
+  `task NAME` (stored as `"task:NAME"` in requested_tasks_); `task` / `task list`
+  list them; a bare unknown word is an error (with a hint when it names a task).
   `run` honours `--target` and forwards the args after `--`.
 - Compiler flag enums map through constexpr tables in `flags.cpp`; GCC + Clang complete,
   MSVC stubs return a `Toolchain` "not yet supported" `Error` (never silent wrong flags).
@@ -708,3 +710,16 @@ merge_imports string round-trip, read_lines double-open).
 - Tests: flags_test (-isystem order), msvc_test (/external:I), usage_test
   (transitive app -> mid -> core with `-Wall -Werror` against a warning in a
   system header; private `flags()` must not leak). 116 cases.
+
+## 27. User tasks behind `./truss task`
+
+- `proj.task(name, description, fn)` (description optional); `UserTask`
+  struct replaces the pair. `./truss task NAME` runs one (repeatable:
+  `task a task b`), `./truss task [list]` prints name + description and
+  returns before validation/build. User task names no longer clash with
+  built-ins (the shadow check is gone); `list`, empty and `-`-prefixed names
+  and duplicates are Config errors raised at the top of build().
+- Bare `./truss NAME` matching a user task ⇒ error "run it with ./truss task NAME".
+- Tests: usage_test "tasks:" cases (118 total); setup.sh examples run
+  `task stats` and grep `task list`.
+
