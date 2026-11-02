@@ -79,6 +79,23 @@ TEST_CASE("flags: defines and includes") {
     CHECK(contains(r->compile, "-I\"include\""));
 }
 
+TEST_CASE("flags: system includes become -isystem after -I") {
+    const auto t = clang_triple();
+    const std::array<std::string, 0> none {};
+    const std::array<std::string, 1> incs {"include"};
+    const std::array<std::string, 1> sys {"third/include"};
+    auto r = detail::build_flags(t, BuildMode::Debug, CppStandard::Default, Warnings::Default,
+                                 DebugInfo::Default, Optimization::Default, Sanitizer::Default,
+                                 Lto::Default, Hardening::None, false, none, incs, "", sys);
+    REQUIRE(r.has_value());
+    const auto i = r->compile.find("-I\"include\"");
+    const auto s = r->compile.find("-isystem \"third/include\"");
+    REQUIRE(i != std::string::npos);
+    REQUIRE(s != std::string::npos);
+    CHECK(i < s);
+    CHECK(contains(r->compile_c, "-isystem \"third/include\""));
+}
+
 TEST_CASE("flags: link flags order -L before -l") {
     const auto t = clang_triple();
     const std::array<std::string, 1> paths {"build/lib"};

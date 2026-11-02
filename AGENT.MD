@@ -692,3 +692,19 @@ merge_imports string round-trip, read_lines double-open).
   `bootstrap: rebuilt ./truss from truss.cpp`.
 - `./setup.sh installed` touches the init project's truss.cpp and checks the
   rebuild happened.
+
+## 26. System includes + PUBLIC usage requirements (feedback #3)
+
+- New Target builders: `system_include_dirs()`, `public_defines()`,
+  `public_flags()`; all three are collected by `UsageWalk` from the consumer
+  itself and every transitive dep (any kind, not only Interface).
+- `detail::build_flags` gained a trailing `system_includes` span (default
+  empty): `-isystem "dir"` after the `-I`s; MSVC `/external:W0` once +
+  `/external:I"dir"`.
+- Compile flag order: deps' + own `public_flags()` (dedup'd) then the target's
+  private `flags()`, so private flags win.
+- `conan()` / `vcpkg()` Interface targets now use `system_include_dirs` for
+  package headers (`add_subdirectory` keeps `-I`: often first-party code).
+- Tests: flags_test (-isystem order), msvc_test (/external:I), usage_test
+  (transitive app -> mid -> core with `-Wall -Werror` against a warning in a
+  system header; private `flags()` must not leak). 116 cases.

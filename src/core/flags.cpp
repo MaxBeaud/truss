@@ -272,7 +272,8 @@ Result<FlagSet> build_flags(const TargetTriple& triple, BuildMode mode,
                             Hardening hardening,
                             bool pic, std::span<const std::string> defines,
                             std::span<const std::string> includes,
-                            std::string_view user_flags) {
+                            std::string_view user_flags,
+                            std::span<const std::string> system_includes) {
     if (auto r = require_supported(triple); !r)
         return std::unexpected(r.error());
 
@@ -327,6 +328,11 @@ Result<FlagSet> build_flags(const TargetTriple& triple, BuildMode mode,
 
     for (const auto& d : defines) add_both((msvc ? "/D" : "-D") + d);
     for (const auto& i : includes) add_both(msvc ? "/I" + i : "-I\"" + i + "\"");
+    /* system dirs after -I (searched later); MSVC needs /external:W0 to
+     * actually silence them */
+    if (msvc && !system_includes.empty()) add_both("/external:W0");
+    for (const auto& i : system_includes)
+        add_both(msvc ? "/external:I\"" + i + "\"" : "-isystem \"" + i + "\"");
 
     add_both(user_flags);
     return fs;

@@ -487,7 +487,7 @@ Result<TargetRef> Project::conan(std::string_view conanfile) {
     const auto apply_spec = [&](const nlohmann::json& spec) {
         auto& iface = add_interface_library("conan");
         for (const auto& d : json_str_array(spec, "includes"))
-            iface.include_dirs(d);
+            iface.system_include_dirs(d);
         for (const auto& d : json_str_array(spec, "link_paths"))
             iface.link_paths(d);
         for (const auto& l : json_str_array(spec, "libs"))
@@ -692,7 +692,7 @@ Result<TargetRef> Project::vcpkg(std::vector<std::string> packages) {
     }
     auto& iface = add_interface_library("vcpkg");
     if (std::filesystem::is_directory(tdir / "include", ec))
-        iface.include_dirs((tdir / "include").generic_string());
+        iface.system_include_dirs((tdir / "include").generic_string());
     const std::filesystem::path libdir = tdir / "lib";
     if (std::filesystem::is_directory(libdir, ec)) {
         iface.link_paths(libdir.generic_string());

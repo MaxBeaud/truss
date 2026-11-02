@@ -94,6 +94,7 @@ void collect_bmis(const ResolvedTarget& r, const TargetIndex& idx,
  * so user static libs never leak private defines into consumers. */
 struct Usage {
     std::vector<std::string> includes, defines, link_paths, link_libs;
+    std::vector<std::string> system_includes, flags; /* flags: public_flags() of self + deps */
     std::vector<std::string> static_link_libs; /* from Interface deps marked static_link() */
 };
 
@@ -119,6 +120,12 @@ private:
             return;
         for (const auto& d : r.target->include_dirs())
             add(out_.includes, includes_, d);
+        for (const auto& d : r.target->system_include_dirs())
+            add(out_.system_includes, system_includes_, d);
+        for (const auto& d : r.target->public_defines())
+            add(out_.defines, defines_, d);
+        for (const auto& f : r.target->public_flags())
+            add(out_.flags, flags_, f);
         if (r.target->kind() == TargetKind::Interface) {
             for (const auto& d : r.target->defines())
                 add(out_.defines, defines_, d);
@@ -136,7 +143,7 @@ private:
     const TargetIndex& idx_;
     Usage out_;
     std::set<const Target*> visited_;
-    std::unordered_set<std::string> includes_, defines_, link_paths_, link_libs_;
+    std::unordered_set<std::string> includes_, system_includes_, defines_, flags_, link_paths_, link_libs_;
 };
 
 Result<std::vector<std::string>> resolve_sources(const Target& t) {
@@ -384,9 +391,16 @@ Result<void> emit_manifest(const Project& proj, std::vector<ResolvedTarget>& res
         std::vector<std::string> defines = t.defines();
         defines.insert(defines.end(), usage.defines.begin(), usage.defines.end());
 
+        /* public flags (self + deps) first, so the target's private flags() win */
+        std::string user_flags;
+        for (const auto& f : usage.flags)
+            user_flags.append(f).push_back(' ');
+        user_flags += t.flags();
+
         auto cflags = detail::build_flags(r.triple, proj.mode(), t.cpp_standard(), t.warnings(),
                                           t.debug_info(), t.optimization(), t.sanitizer(), t.lto(),
-                                          t.hardening(), pic, defines, usage.includes, t.flags());
+                                          t.hardening(), pic, defines, usage.includes, user_flags,
+                                          usage.system_includes);
         if (!cflags)
             return std::unexpected(cflags.error());
 

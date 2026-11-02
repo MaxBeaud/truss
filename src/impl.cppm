@@ -166,7 +166,8 @@ Result<FlagSet> build_flags(const TargetTriple& triple, BuildMode mode,
                             Hardening hardening,
                             bool pic, std::span<const std::string> defines,
                             std::span<const std::string> includes,
-                            std::string_view user_flags);
+                            std::string_view user_flags,
+                            std::span<const std::string> system_includes = {});
 /// Build the link flag strings (sanitizers/LTO/hardening/stdlib/libs/frameworks).
 /// `static_libs` are linked through `-Wl,-Bstatic ... -Wl,-Bdynamic` (before the
 /// dynamic `libs`, so a static archive's own -l needs resolve to the right);

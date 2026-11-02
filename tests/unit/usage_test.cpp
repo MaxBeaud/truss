@@ -42,7 +42,11 @@ TEST_CASE("brace-list builder overloads collect every element") {
                   .defines({"TRUSS_OVL_A", "TRUSS_OVL_B"})
                   .include_dirs({"i1", "i2"})
                   .link_libs({"l1", "l2"})
-                  .link_paths({"p1", "p2"});
+                  .link_paths({"p1", "p2"})
+                  .system_include_dirs({"s1", "s2"})
+                  .public_defines({"P1", "P2"});
+    CHECK(t.system_include_dirs().size() == 2);
+    CHECK(t.public_defines().size() == 2);
     CHECK(t.defines().size() == 2);
     CHECK(t.include_dirs().size() == 2);
     CHECK(t.link_libs().size() == 2);
@@ -107,6 +111,51 @@ TEST_CASE("usage: Interface defines/includes propagate; user lib defines do not"
                        "#endif\n").has_value());
 
     proj.add_executable("app").sources("app/main.cpp").depends_on(iface).depends_on(mylib);
+    auto r = proj.build();
+    INFO((r ? "build ok" : r.error().message));
+    REQUIRE(r.has_value());
+}
+
+TEST_CASE("usage: system includes, public defines and public flags propagate transitively") {
+    ScratchDir scratch {"public"};
+    char prog[] = "truss-tests";
+    char* argv[] = {prog};
+    Project proj("public-test", 1, argv);
+
+    /* third-party header with an unused variable: silent under -isystem
+     * even when the consumer builds with -Wall -Werror */
+    REQUIRE(detail::write_file("third/include/third.h",
+                               "#pragma once\n"
+                               "inline int third(int x) { int unused; return x; }\n").has_value());
+    REQUIRE(detail::write_file("core/core.cpp",
+                               "#include <third.h>\n"
+                               "#if !defined(CORE_API) || !defined(CORE_FLAG)\n"
+                               "#error \"core does not see its own public usage\"\n"
+                               "#endif\n"
+                               "int core() { return third(1); }\n").has_value());
+    auto& core = proj.add_static_library("core")
+                     .sources("core/core.cpp")
+                     .system_include_dirs("third/include")
+                     .public_defines("CORE_API=1")
+                     .public_flags("-DCORE_FLAG=1")
+                     .flags("-DCORE_PRIVATE_FLAG");
+
+    REQUIRE(detail::write_file("mid/mid.cpp", "int core();\nint mid() { return core(); }\n").has_value());
+    auto& mid = proj.add_static_library("mid").sources("mid/mid.cpp").depends_on(core);
+
+    /* app depends on core only through mid */
+    REQUIRE(detail::write_file("app/main.cpp",
+                               "#include <third.h>\n"
+                               "#if CORE_API != 1 || CORE_FLAG != 1\n"
+                               "#error \"public usage did not propagate\"\n"
+                               "#endif\n"
+                               "#ifdef CORE_PRIVATE_FLAG\n"
+                               "#error \"private flags() leaked into a dependent\"\n"
+                               "#endif\n"
+                               "int mid();\n"
+                               "int main() { return third(mid()) == 1 ? 0 : 1; }\n").has_value());
+    proj.add_executable("app").sources("app/main.cpp").flags("-Wall -Werror").depends_on(mid);
+
     auto r = proj.build();
     INFO((r ? "build ok" : r.error().message));
     REQUIRE(r.has_value());

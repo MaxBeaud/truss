@@ -753,7 +753,27 @@ public:
         append_strings(include_dirs_, std::forward<R>(dirs));
         return *this;
     }
+    /**
+     * \brief Add a system include directory (`-isystem`, MSVC `/external:I`):
+     * warnings inside its headers are silenced. For third-party headers.
+     * Propagates to every dependent like include_dirs(). Overloads: single,
+     * braced list, range.
+     */
+    Target& system_include_dirs(std::string_view dir) {
+        system_include_dirs_.emplace_back(dir);
+        return *this;
+    }
+    Target& system_include_dirs(std::initializer_list<std::string_view> dirs) {
+        append_strings(system_include_dirs_, dirs);
+        return *this;
+    }
+    template <StringRange R>
+    Target& system_include_dirs(R&& dirs) {
+        append_strings(system_include_dirs_, std::forward<R>(dirs));
+        return *this;
+    }
     /// Add preprocessor defines (-D). Overloads: single, braced list, range.
+    /// Private to this target (Interface targets: passed to dependents); see public_defines().
     Target& defines(std::string_view def) {
         defines_.emplace_back(def);
         return *this;
@@ -765,6 +785,24 @@ public:
     template <StringRange R>
     Target& defines(R&& defs) {
         append_strings(defines_, std::forward<R>(defs));
+        return *this;
+    }
+    /**
+     * \brief Add defines used by this target *and* every dependent, transitively
+     * (CMake's PUBLIC): for macros the library's headers need to agree on.
+     * Overloads: single, braced list, range.
+     */
+    Target& public_defines(std::string_view def) {
+        public_defines_.emplace_back(def);
+        return *this;
+    }
+    Target& public_defines(std::initializer_list<std::string_view> defs) {
+        append_strings(public_defines_, defs);
+        return *this;
+    }
+    template <StringRange R>
+    Target& public_defines(R&& defs) {
+        append_strings(public_defines_, std::forward<R>(defs));
         return *this;
     }
     /// Add libraries to link (-l). Overloads: single, braced list, range.
@@ -830,6 +868,16 @@ public:
         if (!flags_.empty() && !raw.empty())
             flags_ += ' ';
         flags_ += raw;
+        return *this;
+    }
+    /**
+     * \brief Raw compile flags for this target *and* every dependent,
+     * transitively (CMake's PUBLIC), e.g. `-pthread`, `-fno-rtti` for a library
+     * whose ABI needs it. Appended verbatim; repeat calls accumulate.
+     */
+    Target& public_flags(std::string_view raw) {
+        if (!raw.empty())
+            public_flags_.emplace_back(raw);
         return *this;
     }
     /// Raw linker flags, appended verbatim (repeat calls accumulate).
@@ -937,6 +985,9 @@ public:
     const std::vector<std::string>& source_patterns() const { return source_patterns_; }
     const std::vector<std::string>& removed_sources() const { return removed_sources_; }
     const std::vector<std::string>& include_dirs() const { return include_dirs_; }
+    const std::vector<std::string>& system_include_dirs() const { return system_include_dirs_; }
+    const std::vector<std::string>& public_defines() const { return public_defines_; }
+    const std::vector<std::string>& public_flags() const { return public_flags_; }
     const std::vector<std::string>& defines() const { return defines_; }
     const std::vector<std::string>& link_libs() const { return link_libs_; }
     const std::vector<std::string>& link_paths() const { return link_paths_; }
@@ -978,6 +1029,7 @@ private:
     std::vector<std::string> source_patterns_;
     std::vector<std::string> removed_sources_;
     std::vector<std::string> include_dirs_, defines_, link_libs_, link_paths_;
+    std::vector<std::string> system_include_dirs_, public_defines_, public_flags_;
     std::vector<std::string> frameworks_, framework_paths_;
     std::string flags_, linker_flags_;
     CppStandard std_ {};

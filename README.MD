@@ -217,10 +217,30 @@ this to drop samurai's `samu.c`).
 
 - `include_dirs(...)` propagate to everything that `depends_on()` a target,
   transitively.
+- `system_include_dirs(...)` propagate the same way but as `-isystem`
+  (MSVC: `/external:I` + `/external:W0`): warnings inside those headers are
+  silenced, so third-party code doesn't trip a consumer's `-Werror`.
+  `conan()` and `vcpkg()` targets use them for their package headers.
+- `public_defines(...)` and `public_flags(...)` apply to the target **and**
+  every dependent, transitively — CMake's `PUBLIC`. Use them for macros or
+  ABI flags (`-pthread`, `-fno-rtti`) the library's headers need to agree on.
+  `flags(...)` stays private; dependents' public flags come first on the
+  command line, so a target's own `flags()` win.
 - `defines(...)`, `link_libs(...)`, `link_paths(...)` propagate **only from
   `Interface` targets** — the CMake `INTERFACE` semantics. A static library's
-  own `-D` flags stay private to it; a `add_interface_library("config")`
-  target is how you share them.
+  own `-D` flags stay private to it; use `public_defines()` or an
+  `add_interface_library("config")` target to share them.
+
+Wrapping a third-party library once, instead of in every consumer:
+
+```cpp
+auto& yoga = proj.add_static_library("yoga")
+                 .sources_in("vendor/yoga/yoga")
+                 .warnings(truss::Warnings::None)
+                 .system_include_dirs("vendor/yoga")      // consumers: -isystem
+                 .public_defines("YG_ENABLE_EVENTS=0");   // consumers: -D too
+proj.add_executable("app").sources_in("src").depends_on(yoga);
+```
 - `link_frameworks(...)` / `framework_paths(...)` are Apple-only (rejected on
   MSVC targets).
 

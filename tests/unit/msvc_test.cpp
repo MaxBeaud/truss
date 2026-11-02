@@ -133,6 +133,17 @@ TEST_CASE("msvc: clang-cl end-to-end (compile, /showIncludes deps, archive, link
     CHECK(mtime_ns(obj) == after);
 }
 
+TEST_CASE("msvc: system includes use /external:I with /external:W0") {
+    const std::array<std::string, 0> none {};
+    const std::array<std::string, 1> sys {"third/include"};
+    auto r = detail::build_flags(clang_cl_triple(), BuildMode::Debug, CppStandard::Default, Warnings::Default,
+                                 DebugInfo::Default, Optimization::Default, Sanitizer::Default,
+                                 Lto::Default, Hardening::None, false, none, none, "", sys);
+    REQUIRE(r.has_value());
+    CHECK(r->compile.find("/external:W0") != std::string::npos);
+    CHECK(r->compile.find("/external:I\"third/include\"") != std::string::npos);
+}
+
 TEST_CASE("msvc: .cppm sources are rejected, not silently miscompiled") {
     if (!msvc_toolchain_available()) {
         WARN("clang-cl/lld-link/llvm-lib not on PATH: skipping MSVC integration test");
