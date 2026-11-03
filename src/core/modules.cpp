@@ -4,6 +4,7 @@ module;
 #include <filesystem>
 #include <map>
 #include <regex>
+#include <set>
 #include <sstream>
 #include <string>
 #include <utility>
@@ -53,7 +54,8 @@ Result<ModuleUnitInfo> scan_module_unit(const std::string& path) {
 }
 
 Result<std::pair<std::string, std::vector<std::string>>>
-resolve_module_imports(const ModuleUnitInfo& u, const std::map<std::string, std::string, std::less<>>& bmis) {
+resolve_module_imports(const ModuleUnitInfo& u, const std::map<std::string, std::string, std::less<>>& bmis,
+                       const std::map<std::string, std::vector<std::string>, std::less<>>& module_imports) {
     std::string flags;
     std::vector<std::string> order;
     std::vector<std::string> added; /* dedupe module names already wired in */
@@ -85,11 +87,40 @@ resolve_module_imports(const ModuleUnitInfo& u, const std::map<std::string, std:
         return true;
     };
 
+    /* A module's BMI embeds (or needs to resolve) everything it imports,
+     * exported or not: wire the full transitive closure. The unit never
+     * consumes its own BMI, so it starts out visited (also ends cycles). */
+    std::set<std::string, std::less<>> visited;
+    if (u.is_bmi_source)
+        visited.insert(u.module_name);
+    auto wire = [&](this auto&& self, const std::string& name) -> bool {
+        if (!visited.insert(name).second)
+            return true;
+        const bool known = add_bmi(name);
+        const auto visit_imports = [&](const std::string& mod) {
+            const auto mi = module_imports.find(mod);
+            if (mi == module_imports.end())
+                return;
+            const std::string mod_primary = mod.substr(0, mod.find(':'));
+            for (const auto& raw : mi->second)
+                self(raw.starts_with(':') ? mod_primary + raw : raw);
+        };
+        visit_imports(name);
+        /* a primary also carries its partitions' imports */
+        if (!name.contains(':')) {
+            const std::string prefix = name + ":";
+            for (const auto& kv : module_imports)
+                if (kv.first.starts_with(prefix))
+                    self(kv.first);
+        }
+        return known;
+    };
+
     /* An implementation unit (module m; in a .cpp) implicitly imports its
      * primary interface — it needs the primary BMI even with no explicit import.
      * A BMI source never consumes its own BMI. */
     if (!u.module_name.empty() && !u.is_bmi_source) {
-        if (!add_bmi(primary))
+        if (!wire(primary))
             return std::unexpected(Error {
                 Error::Kind::Config,
                 "'" + u.path + "' is an implementation unit of module '" + primary +
@@ -111,10 +142,7 @@ resolve_module_imports(const ModuleUnitInfo& u, const std::map<std::string, std:
         }
         if (u.is_bmi_source && name == u.module_name)
             continue; /* a BMI source never consumes its own BMI */
-        /* std.compat's BMI re-exports std: consumers need both mappings */
-        if (name == "std.compat" && bmis.contains("std"))
-            add_bmi("std");
-        if (!add_bmi(name))
+        if (!wire(name))
             return std::unexpected(Error {
                 Error::Kind::Config,
                 "'" + u.path + "' imports module '" + name + "', but no .cppm exporting it is part of "

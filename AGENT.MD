@@ -161,6 +161,11 @@ Read `PLAN.MD` first. This file is the rulebook for any agent/human modifying th
   "file is missing and not created by any action".
 - Consumers of a primary interface need BMIs for **all its partitions** too (the primary BMI
   references them via `export import :part`); truss expands primary imports to partitions.
+- Module import wiring is a **full transitive closure** (`resolve_module_imports` +
+  `module_imports` map: module -> its imports, for every .cppm in the target and its
+  depends_on): direct, re-exported (`export import`) and indirectly imported (plain `import`)
+  modules all get `-fmodule-file=`, because clang needs every BMI a consumed BMI refers to.
+  `std.compat` pulls `std` via the same mechanism (`module_imports["std.compat"] = {"std"}`).
 - An implementation unit (`module m;` in a .cpp) implicitly imports its primary interface —
   it always needs `-fmodule-file=m=...` even with no explicit import.
 - v0.1 module scanner (`detail::scan_module_unit`) is a line-anchored regex (no

@@ -123,7 +123,8 @@ Result<ModuleUnitInfo> scan_module_unit(const std::string& path);
 ///         its primary; importing a primary pulls every partition BMI.
 /// \ingroup grp_internals
 Result<std::pair<std::string, std::vector<std::string>>>
-resolve_module_imports(const ModuleUnitInfo& u, const std::map<std::string, std::string, std::less<>>& bmis);
+resolve_module_imports(const ModuleUnitInfo& u, const std::map<std::string, std::string, std::less<>>& bmis,
+                       const std::map<std::string, std::vector<std::string>, std::less<>>& module_imports);
 
 /// Authoritative import closure for one TU via clang-scan-deps (p1689 JSON):
 /// one TU per single-entry compilation database (this clang leaves

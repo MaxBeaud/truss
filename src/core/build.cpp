@@ -83,15 +83,21 @@ using TargetIndex = std::map<std::string_view, const ResolvedTarget*, std::less<
 
 /* BMIs visible to a target: its own plus those of depends_on (transitively). */
 void collect_bmis(const ResolvedTarget& r, const TargetIndex& idx,
-                  std::map<std::string, std::string, std::less<>>& out, std::set<const Target*>& seen) {
+                  std::map<std::string, std::string, std::less<>>& out,
+                  std::map<std::string, std::vector<std::string>, std::less<>>& module_imports,
+                  std::set<const Target*>& seen) {
     if (!seen.insert(r.target).second)
         return;
     for (const auto& b : r.bmis)
         out.emplace(b.module_name, b.bmi_path);
+    /* per-module import lists drive the transitive BMI closure */
+    for (const auto& u : r.units)
+        if (u.is_bmi_source)
+            module_imports.emplace(u.module_name, u.imports);
     for (const Target* dep : r.target->deps()) {
         const auto it = idx.find(dep->name());
         if (it != idx.end())
-            collect_bmis(*it->second, idx, out, seen);
+            collect_bmis(*it->second, idx, out, module_imports, seen);
     }
 }
 
@@ -624,8 +630,9 @@ Result<void> emit_manifest(const Project& proj, std::vector<ResolvedTarget>& res
 
         /* BMIs visible to this target: own + transitive depends_on */
         std::map<std::string, std::string, std::less<>> bmis;
+        std::map<std::string, std::vector<std::string>, std::less<>> module_imports;
         std::set<const Target*> seen;
-        collect_bmis(r, by_name, bmis, seen);
+        collect_bmis(r, by_name, bmis, module_imports, seen);
 
         /* std / std.compat resolve like any other module */
         StdModule std_mod;
@@ -635,8 +642,11 @@ Result<void> emit_manifest(const Project& proj, std::vector<ResolvedTarget>& res
                 return std::unexpected(sm.error());
             std_mod = std::move(*sm);
             bmis["std"] = std_mod.pcm;
-            if (r.needs_std_compat)
+            module_imports["std"] = {};
+            if (r.needs_std_compat) {
                 bmis["std.compat"] = std_mod.compat_pcm;
+                module_imports["std.compat"] = {"std"}; /* re-exports std */
+            }
         }
 
         std::map<std::string_view, const detail::ModuleUnitInfo*> unit_by_path;
@@ -665,7 +675,7 @@ Result<void> emit_manifest(const Project& proj, std::vector<ResolvedTarget>& res
                     return std::unexpected(Error {
                         Error::Kind::Internal, "no scanned unit info for '" + m + "'", std::filesystem::path(m),
                     });
-                auto imp = detail::resolve_module_imports(*u, bmis);
+                auto imp = detail::resolve_module_imports(*u, bmis, module_imports);
                 if (!imp)
                     return std::unexpected(imp.error());
                 /* imp->first is space-joined -fmodule-file=NAME=PATH tokens,
@@ -734,7 +744,7 @@ Result<void> emit_manifest(const Project& proj, std::vector<ResolvedTarget>& res
                     Error::Kind::Internal, "no scanned unit info for '" + b.source + "'",
                     std::filesystem::path(b.source),
                 });
-            auto imp = detail::resolve_module_imports(*u, bmis);
+            auto imp = detail::resolve_module_imports(*u, bmis, module_imports);
             if (!imp)
                 return std::unexpected(imp.error());
             NinjaWriter::Edge e;
