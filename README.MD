@@ -1,11 +1,26 @@
 # truss
 
-**Build your C++ using C++.** A small, fast build system with a
-[mate.h](https://github.com/ander000/mate)-style API, xmake-class features, and a
-[samurai](https://github.com/michaelforney/samurai) (ninja) backend.
+**Build your C++ using C++.** A small, fast build system whose build scripts
+are ordinary C++26 programs: a [mate.h](https://github.com/ander000/mate)-style
+fluent API, xmake-class features, first-class C++20/26 modules, zig-powered
+cross-compilation, and a [samurai](https://github.com/michaelforney/samurai)
+(ninja) backend — no configure step, no DSL, no config file.
+
+**Highlights**
+
+- **C++ modules that just work** — automatic BMI wiring with a full transitive
+  closure across `depends_on`, plus real `import std;` on clang + libc++.
+- **Cross-compile with one line** — `Toolchain::Zig` + `target("…")` reaches
+  musl, glibc-pinned, aarch64 and Windows-gnu targets with bundled sysroots.
+- **Static & portable binaries** — per-dependency `static_link()`, `static_deps()`
+  and `static_stdlib()` (fully-static musl, or drop just the C++ runtime).
+- **Packages** — `fetch` (git/tarball), `conan` and `vcpkg`, consumed as targets.
+- **Fast & incremental** — compiler-cache launcher, unity builds, PCH, precise
+  module wiring; a self-rebuilding `./truss` that tracks its own headers.
 
 This README is the user guide; the in-depth API reference is generated with
-`./setup.sh docs` (Doxygen → `build/docs/html/`).
+`./setup.sh docs` (Doxygen → `build/docs/html/`). `docs/1.0-roadmap.md` tracks
+the path to 1.0.
 
 Write your build script in C++ with truss's module API, compile it once to
 `./truss`, and run your builds from there:
@@ -60,6 +75,7 @@ ninja manifest that samurai then executes incrementally.
   - [Precompiled headers](#precompiled-headers)
   - [Unity builds](#unity-builds)
   - [Static linking](#static-linking)
+  - [Merged archives](#merged-archives)
   - [Custom tasks](#custom-tasks)
   - [Build hooks](#build-hooks)
 - [Scripting helpers (os / fs / log)](#scripting-helpers-os--fs--log)
@@ -360,6 +376,24 @@ proj.add_executable("tool")
 targets get a Config error. The `.a` files must exist — distro packages often
 ship only the `.so`.
 
+### Merged archives
+
+`merge()` combines several static libraries' archives into one `.a` (via an
+`ar -M` MRI script — GNU ar / llvm-ar / zig ar), consumable like any static
+library:
+
+```cpp
+auto& a = proj.add_static_library("a").sources_in("src/a");
+auto& b = proj.add_static_library("b").sources_in("src/b");
+proj.add_static_library("combined").merge(a).merge(b);   // one libcombined.a
+proj.add_executable("app").sources_in("src/app").depends_on(combined);
+```
+
+Members are merged exactly as listed (their own transitive deps are not pulled
+in — `depends_on()` those separately). A merged library needs no sources of its
+own; each member must itself be a static library. MSVC targets are a Config
+error.
+
 ### Custom tasks
 
 `proj.task(name, description, fn)` registers `./truss task <name>`; the
@@ -486,9 +520,18 @@ POSIX is fully implemented; Windows-specific probes currently return
 Your project's `.cppm` files are handled automatically (`modules_mode(Auto)`,
 the default): each interface unit gets a BMI compile edge (`-fmodule-output`),
 and every other unit in the target — and in targets that `depends_on()` it —
-receives the matching `-fmodule-file=NAME=path` flags. `import std;` passes
-straight through. Import scanning is a conservative v0.1 regex pass over each
-unit (module/import declarations only).
+receives the matching `-fmodule-file=NAME=path` flags. The wiring is a **full
+transitive closure**: if you `import A;` and `A` imports `B` (whether
+`export import` or a plain `import`), `B`'s BMI is threaded through too, because
+clang needs every BMI a consumed BMI refers to. Import scanning is a
+conservative v0.1 regex pass over each unit (module/import declarations only).
+
+**`import std;`** is built for real on clang + libc++ (C++23 or later): truss
+discovers libc++'s module manifest, compiles the `std` (and `std.compat`) BMI
+and object, wires `-fmodule-file=std=` into consumers and links the std object
+once per binary — no manual setup. It is deduped to one std build per toolchain
+and `-std` version. zig, GCC, MSVC and clang + libstdc++ cannot build the std
+module and give a clear Config error.
 
 ```cpp
 proj.add_static_library("math").sources_in("src/math"); // src/math/math.cppm inside
@@ -746,21 +789,28 @@ which should point to the installation prefix (not the lib/truss subdirectory).
 
 ## Status & support matrix
 
-v0.1.0 — all eleven planned phases complete except benchmarks.
+v0.1.0 — all thirteen planned phases complete; the engine is feature-complete.
+The path to a 1.0 release (Windows/macOS hosts, real MSVC runs, cross-compile
+phases 2–3, API freeze) is tracked in [`docs/1.0-roadmap.md`](docs/1.0-roadmap.md).
 
 | Feature | GCC | Clang | MSVC (cl.exe / clang-cl) |
 |---|---|---|---|
-| Executable / static / shared / interface | ✅ | ✅ | ✅ (tested via clang-cl cross-build) |
+| Executable / static / shared / interface | ✅ | ✅ | ✅ (built via clang-cl cross-build; not yet run on Windows) |
 | Globbing, tasks, compdb, incremental | ✅ | ✅ | ✅ |
 | Sanitizers, LTO, per-target options | ✅ | ✅ | ✅ (no ThinLTO — maps to `/GL`) |
-| C++ modules for your project | ✅ | ✅ | ❌ (clear error) |
+| C++ modules for your project (transitive wiring) | ✅ | ✅ | ❌ (clear error) |
+| `import std;` / `import std.compat;` | ❌ | ✅ (libc++, C++23+) | ❌ (clear error) |
+| `merge()` combined archives | ✅ | ✅ | ❌ (clear error) |
+| self-rebuild tracks truss.cpp + its headers + truss BMIs | ✅ | ✅ | — |
 | fetch / add_subdirectory / conan / vcpkg | ✅ | ✅ | host-side, same |
 | static_link / static_deps / static_stdlib | ✅ | ✅ | ❌ (clear error) |
-| zig (`Toolchain::Zig`, cross targets) | — | manifest-tested, not run in CI | — |
+| zig cross (`Toolchain::Zig` + `target`) | — | ✅ verified: musl / aarch64-musl / windows-gnu / gnu.2.17 (built, `file`/`ldd`/`objdump`-checked; x86_64 ones run on host) | — |
 
 Known limitations: paths containing spaces or `:` are rejected (ninja
-escaping, conservative v0.1); Windows *hosts* (running truss on Windows) are
-not yet exercised.
+escaping, conservative v0.1); truss runs on POSIX hosts only (Windows *host*
+support is a 1.0 item); zig cannot build C++20 modules or PCH (Config error);
+cross-compilation is phase 1 of the `docs/cross-compilation.md` roadmap.
 
-`PLAN.MD` tracks the roadmap; `AGENT.MD` records verified toolchain facts.
-The vendored samurai patches are documented in `vendor/samurai/TRUSS-VENDOR.txt`.
+`docs/1.0-roadmap.md` tracks the road to 1.0; `PLAN.MD` the original phase plan;
+`AGENT.MD` records verified toolchain facts; vendored samurai patches are in
+`vendor/samurai/TRUSS-VENDOR.txt`.
