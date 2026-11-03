@@ -40,6 +40,10 @@ Result<void> write_file(const std::filesystem::path& p, std::string_view data);
 /// inputs (unity TUs, the manifest) do not trigger spurious work.
 /// \ingroup grp_internals
 Result<void> write_file_if_changed(const std::filesystem::path& p, std::string_view data);
+/// Prerequisite paths of a Make depfile (`-MMD -MF`): for every rule, the words
+/// after its first `:`. `\\<newline>` continues a line, `\\ ` is a space inside a path.
+/// \ingroup grp_internals
+std::vector<std::string> parse_depfile(std::string_view text);
 /// Create a directory and all parents.
 /// \ingroup grp_internals
 Result<void> make_dirs(const std::filesystem::path& p);

@@ -206,6 +206,18 @@ cmd_installed() {
     printf '%s\n' "$out"
     [[ $out == *"rebuilt ./truss from truss.cpp"* ]] \
         || { echo "setup: stale build script was not rebuilt" >&2; return 1; }
+
+    # ... and so is an edited header it includes (listed in truss.d, bootstrap -MMD)
+    out=$(cd "$scratch/demo-app" && sleep 1 && echo '// header' > build_extra.hpp \
+        && sed -i '1i #include "build_extra.hpp"' truss.cpp && ./truss test 2>&1)
+    [[ $out == *"rebuilt ./truss from truss.cpp"* ]] \
+        || { echo "setup: truss.cpp edit (adding a header) was not rebuilt" >&2; return 1; }
+    grep -q build_extra.hpp "$scratch/demo-app/truss.d" \
+        || { echo "setup: truss.d does not list the included header" >&2; return 1; }
+    out=$(cd "$scratch/demo-app" && sleep 1 && touch build_extra.hpp && ./truss test 2>&1)
+    printf '%s\n' "$out"
+    [[ $out == *"rebuilt ./truss from truss.cpp"* ]] \
+        || { echo "setup: header change was not rebuilt via truss.d" >&2; return 1; }
 }
 
 # --- dist: portable truss binary via the self-host graph ------------------------

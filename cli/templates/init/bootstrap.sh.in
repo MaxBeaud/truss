@@ -7,9 +7,12 @@ cd "$(dirname "$0")"
 TRUSS_LIB="${TRUSS_LIB:-@TRUSS_LIB@}"
 CXX="${CXX:-clang++}"
 # the installed BMIs were built with clang + libc++: the script must match
-# ./truss runs this itself whenever truss.cpp is newer than it
-"$CXX" -std=c++26 -stdlib=libc++ \
+# ./truss runs this itself whenever truss.cpp, a header it includes, or the
+# truss modules/libtruss.a are newer than it (-MMD writes the header list)
+"$CXX" -std=c++26 -stdlib=libc++ -MMD -MF truss.d \
     -fmodule-file=truss="$TRUSS_LIB/truss.pcm" \
     -fmodule-file=truss:api="$TRUSS_LIB/truss_api.pcm" \
     truss.cpp "$TRUSS_LIB/libtruss.a" -o truss
+# second depfile rule: the truss artifacts ./truss was built against
+printf 'truss: %s %s %s\n' "$TRUSS_LIB/truss.pcm" "$TRUSS_LIB/truss_api.pcm" "$TRUSS_LIB/libtruss.a" >> truss.d
 echo "bootstrap: rebuilt ./truss from truss.cpp"

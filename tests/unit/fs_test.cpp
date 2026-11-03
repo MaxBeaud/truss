@@ -283,3 +283,14 @@ TEST_CASE("fs: sha256_file streams big files (chunk boundaries)") {
     std::error_code ec;
     std::filesystem::remove(p, ec);
 }
+
+TEST_CASE("fs: parse_depfile reads prerequisites") {
+    using V = std::vector<std::string>;
+    CHECK(detail::parse_depfile("t.o: t.cpp a.h b.h\n") == V {"t.cpp", "a.h", "b.h"});
+    /* wrapped lines (` \` + 2-space continuation) and a second rule */
+    CHECK(detail::parse_depfile("t.o: t.cpp a.h \\\n  b.h \\\n  c.h\ntruss: x.pcm y.a\n")
+          == V {"t.cpp", "a.h", "b.h", "c.h", "x.pcm", "y.a"});
+    /* backslash-space is a space inside one path */
+    CHECK(detail::parse_depfile("t.o: t.cpp dir\\ with\\ space/h.h\n") == V {"t.cpp", "dir with space/h.h"});
+    CHECK(detail::parse_depfile("").empty());
+}

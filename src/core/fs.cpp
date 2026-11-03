@@ -195,6 +195,42 @@ Result<std::vector<std::filesystem::path>> glob_multi(std::span<const std::strin
     return matches;
 }
 
+std::vector<std::string> parse_depfile(std::string_view text) {
+    std::vector<std::string> out;
+    std::string word;
+    bool after_colon = false; /* inside the prerequisites of the current rule */
+    const auto flush = [&] {
+        if (!word.empty())
+            out.push_back(std::move(word));
+        word.clear();
+    };
+    for (std::size_t i = 0; i < text.size(); ++i) {
+        const char c = text[i];
+        if (c == '\\' && i + 1 < text.size()) {
+            const char n = text[i + 1];
+            if (n == '\n' || (n == '\r' && i + 2 < text.size() && text[i + 2] == '\n')) {
+                flush(); /* line continuation: only a separator */
+                i += n == '\r' ? 2 : 1;
+            } else if (after_colon) {
+                word.push_back(n); /* `\ ` -> space (also `\#`, `\\`) */
+                ++i;
+            }
+        } else if (c == '\n') {
+            flush();
+            after_colon = false; /* next rule: skip its target again */
+        } else if (c == ' ' || c == '\t' || c == '\r') {
+            flush();
+        } else if (!after_colon) {
+            if (c == ':')
+                after_colon = true;
+        } else {
+            word.push_back(c);
+        }
+    }
+    flush();
+    return out;
+}
+
 Result<std::string> read_file(const std::filesystem::path& p) {
     std::ifstream in(p, std::ios::binary | std::ios::ate);
     if (!in)

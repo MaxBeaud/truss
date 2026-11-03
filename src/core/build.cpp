@@ -1023,7 +1023,7 @@ std::filesystem::path self_exe(std::span<char* const> argv) {
 }
 
 /* nob-style self-rebuild: when the build script (truss.cpp next to the
- * executable) is newer than the executable, a stale build graph would be
+ * executable) or a header/BMI it depends on (truss.d) is newer than the executable, a stale build graph would be
  * generated — run bootstrap.sh and re-exec with the same argv. Without a
  * bootstrap.sh, report it (via build()) instead of building the stale graph.
  * TRUSS_NO_REBUILD=1 disables the check; TRUSS_REBUILT guards the re-exec loop. */
@@ -1040,23 +1040,42 @@ std::optional<Error> refresh_build_script(std::span<char* const> argv) {
     if (ec)
         return std::nullopt; /* not a build-script executable (tests, installed CLI) */
     const auto exe_time = std::filesystem::last_write_time(exe, ec);
-    if (ec || script_time <= exe_time)
+    if (ec)
+        return std::nullopt;
+
+    /* truss.d (written by bootstrap.sh via -MMD) lists the headers truss.cpp
+     * includes plus the truss BMIs/libtruss.a it was built against; without it
+     * (older projects) only truss.cpp itself is compared. */
+    std::filesystem::path changed;
+    if (script_time > exe_time)
+        changed = script;
+    if (auto deps = detail::read_file(dir / "truss.d"); deps && changed.empty()) {
+        for (const auto& dep : detail::parse_depfile(*deps)) {
+            std::error_code dep_ec;
+            const auto dep_time = std::filesystem::last_write_time(dir / dep, dep_ec);
+            if (!dep_ec && dep_time > exe_time) {
+                changed = dir / dep;
+                break;
+            }
+        }
+    }
+    if (changed.empty())
         return std::nullopt;
 
     const auto bootstrap = dir / "bootstrap.sh";
     if (std::getenv("TRUSS_REBUILT") != nullptr) {
-        log::warn("truss.cpp still looks newer than " + exe.string() + " after a rebuild (clock skew?); continuing");
+        log::warn(changed.string() + " still looks newer than " + exe.string() + " after a rebuild (clock skew?); continuing");
         return std::nullopt;
     }
     if (!std::filesystem::is_regular_file(bootstrap, ec))
         return Error {
             Error::Kind::Config,
-            "build script is stale: " + script.string() + " is newer than " + exe.string()
+            "build script is stale: " + changed.string() + " is newer than " + exe.string()
                 + "\nrebuild it first (no bootstrap.sh next to it), or set TRUSS_NO_REBUILD=1 to use it anyway",
-            script,
+            changed,
         };
 
-    log::info("truss.cpp changed: rebuilding " + exe.filename().string() + " (bootstrap.sh)");
+    log::info(changed.filename().string() + " changed: rebuilding " + exe.filename().string() + " (bootstrap.sh)");
     const std::array cmd {std::string("sh"), bootstrap.string()};
     auto outcome = detail::run_process(cmd, false, dir);
     if (!outcome)
