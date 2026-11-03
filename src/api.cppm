@@ -978,6 +978,17 @@ public:
     Target& depends_on(Result<TargetRef> dep_result);
     /// Mark as a test executable (built and run by `./truss test`).
     Target& is_test(bool v = true) { test_ = v; return *this; }
+    /**
+     * \brief Combine another static library's archive into this one.
+     *
+     * This target and every merged library must be static libraries; the
+     * result is itself a static library (consumable via depends_on). Members
+     * are merged exactly as listed — their own transitive dependencies are not
+     * pulled in, so depends_on() those separately if a consumer needs them.
+     * Emitted via an `ar -M` MRI script (GNU ar / llvm-ar / zig ar); MSVC is a
+     * Config error. A merged library needs no sources of its own.
+     */
+    Target& merge(const Target& lib) { merge_.push_back(&lib); return *this; }
 
     /* --- read access (used by the build engine) --- */
     const std::string& name() const { return name_; }
@@ -1014,6 +1025,7 @@ public:
     const std::optional<Error>& deferred_error() const { return deferred_error_; }
     const std::optional<TargetTriple>& triple_override() const { return triple_; }
     const std::vector<const Target*>& deps() const { return deps_; }
+    const std::vector<const Target*>& merged_libraries() const { return merge_; }
     bool is_test_target() const { return test_; }
 
 private:
@@ -1051,6 +1063,7 @@ private:
     std::optional<Error> deferred_error_;
     std::optional<TargetTriple> triple_;
     std::vector<const Target*> deps_;
+    std::vector<const Target*> merge_; /* static libraries combined into this archive */
 };
 
 /// A linkable executable target.

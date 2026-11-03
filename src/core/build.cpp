@@ -445,6 +445,13 @@ Result<void> emit_manifest(const Project& proj, std::vector<ResolvedTarget>& res
         {"command", "$ar rcs $out $in"},
         {"description", "AR $out"},
     });
+    if (std::ranges::any_of(resolved, [](const ResolvedTarget& r) { return !r.target->merged_libraries().empty(); }))
+        w.rule("merge_archive", {
+            /* combine several .a into one via an MRI script ($mri) on stdin;
+             * GNU ar / llvm-ar / zig ar all accept -M */
+            {"command", "$ar -M < $mri"},
+            {"description", "AR(merge) $out"},
+        });
     w.rule("link_exe", {
         {"command", "$cxx -o $out $in $flags $link"},
         {"description", "LINK $out"},
@@ -880,7 +887,44 @@ Result<void> emit_manifest(const Project& proj, std::vector<ResolvedTarget>& res
             }
         }
 
-        if (t.kind() == TargetKind::StaticLibrary) {
+        if (t.kind() == TargetKind::StaticLibrary && !t.merged_libraries().empty()) {
+            /* merged archive: combine the listed static libraries (and any own
+             * objects) into one .a via an `ar -M` MRI script. */
+            if (msvc)
+                return std::unexpected(Error {
+                    Error::Kind::Config,
+                    "target '" + t.name() + "': merge() (ar -M) is not supported for MSVC targets",
+                });
+            std::vector<std::string> inputs = std::move(objects);
+            std::string script = "CREATE " + r.output + "\n";
+            for (const auto& obj : inputs)
+                script += "ADDMOD " + obj + "\n";
+            for (const Target* m : t.merged_libraries()) {
+                const auto it = by_name.find(m->name());
+                if (it == by_name.end() || m->kind() != TargetKind::StaticLibrary)
+                    return std::unexpected(Error {
+                        Error::Kind::Config,
+                        "target '" + t.name() + "': merge('" + m->name() + "') must name a static library "
+                        "that is part of this build",
+                    });
+                script += "ADDLIB " + it->second->output + "\n";
+                inputs.push_back(it->second->output);
+            }
+            script += "SAVE\nEND\n";
+            const std::string mri_dir = (build_dir / "mri" / detail::triple_dir(r.triple)).generic_string();
+            if (auto mk = detail::make_dirs(mri_dir); !mk)
+                return std::unexpected(mk.error());
+            const std::string mri = mri_dir + "/" + t.name() + ".mri";
+            if (auto wr = detail::write_file_if_changed(mri, script); !wr)
+                return std::unexpected(wr.error());
+            NinjaWriter::Edge e;
+            e.outputs = {r.output};
+            e.rule = "merge_archive";
+            e.inputs = std::move(inputs);
+            e.implicit_ins = {mri};
+            e.vars = {{"ar", r.triple.ar}, {"mri", mri}};
+            w.build(std::move(e));
+        } else if (t.kind() == TargetKind::StaticLibrary) {
             NinjaWriter::Edge e;
             e.outputs = {r.output};
             e.rule = msvc ? "archive_msvc" : "archive";
@@ -1321,7 +1365,7 @@ Result<void> Project::build() {
             log::error(sources.error());
             return std::unexpected(sources.error());
         }
-        if (sources->empty() && t->kind() != TargetKind::Interface) {
+        if (sources->empty() && t->kind() != TargetKind::Interface && t->merged_libraries().empty()) {
             Error e {
                 Error::Kind::Config,
                 "target '" + t->name() + "' has no sources; add some with .sources(...) or .sources_in(...)",
