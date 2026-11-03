@@ -69,7 +69,7 @@ struct ResolvedTarget {
     std::vector<BmiUnit> bmis;
     std::vector<detail::ModuleUnitInfo> units;       /* all sources, scanned */
     std::string objdir, output;                      /* relative to cwd */
-    std::string implib;                              /* MSVC import lib for shared libs */
+    std::string implib;                              /* Windows import lib for shared libs */
     std::string static_twin;                         /* shared lib archived for static_deps() consumers */
 };
 
@@ -232,8 +232,11 @@ std::string output_path_for(const Target& t, const std::filesystem::path& build_
     case TargetKind::StaticLibrary:
         return (build_dir / "lib" / triple_dir / (msvc ? name + ".lib" : "lib" + name + ".a")).generic_string();
     case TargetKind::SharedLibrary: {
+        /* Windows has no rpath: a dll must sit next to the executables that
+         * load it (bin/), only its import lib goes to lib/ (import_lib_path) */
         const std::string_view ext = windows ? ".dll" : triple.os == Os::MacOS ? ".dylib" : ".so";
-        return (build_dir / "lib" / triple_dir / ((msvc ? name : "lib" + name) + std::string(ext))).generic_string();
+        return (build_dir / (windows ? "bin" : "lib") / triple_dir /
+                ((msvc ? name : "lib" + name) + std::string(ext))).generic_string();
     }
     case TargetKind::Interface:
         return {}; /* header-only: no artifact */
@@ -241,13 +244,14 @@ std::string output_path_for(const Target& t, const std::filesystem::path& build_
     return name;
 }
 
-/* MSVC shared libraries ship an import lib next to the dll; consumers link
- * against the import lib, never the dll itself. */
-std::string import_lib_path(const std::string& artifact) {
-    std::string s = artifact;
-    if (s.ends_with(".dll"))
-        s.replace(s.size() - 4, 4, ".lib");
-    return s;
+/* Windows shared libraries come with an import lib in lib/ (the dll itself
+ * lives in bin/); consumers link against the import lib, never the dll.
+ * MSVC: <name>.lib, MinGW (zig/clang *-windows-gnu): lib<name>.dll.a. */
+std::string import_lib_path(const Target& t, const std::filesystem::path& build_dir,
+                            const std::string& triple_dir, const TargetTriple& triple) {
+    const bool msvc = triple.family == CompilerFamily::Msvc;
+    return (build_dir / "lib" / triple_dir /
+            (msvc ? t.name() + ".lib" : "lib" + t.name() + ".dll.a")).generic_string();
 }
 
 Result<void> emit_manifest(const Project& proj, std::vector<ResolvedTarget>& resolved,
@@ -301,7 +305,7 @@ Result<void> emit_manifest(const Project& proj, std::vector<ResolvedTarget>& res
         {"description", "LINK $out"},
     });
     w.rule("link_shared", {
-        /* $soname_flag: -Wl,-soname (ELF), -Wl,-install_name (macOS), "" (Windows) */
+        /* $soname_flag: -Wl,-soname (ELF), -Wl,-install_name (macOS), -Wl,--out-implib (MinGW), "" (MSVC) */
         {"command", "$cxx -shared $soname_flag -o $out $in $flags $link"},
         {"description", "LINK $out"},
     });
@@ -670,7 +674,8 @@ Result<void> emit_manifest(const Project& proj, std::vector<ResolvedTarget>& res
                 else if (static_consumer)
                     dep_outputs.push_back(it->second->static_twin);
                 else {
-                    dep_outputs.push_back(msvc ? it->second->implib : it->second->output);
+                    dep_outputs.push_back(it->second->implib.empty() ? it->second->output
+                                                                      : it->second->implib);
                     has_shared_dep = true;
                 }
                 if (auto sub = add_dep_outputs(*dep); !sub)
@@ -729,6 +734,8 @@ Result<void> emit_manifest(const Project& proj, std::vector<ResolvedTarget>& res
                 twin.vars = {{"ar", r.triple.ar}};
                 w.build(std::move(twin));
             }
+            if (shared && msvc) /* link.exe defaults the import lib next to the dll (bin/) */
+                link += " /IMPLIB:\"" + r.implib + "\"";
             NinjaWriter::Edge e;
             e.outputs = {r.output};
             e.rule = msvc ? (shared ? "link_shared_msvc" : "link_exe_msvc")
@@ -744,8 +751,10 @@ Result<void> emit_manifest(const Project& proj, std::vector<ResolvedTarget>& res
                 {"link", link},
             };
             if (shared) {
-                if (msvc) {
+                if (!r.implib.empty()) {
                     e.implicit_outs = {r.implib}; /* the import lib the linker writes */
+                    if (!msvc) /* without it zig names the import lib after the first object */
+                        e.vars.emplace_back("soname_flag", "-Wl,--out-implib," + r.implib);
                 } else {
                     const std::string soname = std::filesystem::path(r.output).filename().generic_string();
                     if (r.triple.os == Os::MacOS)
@@ -1097,37 +1106,62 @@ Result<void> Project::build() {
             log::error(sources.error());
             return std::unexpected(sources.error());
         }
-        if (sources->empty() && t->kind() != TargetKind::Interface)
-            return std::unexpected(Error {
+        if (sources->empty() && t->kind() != TargetKind::Interface) {
+            Error e {
                 Error::Kind::Config,
                 "target '" + t->name() + "' has no sources; add some with .sources(...) or .sources_in(...)",
-            });
+            };
+            log::error(e);
+            return std::unexpected(std::move(e));
+        }
 
         const ModulesMode mm =
             t->modules_mode() == ModulesMode::Default ? ModulesMode::Auto : t->modules_mode();
+
+        /* modules_mode(Manual) drives clang-scan-deps, which cannot parse the
+         * two-token `zig c++` command line (it reads 'zig' as the compiler and
+         * 'c++' as an input file). Fail with the fix instead of a scan error. */
+        if (mm == ModulesMode::Manual && detail::is_zig(r.triple)) {
+            Error e {
+                Error::Kind::Config,
+                "target '" + t->name() + "' sets modules_mode(Manual), but clang-scan-deps cannot "
+                "run the zig driver; use modules_mode(Auto) (the default) with clang for modules "
+                "(the zig toolchain does not build C++20 modules at all)",
+            };
+            log::error(e);
+            return std::unexpected(std::move(e));
+        }
 
         const std::string tdir = detail::triple_dir(r.triple);
         r.objdir = (bld / "obj" / tdir / t->name()).generic_string();
 
         for (const auto& f : *sources) {
             const bool is_bmi = f.ends_with(".cppm") || f.ends_with(".ixx");
-            if (is_bmi && mm == ModulesMode::Off)
-                return std::unexpected(Error {
+            if (is_bmi && mm == ModulesMode::Off) {
+                Error e {
                     Error::Kind::Config,
                     "'" + f + "' is a module interface unit, but target '" + t->name() +
                         "' has modules_mode(Off)",
                     std::filesystem::path(f),
-                });
+                };
+                log::error(e);
+                return std::unexpected(std::move(e));
+            }
             if (is_bmi) {
                 auto info = detail::scan_module_unit(f);
-                if (!info)
+                if (!info) {
+                    log::error(info.error());
                     return std::unexpected(info.error());
-                if (info->module_name.empty())
-                    return std::unexpected(Error {
+                }
+                if (info->module_name.empty()) {
+                    Error e {
                         Error::Kind::Config,
                         "no 'export module <name>;' declaration found in '" + f + "'",
                         std::filesystem::path(f),
-                    });
+                    };
+                    log::error(e);
+                    return std::unexpected(std::move(e));
+                }
                 info->is_bmi_source = true;
                 std::string flat = info->module_name;
                 std::replace(flat.begin(), flat.end(), ':', '_');
@@ -1140,28 +1174,64 @@ Result<void> Project::build() {
                 r.bmis.push_back(std::move(b));
             } else if (f.ends_with(".cpp") || f.ends_with(".cc") || f.ends_with(".cxx")) {
                 auto info = detail::scan_module_unit(f);
-                if (!info)
+                if (!info) {
+                    log::error(info.error());
                     return std::unexpected(info.error());
+                }
                 r.cxx_sources.push_back(f);
                 r.units.push_back(std::move(*info));
             } else if (f.ends_with(".c")) {
                 r.c_sources.push_back(f);
             } else {
-                return std::unexpected(Error {Error::Kind::Config, "unsupported source file '" + f + "'", std::filesystem::path(f)});
+                Error e {Error::Kind::Config, "unsupported source file '" + f + "'", std::filesystem::path(f)};
+                log::error(e);
+                return std::unexpected(std::move(e));
             }
         }
 
         /* BMI wiring is clang-specific (-fmodule-output/-fmodule-file) */
-        if (r.triple.family == CompilerFamily::Msvc && !r.bmis.empty())
-            return std::unexpected(Error {
+        if (r.triple.family == CompilerFamily::Msvc && !r.bmis.empty()) {
+            Error e {
                 Error::Kind::Config,
                 "target '" + t->name() + "' has .cppm sources, but C++ module BMI wiring is not "
                 "implemented for MSVC targets (it relies on clang's -fmodule-output/-fmodule-file)",
-            });
+            };
+            log::error(e);
+            return std::unexpected(std::move(e));
+        }
+
+        /* zig's `zig c++` wrapper does not route a module-interface compile
+         * through its C++ setup: a .cppm gets the host's system headers and a
+         * default triple (not zig's bundled libc++), and forcing -x c++ makes
+         * its build cache discard the emitted BMI. No consumable BMI comes out.
+         * (Verified with zig 0.17; see docs/cross-compilation.md "Known gaps".) */
+        if (detail::is_zig(r.triple) && !r.bmis.empty()) {
+            Error e {
+                Error::Kind::Config,
+                "target '" + t->name() + "' has .cppm sources, but the zig toolchain cannot build "
+                "C++20 named modules (its driver gives module units the wrong headers and discards "
+                "the BMI); build modules with clang, e.g:\n"
+                "  correct:   proj.configure(Config().toolchain(truss::Toolchain::LLVM))\n"
+                "  incorrect: Config().toolchain(truss::Toolchain::Zig)   // with .cppm sources",
+            };
+            log::error(e);
+            return std::unexpected(std::move(e));
+        }
+        if (detail::is_zig(r.triple) && !t->pch().empty()) {
+            Error e {
+                Error::Kind::Config,
+                "target '" + t->name() + "' uses pch(), but the zig toolchain cannot build a "
+                "precompiled header (its driver sends the -x c++-header output to the linker); "
+                "drop pch() for zig targets or build with clang",
+            };
+            log::error(e);
+            return std::unexpected(std::move(e));
+        }
 
         r.output = output_path_for(*t, bld, tdir, r.triple);
-        if (r.triple.family == CompilerFamily::Msvc && t->kind() == TargetKind::SharedLibrary)
-            r.implib = import_lib_path(r.output);
+        if (t->kind() == TargetKind::SharedLibrary &&
+            (r.triple.family == CompilerFamily::Msvc || r.triple.os == Os::Windows))
+            r.implib = import_lib_path(*t, bld, tdir, r.triple);
         resolved.push_back(std::move(r));
     }
 

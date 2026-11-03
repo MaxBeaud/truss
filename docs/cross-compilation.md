@@ -19,7 +19,7 @@ naming/link conventions). Phases 2–5 below are the proposed roadmap.
 
 | Route | Sysroot | Strengths | Limits |
 |---|---|---|---|
-| **zig** (`Toolchain::Zig` + `target()`) | bundled for every target (glibc versions, musl, MinGW, macOS libSystem stubs) | zero setup; glibc version pinning (`x86_64-linux-gnu.2.17`); static libc++ by default | no ASan/UBSan runtimes; no clang-scan-deps (`ModulesMode::Manual`); macOS frameworks not bundled |
+| **zig** (`Toolchain::Zig` + `target()`) | bundled for every target (glibc versions, musl, MinGW, macOS libSystem stubs) | zero setup; glibc version pinning (`x86_64-linux-gnu.2.17`); static libc++ by default | no ASan/UBSan runtimes; cannot build C++20 modules or PCH at all (use clang); macOS frameworks not bundled |
 | **clang** (`target()` + `--sysroot`) | user-provided (Debian multiarch, `xwin` for MSVC, Android NDK, Apple SDK) | full clang feature set, sanitizers where the sysroot has them | sysroot management is on the user |
 | **GCC** (prefixed driver) | comes with the cross package (`aarch64-linux-gnu-g++`) | distro-packaged, reliable | one driver per target; `target()` refused |
 | **clang-cl** (MSVC ABI) | Windows SDK + MSVC CRT (`xwin`) | real MSVC ABI from Linux | no modules/static options yet |
@@ -87,12 +87,49 @@ requires the build machine's glibc version (symbol versions such as
 `GLIBC_2.38`). The portable recipe for `truss-dist`:
 
 ```cpp
-proj.configure(Config().toolchain(Toolchain::Zig).target("x86_64-linux-gnu.2.17"));
-dist.static_deps().static_stdlib(StaticStdlib::Llvm);   // runs on any glibc >= 2.17
-// or fully static, no glibc at all:
+// static-link truss's OWN dependencies, keep libc++ dynamic (fully static not required):
 proj.configure(Config().toolchain(Toolchain::Zig).target("x86_64-linux-musl"));
-dist.static_deps().static_stdlib(StaticStdlib::Musl);
+dist.static_deps();
+// glibc-portable alternative (runs on any glibc >= 2.17):
+proj.configure(Config().toolchain(Toolchain::Zig).target("x86_64-linux-gnu.2.17"));
+dist.static_deps().static_stdlib(StaticStdlib::Llvm);
 ```
+
+Musl/zig/cross-compilation support in the tool is done and verified; shipping truss
+itself as a portable binary (this section) is a secondary follow-up.
+
+**Status: BLOCKED via modules; the amalgam path is closer but has two concrete
+blockers (verified 2026-11-02 with zig 0.17.0).** truss's own sources are `.cppm`
+modules (`import truss;`), and zig cannot build C++20 modules (see Known gaps), so
+the direct build is out. The single-header amalgamation (`examples/amalgam`, non-module)
+sidesteps modules and gets much further:
+
+- First catch RESOLVED: truss's C++ *does* compile against zig's bundled libc++ 22.
+  `zig c++ -std=c++26 -target x86_64-linux-musl -Ibuild/dist -Ivendor
+  examples/amalgam/truss.cpp` compiles and links a fully-static binary cleanly.
+- Blocker A (runtime, zig-musl only): `truss-samu: reallocarray: No such file or
+  directory` is raised only when RUNNING a truss built with ZIG for a musl target.
+  It is a quirk of zig's bundled musl, not musl in general. Measured: zig-musl
+  `realloc(NULL,0)` and `realloc(p,0)` both return NULL; real musl
+  (`x86_64-linux-musl-gcc -static`) both non-null; glibc `realloc(NULL,0)` non-null,
+  `realloc(p,0)` NULL. gdb backtrace: samurai's `depsinit` (deps.c) calls
+  `xreallocarray(NULL, 0, 32)` when `.ninja_deps` is empty (fresh build dir);
+  zig-musl returns NULL and `xreallocarray` treats any NULL as `fatal()`. The
+  "No such file or directory" is a stale errno, not from realloc. Does not
+  reproduce on a real musl system (Alpine / musl-gcc).
+  Toolchain reality on this box: `musl-clang` and `x86_64-linux-musl-gcc` are
+  C-only (no C++ headers) and there is no musl `g++`; `zig c++ -target
+  x86_64-linux-musl` is the only working musl C++ toolchain.
+  PENDING (not yet applied): a one-line sanctioned truss patch to
+  `vendor/samurai/util.c` `xreallocarray`: only `fatal` when a non-zero-size
+  allocation fails (`if (!p && n && m) fatal(...)`), accepting NULL for a
+  zero-size request. Valid C and C++, inert on glibc/real musl; follows the
+  truss-patch precedent in `vendor/samurai/TRUSS-VENDOR.txt`.
+- Blocker B (gnu.2.17, link): truss calls `posix_spawn_file_actions_addchdir_np`
+  (`run_impl`, proc.cpp), added in glibc 2.29. This only affects a glibc-floor
+  artifact below 2.29 (undefined symbol at link) and is irrelevant to a musl
+  build. For the glibc-portable path, raise the floor (e.g. `gnu.2.29`) or add a
+  `chdir`-in-child fallback.
 
 Two catches to resolve first:
 
@@ -108,8 +145,17 @@ needs the SDK for frameworks).
 
 ## Known gaps
 
-- `ModulesMode::Manual` uses `clang-scan-deps`, which cannot run a `zig c++`
-  command line: use `Auto` with zig.
+- zig cannot build C++20 named modules at all (zig 0.17.0). `zig c++` does not
+  treat module-interface extensions (.cppm/.ixx/...) as C++, so the compile gets
+  the host's system headers and clang's default triple instead of zig's libc++.
+  Forcing `-x c++` restores headers but clang then emits no BMI, and forcing the
+  BMI out fails because zig's build cache discards it. truss raises a Config
+  error for `Toolchain::Zig` + `.cppm` sources, pointing to `Toolchain::LLVM`.
+- `ModulesMode::Manual` with zig is an upfront Config error: `clang-scan-deps`
+  cannot run the two-token `zig c++` command line. `Auto` does not work either.
+- zig cannot build precompiled headers: `zig c++ -x c++-header` sends the output
+  to the linker ("unknown file type"). `pch()` with `Toolchain::Zig` is a Config
+  error.
 - Sanitizers on cross targets depend on the sysroot shipping the runtimes
   (zig ships none).
 - Windows *hosts* (truss itself running on Windows) are a separate roadmap item:

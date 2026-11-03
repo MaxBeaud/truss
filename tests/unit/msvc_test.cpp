@@ -133,6 +133,29 @@ TEST_CASE("msvc: clang-cl end-to-end (compile, /showIncludes deps, archive, link
     CHECK(mtime_ns(obj) == after);
 }
 
+TEST_CASE("msvc: shared lib dll goes to bin/, its import lib to lib/") {
+    ScratchDir scratch {"dll"};
+    REQUIRE(detail::write_file("src/x.cpp", "__declspec(dllexport) int x() { return 1; }\n").has_value());
+    REQUIRE(detail::write_file("src/main.cpp", "int x();\nint main() { return x(); }\n").has_value());
+    char prog[] = "truss-tests";
+    char dry[] = "-n"; /* manifest only: no clang-cl needed */
+    char* argv[] = {prog, dry};
+    Project proj("msvc-dll", 2, argv);
+    proj.configure(Config().launcher(""));
+    auto& lib = proj.add_shared_library("x").sources("src/x.cpp").cross_target(clang_cl_triple());
+    proj.add_executable("app").sources("src/main.cpp").depends_on(lib).cross_target(clang_cl_triple());
+    auto r = proj.build();
+    INFO((r ? "ok" : r.error().message));
+    REQUIRE(r.has_value());
+    auto m = detail::read_file("build/debug/ninja/build.ninja");
+    REQUIRE(m.has_value());
+    /* no rpath on Windows: the dll must sit next to app.exe */
+    CHECK(m->find("bin/x64-windows-msvc/x.dll") != std::string::npos);
+    CHECK(m->find("/IMPLIB:\"") != std::string::npos);
+    CHECK(m->find("lib/x64-windows-msvc/x.lib") != std::string::npos);
+    CHECK(m->find("lib/x64-windows-msvc/x.dll") == std::string::npos);
+}
+
 TEST_CASE("msvc: system includes use /external:I with /external:W0") {
     const std::array<std::string, 0> none {};
     const std::array<std::string, 1> sys {"third/include"};

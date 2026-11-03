@@ -656,8 +656,8 @@ merge_imports string round-trip, read_lines double-open).
 - zig: `zig c++` is clang underneath (family Clang, `detail::is_zig` for the
   differences): `-target <t>` (clang: `--target=<t>`), no `-stdlib=`, no
   ccache launcher (any zig target disables it for the manifest — rules are
-  shared), `triple_dir` family part "zig". Zig is NOT installed on this box:
-  zig paths are covered by dry-run (`-n`) manifest tests only.
+  shared), `triple_dir` family part "zig". zig 0.17.0 is installed at
+  /usr/bin/zig; the paths below were verified for real on 2026-11-02 (see §28).
 - C driver for `.c` sources: `detail::c_driver` (clang++-19 -> clang-19,
   `zig c++` -> `zig cc`, *-g++ -> *-gcc). The old exact-match on "clang++"
   compiled C as C++ for any other spelling.
@@ -723,3 +723,59 @@ merge_imports string round-trip, read_lines double-open).
 - Tests: usage_test "tasks:" cases (118 total); setup.sh examples run
   `task stats` and grep `task list`.
 
+
+## 28. Zig toolchain verified for real (zig 0.17.0)
+
+- zig 0.17.0 at /usr/bin/zig (bundled clang 22.1.8). Verified empirically 2026-11-02.
+- Host (`Config().toolchain(Toolchain::Zig)`): `zig c++`/`zig cc`/`zig ar`
+  compile, link, run, test all green. libc++ static by default (ldd: libc only).
+- Cross targets (checked with `file`/`ldd`/`objdump`):
+  - x86_64-linux-musl -> `x64-linux-musl-zig`; static by default (even without
+    static_stdlib); runs on host.
+  - aarch64-linux-musl -> `arm64-linux-musl-zig`; ELF aarch64, static.
+  - x86_64-windows-gnu -> `x64-windows-zig`; app.exe PE32+ console, libcore.dll PE32+ DLL.
+  - x86_64-linux-gnu.2.17 -> `x64-linux-gnu.2.17-zig`; dynamic glibc, max symbol
+    version GLIBC_2.17 (`objdump -T | grep GLIBC`); runs on host. Portability lever.
+- C sources via `zig cc`; `zig ar` archives work.
+- Static: `static_deps().static_stdlib(StaticStdlib::Musl)` on a musl target ->
+  "not a dynamic executable". `StaticStdlib::Llvm` on zig is a no-op (zig always
+  links libc++/libc++abi statically), emits no flag; gnu.2.17 + Llvm = dynamic
+  glibc<=2.17 binary, no dynamic libstdc++/libc++.
+- Shared libs, ELF: SONAME set (libcore.so), consumer gets RUNPATH
+  `$ORIGIN/../../lib/<triple>` + NEEDED libcore.so; runs.
+- Shared libs, windows-gnu (MinGW): .dll in bin/<triple>/, import lib in
+  lib/<triple>/lib<name>.dll.a (via `-Wl,--out-implib`); exe links the import lib.
+- BROKEN, now Config errors:
+  - C++20 modules: `zig c++` does not treat .cppm/.ixx/.ccm/.cxxm/.c++m as C++, so
+    module compiles get host system headers + clang default triple x86_64-pc-linux-gnu.
+    `-x c++` restores headers/triple but clang then emits no BMI (-fmodule-output
+    "unused"); `-Xclang -fmodule-output=`/`-emit-module-interface` fail (zig cache
+    discards the BMI or misroutes it to the linker). Zig + `.cppm` -> Config error
+    pointing to Toolchain::LLVM.
+  - PCH: `zig c++ -x c++-header` output goes to the linker ("unknown file type").
+    Zig + `pch()` -> Config error.
+  - `ModulesMode::Manual`: clang-scan-deps reads "zig" as compiler, "c++" as an
+    input. Upfront Config error (was a garbled runtime scan failure).
+- Phase 5 (building truss itself with zig): direct build BLOCKED (truss is .cppm
+  modules, `import truss;`). Amalgam path (examples/amalgam, non-module) is close:
+  `zig c++ -std=c++26 -target x86_64-linux-musl -Ibuild/dist -Ivendor
+  examples/amalgam/truss.cpp` compiles + links fully static (truss's C++ DOES
+  build against zig's libc++ 22 — first catch resolved). Shipping truss itself as
+  a portable binary is a SECONDARY follow-up (musl/zig/cross support in the tool is
+  done + verified). Recipe: `static_deps()` for truss's own deps, libc++ stays
+  DYNAMIC (not necessarily fully static). Two blockers:
+  (A) `truss-samu: reallocarray: No such file or directory` only when RUNNING a
+  truss built with ZIG for a musl target: quirk of ZIG'S BUNDLED MUSL, not musl in
+  general. Measured: zig-musl `realloc(NULL,0)` and `realloc(p,0)` both NULL; real
+  musl (`x86_64-linux-musl-gcc -static`) both non-null; glibc `realloc(NULL,0)`
+  non-null, `realloc(p,0)` NULL. gdb: samurai `depsinit` (deps.c) calls
+  `xreallocarray(NULL,0,32)` on an empty `.ninja_deps` (fresh build dir); NULL ->
+  `fatal()`. The ENOENT text is a stale errno. No repro on Alpine/musl-gcc. Toolchain
+  reality here: `musl-clang` and `x86_64-linux-musl-gcc` are C-only (no C++ headers),
+  no musl g++; `zig c++ -target x86_64-linux-musl` is the only musl C++ toolchain.
+  PENDING fix (not applied): one-line sanctioned truss patch in
+  vendor/samurai/util.c `xreallocarray`: `if (!p && n && m) fatal(...)` (NULL ok for
+  a zero-size request); valid C/C++, inert on glibc/real musl; precedent in
+  vendor/samurai/TRUSS-VENDOR.txt. (B) gnu.2.17 link: `posix_spawn_file_actions_
+  addchdir_np` (glibc 2.29) only matters for a glibc-floor artifact <2.29 (irrelevant
+  to musl); raise the floor or add a child-side chdir fallback.

@@ -240,11 +240,64 @@ TEST_CASE("target: Windows cross build names app.exe, zig disables the launcher"
     REQUIRE(r.has_value());
     const std::string m = manifest_text();
     CHECK(contains(m, "bin/x64-windows-zig/app.exe"));
-    CHECK(contains(m, "lib/x64-windows-zig/libx.dll"));
+    /* no rpath on Windows: the dll sits next to app.exe, consumers link the
+     * MinGW import lib (named explicitly, zig would name it after an object) */
+    CHECK(contains(m, "bin/x64-windows-zig/libx.dll"));
+    CHECK(contains(m, "-Wl,--out-implib,"));
+    CHECK(contains(m, "lib/x64-windows-zig/libx.dll.a"));
+    CHECK_FALSE(contains(m, "lib/x64-windows-zig/libx.dll "));
     CHECK(contains(m, "cc = zig cc"));
     CHECK(contains(m, "command = $cxx $flags -MMD")); /* no launcher prefix */
     CHECK_FALSE(contains(m, "-soname"));
     CHECK_FALSE(contains(m, "ORIGIN"));
+}
+
+TEST_CASE("zig: C++20 modules are refused with a clang-pointing Config error") {
+    ScratchDir scratch {"zig-mod"};
+    REQUIRE(detail::write_file("src/math.cppm", "export module math;\nexport int f();\n").has_value());
+    REQUIRE(detail::write_file("src/math_impl.cpp", "module math;\nint f() { return 1; }\n").has_value());
+    char prog[] = "truss-tests";
+    char dry[] = "-n"; /* the error is raised at resolve time: zig never runs */
+    char* argv[] = {prog, dry};
+    Project proj("zig-mod", 2, argv);
+    proj.configure(Config().toolchain(Toolchain::Zig));
+    proj.add_static_library("math").sources({"src/math.cppm", "src/math_impl.cpp"});
+    auto r = proj.build();
+    REQUIRE_FALSE(r.has_value());
+    CHECK(r.error().kind == Error::Kind::Config);
+    CHECK(contains(r.error().message, "zig toolchain cannot build"));
+    CHECK(contains(r.error().message, "Toolchain::LLVM"));
+}
+
+TEST_CASE("zig: modules_mode(Manual) is refused before clang-scan-deps runs") {
+    ScratchDir scratch {"zig-manual"};
+    REQUIRE(detail::write_file("app/main.cpp", "int main() {}\n").has_value());
+    char prog[] = "truss-tests";
+    char dry[] = "-n";
+    char* argv[] = {prog, dry};
+    Project proj("zig-manual", 2, argv);
+    proj.configure(Config().toolchain(Toolchain::Zig));
+    proj.add_executable("app").sources("app/main.cpp").modules_mode(ModulesMode::Manual);
+    auto r = proj.build();
+    REQUIRE_FALSE(r.has_value());
+    CHECK(r.error().kind == Error::Kind::Config);
+    CHECK(contains(r.error().message, "clang-scan-deps cannot run the zig driver"));
+}
+
+TEST_CASE("zig: pch() is refused with a Config error") {
+    ScratchDir scratch {"zig-pch"};
+    REQUIRE(detail::write_file("app/main.cpp", "int main() {}\n").has_value());
+    REQUIRE(detail::write_file("pch.hpp", "#include <vector>\n").has_value());
+    char prog[] = "truss-tests";
+    char dry[] = "-n";
+    char* argv[] = {prog, dry};
+    Project proj("zig-pch", 2, argv);
+    proj.configure(Config().toolchain(Toolchain::Zig));
+    proj.add_executable("app").sources("app/main.cpp").pch("pch.hpp");
+    auto r = proj.build();
+    REQUIRE_FALSE(r.has_value());
+    CHECK(r.error().kind == Error::Kind::Config);
+    CHECK(contains(r.error().message, "cannot build a precompiled header"));
 }
 
 /* --- integration (real clang builds) -------------------------------------------- */
@@ -397,4 +450,87 @@ TEST_CASE("capture: concurrent spawns do not leak pipe ends") {
         REQUIRE(out[i].has_value());
         CHECK(out[i]->output == std::to_string(i) + "\n");
     }
+}
+
+/* --- real zig end-to-end (skipped when zig is absent) ---------------------------- */
+
+TEST_CASE("zig e2e: host static C library + executable (zig cc, zig ar)") {
+    if (!os::program_exists("zig")) { MESSAGE("zig not installed, skipping"); return; }
+    ScratchDir scratch {"zig-e2e-host"};
+    REQUIRE(detail::write_file("lib/val.c", "int val(void) { return 42; }\n").has_value());
+    REQUIRE(detail::write_file("app/main.c", "int val(void);\nint main(void) { return val() == 42 ? 0 : 1; }\n")
+                .has_value());
+    char prog[] = "truss-tests";
+    char dbg[] = "debug";
+    char* argv[] = {prog, dbg};
+    Project proj("zig-e2e-host", 2, argv);
+    proj.configure(Config().toolchain(Toolchain::Zig));
+    auto& lib = proj.add_static_library("val").sources("lib/val.c");
+    proj.add_executable("app").sources("app/main.c").depends_on(lib);
+    auto r = proj.build();
+    INFO((r ? "ok" : r.error().message));
+    REQUIRE(r.has_value());
+
+    const auto bld = std::filesystem::current_path() / "build/debug";
+    CHECK(std::filesystem::exists(bld / "lib/x64-linux-zig/libval.a"));
+    const auto exe = bld / "bin/x64-linux-zig/app";
+    REQUIRE(std::filesystem::exists(exe));
+    auto run = os::run({exe.string()});
+    REQUIRE(run.has_value());
+    CHECK(run->exit_code == 0);
+}
+
+TEST_CASE("zig e2e: x86_64-linux-musl static_stdlib(Musl) + static_deps runs fully static") {
+    if (!os::program_exists("zig")) { MESSAGE("zig not installed, skipping"); return; }
+    ScratchDir scratch {"zig-e2e-musl"};
+    REQUIRE(detail::write_file("g/greet.c", "int greet(void) { return 7; }\n").has_value());
+    REQUIRE(detail::write_file("app/main.cpp",
+                               "#include <string>\n#include <vector>\n"
+                               "extern \"C\" int greet();\n"
+                               "int main() { std::vector<std::string> v {\"a\"}; return (v.size() == 1 && greet() == 7) ? 0 : 1; }\n")
+                .has_value());
+    char prog[] = "truss-tests";
+    char dbg[] = "debug";
+    char* argv[] = {prog, dbg};
+    Project proj("zig-e2e-musl", 2, argv);
+    proj.configure(Config().toolchain(Toolchain::Zig).target("x86_64-linux-musl"));
+    auto& g = proj.add_static_library("greet").sources("g/greet.c");
+    proj.add_executable("app")
+        .sources("app/main.cpp")
+        .depends_on(g)
+        .static_deps()
+        .static_stdlib(StaticStdlib::Musl);
+    auto r = proj.build();
+    INFO((r ? "ok" : r.error().message));
+    REQUIRE(r.has_value());
+
+    const auto exe = std::filesystem::current_path() / "build/debug/bin/x64-linux-musl-zig/app";
+    REQUIRE(std::filesystem::exists(exe));
+    auto run = os::run({exe.string()});
+    REQUIRE(run.has_value());
+    CHECK(run->exit_code == 0);
+    auto ldd = os::capture({"ldd", exe.string()});
+    if (ldd.has_value()) {
+        INFO(ldd->output);
+        CHECK((contains(ldd->output, "not a dynamic executable") || contains(ldd->output, "statically linked")));
+    }
+}
+
+TEST_CASE("zig e2e: x86_64-windows-gnu shared library produces dll + import lib") {
+    if (!os::program_exists("zig")) { MESSAGE("zig not installed, skipping"); return; }
+    ScratchDir scratch {"zig-e2e-win"};
+    REQUIRE(detail::write_file("lib/x.c", "int x(void) { return 1; }\n").has_value());
+    char prog[] = "truss-tests";
+    char dbg[] = "debug";
+    char* argv[] = {prog, dbg};
+    Project proj("zig-e2e-win", 2, argv);
+    proj.configure(Config().toolchain(Toolchain::Zig).target("x86_64-windows-gnu").launcher("true"));
+    proj.add_shared_library("x").sources("lib/x.c");
+    auto r = proj.build();
+    INFO((r ? "ok" : r.error().message));
+    REQUIRE(r.has_value());
+
+    const auto bld = std::filesystem::current_path() / "build/debug";
+    CHECK(std::filesystem::exists(bld / "bin/x64-windows-zig/libx.dll"));
+    CHECK(std::filesystem::exists(bld / "lib/x64-windows-zig/libx.dll.a"));
 }
