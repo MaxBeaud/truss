@@ -119,14 +119,15 @@ TEST_CASE("resolve: BMI source never consumes its own BMI") {
     CHECK(r->second == std::vector<std::string>{"/b/math_part.pcm"});
 }
 
-TEST_CASE("resolve: import std is skipped, unknown import is a Config error") {
-    const std::map<std::string, std::string, std::less<>> bmis {{"math", "/b/math.pcm"}};
+TEST_CASE("resolve: import std resolves via the bmis map, unknown import is a Config error") {
+    const std::map<std::string, std::string, std::less<>> bmis {{"math", "/b/math.pcm"}, {"std", "/b/std.pcm"}};
     detail::ModuleUnitInfo u;
     u.path = "app.cpp";
     u.imports = {"std"};
     auto ok = detail::resolve_module_imports(u, bmis);
     REQUIRE(ok.has_value());
-    CHECK(ok->first.empty());
+    CHECK(ok->first == "-fmodule-file=std=/b/std.pcm");
+    CHECK(ok->second == std::vector<std::string>{"/b/std.pcm"});
 
     u.imports = {"nope"};
     auto bad = detail::resolve_module_imports(u, bmis);

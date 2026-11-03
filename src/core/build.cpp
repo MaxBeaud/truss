@@ -14,6 +14,7 @@ module;
 #include <iterator>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <ranges>
 #include <set>
 #include <span>
@@ -24,6 +25,8 @@ module;
 #include <unordered_set>
 #include <utility>
 #include <vector>
+
+#include <nlohmann/json.hpp>
 
 #include <unistd.h>
 
@@ -71,6 +74,8 @@ struct ResolvedTarget {
     std::string objdir, output;                      /* relative to cwd */
     std::string implib;                              /* Windows import lib for shared libs */
     std::string static_twin;                         /* shared lib archived for static_deps() consumers */
+    bool needs_std {};                               /* some unit does `import std;` */
+    bool needs_std_compat {};                        /* some unit does `import std.compat;` */
 };
 
 /* name -> resolved target, built once per build (avoids repeated linear scans) */
@@ -88,6 +93,80 @@ void collect_bmis(const ResolvedTarget& r, const TargetIndex& idx,
         if (it != idx.end())
             collect_bmis(*it->second, idx, out, seen);
     }
+}
+
+/* `import std;` / `import std.compat;`: libc++ ships the module sources, and
+ * one clang call builds both the BMI and its object. Built once per
+ * (toolchain, -std) and shared by every target that imports it. */
+struct StdModule {
+    std::string pcm, obj, compat_pcm, compat_obj;
+};
+
+struct StdManifest {
+    std::string std_source, compat_source;
+    std::vector<std::string> system_dirs;
+};
+
+/* -std flag for the std module; the guard has already ensured >= C++23 */
+std::string_view std_module_flag(CppStandard s) {
+    return s == CppStandard::Cpp26 ? "-std=c++26" : "-std=c++23";
+}
+
+/* Ask clang for libc++'s module manifest (empty for g++, zig, libstdc++).
+ * Paths in it are relative to the manifest's directory. Cached per query. */
+Result<StdManifest> discover_std_manifest(const std::string& compiler, std::string_view std_flag) {
+    static std::mutex mutex;
+    static std::map<std::string, StdManifest, std::less<>> cache;
+    const std::string key = compiler + ' ' + std::string(std_flag);
+    const std::scoped_lock lock(mutex);
+    if (const auto it = cache.find(key); it != cache.end())
+        return it->second;
+
+    const auto fail = [&](std::string why) {
+        return std::unexpected(Error {
+            Error::Kind::Toolchain,
+            "`import std;` needs libc++'s module manifest, but " + why + " (compiler: '" + compiler +
+                "'); install libc++ with its module sources (e.g. libc++-dev / libc++ 18+)",
+        });
+    };
+    const std::vector<std::string> argv {compiler, std::string(std_flag), "-stdlib=libc++",
+                                         "-print-library-module-manifest-path"};
+    auto out = detail::run_process_stdout(argv);
+    if (!out || out->exit_code != 0)
+        return fail("`" + compiler + " -print-library-module-manifest-path` failed");
+    std::string path = out->output;
+    while (!path.empty() && std::isspace(static_cast<unsigned char>(path.back())))
+        path.pop_back();
+    std::error_code ec;
+    if (path.empty() || !std::filesystem::is_regular_file(path, ec))
+        return fail("the compiler reports no manifest ('" + path + "')");
+
+    const std::filesystem::path manifest(path);
+    const std::filesystem::path base = manifest.parent_path();
+    const auto text = detail::read_file(manifest);
+    if (!text)
+        return std::unexpected(text.error());
+    const auto j = nlohmann::json::parse(*text, nullptr, false);
+    if (j.is_discarded() || !j.contains("modules") || !j["modules"].is_array())
+        return fail("'" + path + "' is not a module manifest");
+
+    StdManifest m;
+    for (const auto& mod : j["modules"]) {
+        const std::string name = mod.value("logical-name", "");
+        if (name != "std" && name != "std.compat")
+            continue;
+        const std::string src =
+            std::filesystem::weakly_canonical(base / mod.value("source-path", "")).generic_string();
+        (name == "std" ? m.std_source : m.compat_source) = src;
+        if (name == "std" && mod.contains("local-arguments"))
+            for (const auto& d : mod["local-arguments"].value("system-include-directories",
+                                                              nlohmann::json::array()))
+                m.system_dirs.push_back(
+                    std::filesystem::weakly_canonical(base / d.get<std::string>()).generic_string());
+    }
+    if (m.std_source.empty())
+        return fail("'" + path + "' has no `std` module");
+    return cache.emplace(key, std::move(m)).first->second;
 }
 
 /* Usage requirements a target sees through depends_on (transitively):
@@ -261,6 +340,66 @@ Result<void> emit_manifest(const Project& proj, std::vector<ResolvedTarget>& res
     TargetIndex by_name;
     for (const auto& r : resolved)
         by_name[std::string_view(r.target->name())] = &r;
+
+    /* std / std.compat edges: one pair per (triple dir, -std), emitted on first use */
+    struct StdEntry {
+        StdModule paths;
+        StdManifest manifest;
+        std::string flags;
+        bool compat_emitted {};
+    };
+    std::map<std::string, StdEntry, std::less<>> std_modules;
+    const auto std_for = [&](const ResolvedTarget& r, bool compat) -> Result<StdModule> {
+        const std::string_view flag = std_module_flag(r.target->cpp_standard());
+        const std::string key = detail::triple_dir(r.triple) + "-" + std::string(flag.substr(5));
+        const auto emit = [&](const StdEntry& en, const std::string& src, const std::string& obj,
+                              const std::string& pcm, std::string_view extra, std::vector<std::string> ins) {
+            NinjaWriter::Edge e;
+            e.outputs = {obj};
+            e.implicit_outs = {pcm};
+            e.rule = "compile_bmi";
+            e.inputs = {src};
+            e.implicit_ins = std::move(ins);
+            e.vars = {
+                {"cxx", r.triple.compiler},
+                {"flags", en.flags + std::string(extra)},
+                {"bmi", pcm},
+                {"depfile", obj + ".d"},
+            };
+            w.build(std::move(e));
+        };
+        auto it = std_modules.find(key);
+        if (it == std_modules.end()) {
+            auto man = discover_std_manifest(r.triple.compiler, flag);
+            if (!man)
+                return std::unexpected(man.error());
+            const std::string dir = (build_dir / "std" / key).generic_string();
+            if (auto mk = detail::make_dirs(dir); !mk)
+                return std::unexpected(mk.error());
+            StdEntry en;
+            en.paths = {dir + "/std.pcm", dir + "/std.o", dir + "/std.compat.pcm", dir + "/std.compat.o"};
+            en.flags = std::string(flag) + " -stdlib=libc++";
+            if (!r.triple.target.empty())
+                en.flags += " --target=" + r.triple.target;
+            en.flags += " -fPIC -Wno-reserved-module-identifier";
+            for (const auto& d : man->system_dirs)
+                en.flags += " -isystem \"" + d + "\"";
+            en.manifest = std::move(*man);
+            emit(en, en.manifest.std_source, en.paths.obj, en.paths.pcm, "", {});
+            it = std_modules.emplace(key, std::move(en)).first;
+        }
+        StdEntry& en = it->second;
+        if (compat && !en.compat_emitted) {
+            if (en.manifest.compat_source.empty())
+                return std::unexpected(Error {
+                    Error::Kind::Toolchain, "libc++'s module manifest has no `std.compat` module",
+                });
+            emit(en, en.manifest.compat_source, en.paths.compat_obj, en.paths.compat_pcm,
+                 " -fmodule-file=std=" + en.paths.pcm, {en.paths.pcm});
+            en.compat_emitted = true;
+        }
+        return en.paths;
+    };
 
     w.comment("generated by truss " + std::string(kVersion) + " — do not edit");
     w.var("ninja_required_version", "1.3");
@@ -488,6 +627,18 @@ Result<void> emit_manifest(const Project& proj, std::vector<ResolvedTarget>& res
         std::set<const Target*> seen;
         collect_bmis(r, by_name, bmis, seen);
 
+        /* std / std.compat resolve like any other module */
+        StdModule std_mod;
+        if (r.needs_std || r.needs_std_compat) {
+            auto sm = std_for(r, r.needs_std_compat);
+            if (!sm)
+                return std::unexpected(sm.error());
+            std_mod = std::move(*sm);
+            bmis["std"] = std_mod.pcm;
+            if (r.needs_std_compat)
+                bmis["std.compat"] = std_mod.compat_pcm;
+        }
+
         std::map<std::string_view, const detail::ModuleUnitInfo*> unit_by_path;
         for (const auto& u : r.units)
             unit_by_path[std::string_view(u.path)] = &u;
@@ -686,6 +837,39 @@ Result<void> emit_manifest(const Project& proj, std::vector<ResolvedTarget>& res
         if (auto sub = add_dep_outputs(t); !sub)
             return std::unexpected(sub.error());
 
+        /* std.o defines the module initializer: link it exactly once per
+         * artifact, never inside an archive (a second copy is a duplicate
+         * definition). Dependencies reached through a shared lib carry their
+         * own copy. */
+        std::vector<std::string> std_objects;
+        if (t.kind() != TargetKind::StaticLibrary) {
+            bool want_std = r.needs_std || r.needs_std_compat, want_compat = r.needs_std_compat;
+            std::set<const Target*> std_seen {&t};
+            std::function<void(const Target&)> walk = [&](const Target& d) {
+                for (const Target* dep : d.deps()) {
+                    if (!std_seen.insert(dep).second)
+                        continue;
+                    const auto it = by_name.find(dep->name());
+                    if (it == by_name.end())
+                        continue;
+                    if (dep->kind() == TargetKind::SharedLibrary && !static_consumer)
+                        continue;
+                    want_std |= it->second->needs_std || it->second->needs_std_compat;
+                    want_compat |= it->second->needs_std_compat;
+                    walk(*dep);
+                }
+            };
+            walk(t);
+            if (want_std) {
+                auto sm = std_for(r, want_compat);
+                if (!sm)
+                    return std::unexpected(sm.error());
+                std_objects.push_back(sm->obj);
+                if (want_compat)
+                    std_objects.push_back(sm->compat_obj);
+            }
+        }
+
         if (t.kind() == TargetKind::StaticLibrary) {
             NinjaWriter::Edge e;
             e.outputs = {r.output};
@@ -741,6 +925,8 @@ Result<void> emit_manifest(const Project& proj, std::vector<ResolvedTarget>& res
             e.rule = msvc ? (shared ? "link_shared_msvc" : "link_exe_msvc")
                           : (shared ? "link_shared" : "link_exe");
             e.inputs = std::move(objects);
+            e.inputs.insert(e.inputs.end(), std::make_move_iterator(std_objects.begin()),
+                            std::make_move_iterator(std_objects.end()));
             /* samu's $in only carries explicit inputs, so dependency artifacts
              * (archives / shared libs) must be explicit, after the objects. */
             e.inputs.insert(e.inputs.end(), std::make_move_iterator(dep_outputs.begin()),
@@ -1226,6 +1412,35 @@ Result<void> Project::build() {
             };
             log::error(e);
             return std::unexpected(std::move(e));
+        }
+
+        for (const auto& u : r.units) {
+            r.needs_std |= std::ranges::find(u.imports, "std") != u.imports.end();
+            r.needs_std_compat |= std::ranges::find(u.imports, "std.compat") != u.imports.end();
+        }
+        if (r.needs_std || r.needs_std_compat) {
+            const bool libcxx_clang = r.triple.family == CompilerFamily::Clang && !detail::is_zig(r.triple) &&
+                                      r.triple.stdlib == StdLib::Libcxx;
+            if (!libcxx_clang) {
+                Error e {
+                    Error::Kind::Config,
+                    "target '" + t->name() + "' uses `import std;`, which needs clang with libc++;\n"
+                    "  correct:   proj.configure(Config().toolchain(truss::Toolchain::LLVM))\n"
+                    "  incorrect: compiler '" + r.triple.compiler + "' (zig, g++, MSVC and libstdc++ "
+                    "do not provide a buildable std module)",
+                };
+                log::error(e);
+                return std::unexpected(std::move(e));
+            }
+            if (t->cpp_standard() != CppStandard::Default && t->cpp_standard() < CppStandard::Cpp23) {
+                Error e {
+                    Error::Kind::Config,
+                    "target '" + t->name() + "': `import std;` requires -std=c++23 or later "
+                    "(cpp_standard(CppStandard::Cpp23))",
+                };
+                log::error(e);
+                return std::unexpected(std::move(e));
+            }
         }
 
         r.output = output_path_for(*t, bld, tdir, r.triple);

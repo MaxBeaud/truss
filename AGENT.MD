@@ -779,3 +779,28 @@ merge_imports string round-trip, read_lines double-open).
   vendor/samurai/TRUSS-VENDOR.txt. (B) gnu.2.17 link: `posix_spawn_file_actions_
   addchdir_np` (glibc 2.29) only matters for a glibc-floor artifact <2.29 (irrelevant
   to musl); raise the floor or add a child-side chdir fallback.
+
+## 29. `import std;` support
+
+- clang + libc++ only, C++23 or later (default std is C++23). zig, g++, MSVC and
+  clang+libstdc++ get a Config error pointing at `Toolchain::LLVM`; `cpp_standard()`
+  below C++23 is a Config error too. Detection scans each unit's imports for `std` /
+  `std.compat` (also for plain `.cpp`, with no `.cppm` in the target).
+- The std BMI and its object come from one call driven by libc++'s module manifest
+  (`<cxx> -std=c++NN -stdlib=libc++ -print-library-module-manifest-path`; paths
+  are relative to the manifest dir, JSON parsed with nlohmann, cached per compiler).
+  Compile flags are minimal (`-std`, `-stdlib=libc++`, `--target`, `-fPIC`,
+  `-Wno-reserved-module-identifier`, manifest `-isystem`s): only the C++ standard
+  affects BMI compatibility, so -O/-g/-D/warnings/sanitizers need not match.
+- Deduped per (triple dir, -std): ONE `compile_bmi` edge per key for std (and one for
+  std.compat, emitted lazily), outputs under `build/<mode>/std/<triple>-c++NN/`
+  (`std.pcm std.o std.compat.pcm std.compat.o`). Consumers get
+  `-fmodule-file=std=<pcm>` via the normal bmis map.
+- `std.compat` has `export import std;`: its edge takes the std pcm as input and
+  consumers of `std.compat` get both module mappings (modules.cpp adds `std`).
+- Linking: std.o (and std.compat.o) is linked EXACTLY ONCE per exe/shared lib, when
+  the target or any transitive dep uses it, and NEVER put in static archives (two
+  copies => "multiple definition of initializer for module std"). Dependencies reached
+  through a shared lib are skipped (the .so carries its own copy).
+- First build pays a one-time compile of std.cppm (~38 MB BMI, several seconds);
+  afterwards it is cached by samu like any edge.

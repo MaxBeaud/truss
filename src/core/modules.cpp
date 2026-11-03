@@ -109,10 +109,11 @@ resolve_module_imports(const ModuleUnitInfo& u, const std::map<std::string, std:
                 });
             name = primary + name;
         }
-        if (name == "std")
-            continue; /* import std; handled by the toolchain, not by truss BMIs */
         if (u.is_bmi_source && name == u.module_name)
             continue; /* a BMI source never consumes its own BMI */
+        /* std.compat's BMI re-exports std: consumers need both mappings */
+        if (name == "std.compat" && bmis.contains("std"))
+            add_bmi("std");
         if (!add_bmi(name))
             return std::unexpected(Error {
                 Error::Kind::Config,
