@@ -157,6 +157,13 @@ cmd_examples() {
     run_example fetch test
     run_example conan test
     VCPKG_ROOT="${VCPKG_ROOT:-$HOME/vcpkg}" run_example vcpkg test
+    run_example imported run
+    run_example imported test
+    run_example cross-host debug
+    run_example cross-host run --target gen
+    run_example cross-host test
+    ( cd examples/cross-host && ./truss test 2>&1 | grep -q "skipped (cross target" ) \
+        || { echo "setup: cross-host './truss test' did not warn about the skipped cross test" >&2; return 1; }
 }
 
 # --- installed-tool flow: stage a prefix, build against it --------------------

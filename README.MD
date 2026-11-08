@@ -558,7 +558,7 @@ Convention-based vendoring — point it at a directory in your tree:
 ```cpp
 auto zlib = proj.add_subdirectory("vendor/zlib");   // Result<TargetRef>
 if (!zlib) return 1;
-proj.add_executable("app").sources_in("src").depends_on(*zlib);
+proj.add_executable("app").sources_in("src").depends_on(zlib);
 ```
 
 It creates a static library named after the directory, with sources from
@@ -575,7 +575,7 @@ auto pkg = proj.fetch("fmt", {
     .tag = "11.0.2",
 });
 auto fmt = proj.add_subdirectory(pkg->dir);
-proj.add_executable("app").depends_on(*fmt);
+proj.add_executable("app").depends_on(fmt);
 
 // several packages at once (downloads overlap):
 auto pkgs = proj.fetch_all({
@@ -604,7 +604,7 @@ Conan 2 graphs, consumed as one `Interface` target:
 ```cpp
 auto deps = proj.conan({"zlib/1.3.1", "fmt/11.0.2"}); // list form (refs are versioned)
 // or: proj.conan("conanfile.txt") / "conanfile.py" / "."
-proj.add_executable("app").sources_in("src").depends_on(*deps);
+proj.add_executable("app").sources_in("src").depends_on(deps);
 ```
 
 The list form generates a `conanfile.txt` under
@@ -624,7 +624,7 @@ Manifest mode, same consumption model:
 
 ```cpp
 auto deps = proj.vcpkg({"zlib", "fmt"});   // or proj.vcpkg({}) with your own vcpkg.json
-proj.add_executable("app").sources_in("src").depends_on(*deps);
+proj.add_executable("app").sources_in("src").depends_on(deps);
 ```
 
 Installs into `build/<mode>/vcpkg_installed/` and returns an `Interface`
@@ -786,6 +786,22 @@ installed truss automatically discovers its module files from the installation l
 
 The discovery can be overridden with the `TRUSS_INSTALL_PREFIX` environment variable,
 which should point to the installation prefix (not the lib/truss subdirectory).
+
+### Examples
+
+`./setup.sh examples` compiles every example's `truss.cpp` and runs its flows
+end-to-end:
+
+| Example | Shows |
+|---|---|
+| `examples/hello` | the basic script: static lib + app + test + a custom `task` |
+| `examples/shared` | shared libraries, soname + rpath |
+| `examples/modules` | C++20/26 modules (`import math;`, `import std;`) with transitive BMI wiring |
+| `examples/fetch` | `fetch()` git/tarball packages, pinned in `truss.lock` |
+| `examples/conan` / `examples/vcpkg` | package-manager graphs as one `depends_on()` |
+| `examples/imported` | `import_library("name").import_archive(...)`: linking a prebuilt `.a` with `system_include_dirs()` + deref-free `depends_on()` |
+| `examples/cross-host` | `Config().toolchain(Toolchain::Zig).target("aarch64-linux-musl")` with a `for_host()` codegen tool; host↔cross `depends_on()` is a Config error, cross tests build then skip with a warning |
+| `examples/installed` / `examples/amalgam` | consuming an installed truss / the single-header drop-in |
 
 ## Status & support matrix
 

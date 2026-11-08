@@ -18,11 +18,11 @@ int main(int argc, char** argv) {
 
     proj.add_executable("app")
         .sources("app/main.cpp")
-        .depends_on(*z);
+        .depends_on(z);
 
     proj.add_executable("test_zlib")
         .sources("tests/test_zlib.cpp")
-        .depends_on(*z)
+        .depends_on(z)
         .is_test();
 
     auto result = proj.build();
