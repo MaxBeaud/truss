@@ -50,6 +50,10 @@ Result<ProcOutcome> run_impl(std::span<const std::string> argv, int capture_mode
     int pipe_fd[2] = {-1, -1};
     posix_spawn_file_actions_t actions;
     const bool have_actions = posix_spawn_file_actions_init(&actions) == 0;
+    /* without file actions we cannot honour cwd at all — fail loudly instead
+     * of running the command in the wrong directory */
+    if (!have_actions && !cwd.empty())
+        return std::unexpected(Error {Error::Kind::Io, "cannot init spawn file actions"});
 
     if (!cwd.empty() && have_actions &&
         posix_spawn_file_actions_addchdir_np(&actions, cwd.c_str()) != 0) {
@@ -100,8 +104,11 @@ Result<ProcOutcome> run_impl(std::span<const std::string> argv, int capture_mode
     }
 
     int status = 0;
-    while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
-    if (WIFEXITED(status)) outcome.exit_code = WEXITSTATUS(status);
+    int waited = 0;
+    while ((waited = waitpid(pid, &status, 0)) < 0 && errno == EINTR) {}
+    if (waited < 0)
+        outcome.exit_code = -1; /* waitpid failed outright: no reliable status */
+    else if (WIFEXITED(status)) outcome.exit_code = WEXITSTATUS(status);
     else if (WIFSIGNALED(status)) outcome.exit_code = 128 + WTERMSIG(status);
     else outcome.exit_code = -1;
 
