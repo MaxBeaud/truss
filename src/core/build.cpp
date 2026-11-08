@@ -213,7 +213,8 @@ private:
             add(out_.defines, defines_, d);
         for (const auto& f : r.target->public_flags())
             add(out_.flags, flags_, f);
-        if (r.target->kind() == TargetKind::Interface) {
+        if (r.target->kind() == TargetKind::Interface ||
+            r.target->kind() == TargetKind::ImportedLibrary) {
             for (const auto& d : r.target->defines())
                 add(out_.defines, defines_, d);
             for (const auto& p : r.target->link_paths())
@@ -324,7 +325,8 @@ std::string output_path_for(const Target& t, const std::filesystem::path& build_
                 ((msvc ? name : "lib" + name) + std::string(ext))).generic_string();
     }
     case TargetKind::Interface:
-        return {}; /* header-only: no artifact */
+    case TargetKind::ImportedLibrary:
+        return {}; /* header-only / prebuilt: no built artifact */
     }
     return name;
 }
@@ -533,9 +535,9 @@ Result<void> emit_manifest(const Project& proj, std::vector<ResolvedTarget>& res
     std::vector<std::string> all_outputs;
     for (auto& r : resolved) {
         const Target& t = *r.target;
-        /* header-only targets contribute usage requirements (via collect_usage)
-         * but produce no artifact and no edges */
-        if (t.kind() == TargetKind::Interface)
+        /* header-only and imported-prebuilt targets contribute usage
+         * requirements (via collect_usage) but produce no artifact and no edges */
+        if (t.kind() == TargetKind::Interface || t.kind() == TargetKind::ImportedLibrary)
             continue;
         const bool msvc = r.triple.family == CompilerFamily::Msvc;
         const bool pic = t.pic() || t.kind() != TargetKind::Executable;
@@ -819,6 +821,7 @@ Result<void> emit_manifest(const Project& proj, std::vector<ResolvedTarget>& res
          * direct deps first, their deps to the right of the archives that
          * need them. */
         std::vector<std::string> dep_outputs;
+        std::set<std::string> import_rpath_dirs; /* imported .so/.dylib directories */
         bool has_shared_dep = false;
         const bool static_consumer = t.static_deps_enabled();
         std::set<const Target*> dep_seen {&t};
@@ -835,10 +838,20 @@ Result<void> emit_manifest(const Project& proj, std::vector<ResolvedTarget>& res
                         Error::Kind::Config,
                         "target '" + d.name() + "' depends on unknown target '" + dep->name() + "'",
                     });
+                if (dep->kind() == TargetKind::ImportedLibrary) {
+                    /* prebuilt files land on the link line verbatim, ordered
+                     * with the dep walk like built artifacts; an imported
+                     * shared object needs an rpath to its directory */
+                    for (const auto& a : dep->import_archives()) {
+                        dep_outputs.push_back(a);
+                        const std::string fname = std::filesystem::path(a).filename().generic_string();
+                        if (fname.ends_with(".so") || fname.contains(".so.") || fname.ends_with(".dylib"))
+                            import_rpath_dirs.insert(std::filesystem::path(a).parent_path().generic_string());
+                    }
+                } else if (dep->kind() != TargetKind::SharedLibrary)
+                    dep_outputs.push_back(it->second->output);
                 /* MSVC links against a dll's import lib, never the dll;
                  * static_deps() consumers link a shared lib's static twin */
-                if (dep->kind() != TargetKind::SharedLibrary)
-                    dep_outputs.push_back(it->second->output);
                 else if (static_consumer)
                     dep_outputs.push_back(it->second->static_twin);
                 else {
@@ -940,6 +953,10 @@ Result<void> emit_manifest(const Project& proj, std::vector<ResolvedTarget>& res
                 const std::string origin = r.triple.os == Os::MacOS ? "@loader_path" : "'$ORIGIN'";
                 extra_link.push_back("-Wl,-rpath," + origin + "/../../lib/" + detail::triple_dir(r.triple));
             }
+            /* imported shared objects live wherever they were built — point
+             * the consumer at their directory (ELF / Mach-O runpath) */
+            for (const auto& dir : import_rpath_dirs)
+                extra_link.push_back("-Wl,-rpath," + dir);
             std::vector<std::string> link_paths = t.link_paths();
             link_paths.insert(link_paths.end(), usage.link_paths.begin(), usage.link_paths.end());
             /* static_deps() routes every library through -Bstatic except the C
@@ -1018,6 +1035,12 @@ Result<void> emit_manifest(const Project& proj, std::vector<ResolvedTarget>& res
             const auto it = by_name.find(name);
             if (it == by_name.end())
                 return std::unexpected(Error {Error::Kind::Config, "unknown --target '" + name + "'"});
+            if (it->second->output.empty())
+                return std::unexpected(Error {
+                    Error::Kind::Config,
+                    "--target '" + name + "': that target produces no artifact "
+                    "(header-only interface or imported prebuilt library)",
+                });
             selected.push_back(it->second->output);
         }
         w.default_targets(std::move(selected));
@@ -1345,11 +1368,19 @@ Result<void> Project::build() {
     }
 
     /* project-wide toolchain: Config overlaid on the host triple (per-target
-     * cross_target() overrides completely) */
+     * cross_target() overrides completely; for_host() pins targets back onto
+     * the host while keeping the Config's compiler/stdlib/ar overlays) */
     auto base_triple = detail::apply_config(config_, host_triple());
     if (!base_triple) {
         log::error(base_triple.error());
         return std::unexpected(base_triple.error());
+    }
+    Config host_config = config_;
+    host_config.target(""); /* a for_host() tool never crosses, whatever the project does */
+    auto host_pinned = detail::apply_config(host_config, host_triple());
+    if (!host_pinned) {
+        log::error(host_pinned.error());
+        return std::unexpected(host_pinned.error());
     }
 
     /* resolve + validate sources */
@@ -1358,20 +1389,92 @@ Result<void> Project::build() {
     for (const auto& t : targets_) {
         ResolvedTarget r;
         r.target = t.get();
-        r.triple = t->triple_override().value_or(*base_triple);
+        r.triple = t->is_for_host() ? *host_pinned : t->triple_override().value_or(*base_triple);
 
-        auto sources = resolve_sources(*t);
-        if (!sources) {
-            log::error(sources.error());
-            return std::unexpected(sources.error());
+        /* imported prebuilt libraries resolve no sources (nothing to build) */
+        std::vector<std::string> sources;
+        if (t->kind() != TargetKind::ImportedLibrary) {
+            auto rs = resolve_sources(*t);
+            if (!rs) {
+                log::error(rs.error());
+                return std::unexpected(rs.error());
+            }
+            sources = std::move(*rs);
         }
-        if (sources->empty() && t->kind() != TargetKind::Interface && t->merged_libraries().empty()) {
+        if (sources.empty() && t->kind() != TargetKind::Interface &&
+            t->kind() != TargetKind::ImportedLibrary && t->merged_libraries().empty()) {
             Error e {
                 Error::Kind::Config,
                 "target '" + t->name() + "' has no sources; add some with .sources(...) or .sources_in(...)",
             };
             log::error(e);
             return std::unexpected(std::move(e));
+        }
+
+        /* a dependency edge must stay on one side of the host/target boundary:
+         * objects built for different ABIs cannot link together */
+        const auto describe_triple = [](const TargetTriple& tr) -> std::string {
+            return tr.target.empty() ? "the host (" + detail::triple_dir(tr) + ")" : "'" + tr.target + "'";
+        };
+        for (const Target* dep : t->deps()) {
+            if (dep->kind() == TargetKind::Interface ||
+                dep->kind() == TargetKind::ImportedLibrary)
+                continue; /* no artifact: usable from either side */
+            const TargetTriple dep_triple = dep->is_for_host()
+                                                ? *host_pinned
+                                                : dep->triple_override().value_or(*base_triple);
+            if (dep_triple.target != r.triple.target) {
+                Error e {
+                    Error::Kind::Config,
+                    "target '" + t->name() + "' (built for " + describe_triple(r.triple) + ") depends on '" +
+                        dep->name() + "' (built for " + describe_triple(dep_triple) + "):\n"
+                        "  a dependency must be built for the same machine as its consumer\n"
+                        "  (different ABI and C library — the link would be broken anyway).\n"
+                        "  Mark host-side tools with .for_host(), or drop the edge.",
+                };
+                log::error(e);
+                return std::unexpected(std::move(e));
+            }
+        }
+
+        /* import_archive() is an ImportedLibrary-only builder: on anything
+         * buildable the intent is ambiguous (sources or prebuilt?) */
+        if (!t->import_archives().empty() && t->kind() != TargetKind::ImportedLibrary)
+            return std::unexpected(Error {
+                Error::Kind::Config,
+                "target '" + t->name() + "': import_archive() is only valid on an imported library "
+                "(create it with proj.import_library(...))",
+            });
+
+        /* imported prebuilt libraries: validate each named file up front */
+        for (const auto& a : t->import_archives()) {
+            if (a.empty())
+                return std::unexpected(Error {
+                    Error::Kind::Config,
+                    "target '" + t->name() + "': import_archive(\"\") is empty",
+                });
+            if (!path_is_safe(a))
+                return std::unexpected(Error {
+                    Error::Kind::Config,
+                    "target '" + t->name() + "': import_archive('" + a +
+                        "') contains unsupported characters (spaces, ':', '$')",
+                    std::filesystem::path(a),
+                });
+            if (a.starts_with('-'))
+                return std::unexpected(Error {
+                    Error::Kind::Config,
+                    "target '" + t->name() + "': import_archive('" + a +
+                        "') must be a library file path, not a linker flag",
+                });
+            std::error_code ec;
+            if (!std::filesystem::exists(cwd_ / a, ec))
+                return std::unexpected(Error {
+                    Error::Kind::Config,
+                    "target '" + t->name() + "': imported library '" + a + "' not found\n"
+                    "  import_archive() names an existing prebuilt file (absolute, or\n"
+                    "  relative to the project root); truss links it but never builds it",
+                    std::filesystem::path(a),
+                });
         }
 
         const ModulesMode mm =
@@ -1394,7 +1497,7 @@ Result<void> Project::build() {
         const std::string tdir = detail::triple_dir(r.triple);
         r.objdir = (bld / "obj" / tdir / t->name()).generic_string();
 
-        for (const auto& f : *sources) {
+        for (const auto& f : sources) {
             const bool is_bmi = f.ends_with(".cppm") || f.ends_with(".ixx");
             if (is_bmi && mm == ModulesMode::Off) {
                 Error e {
@@ -1674,18 +1777,29 @@ Result<void> Project::build() {
             }
 
             if (task == "test") {
-                std::vector<std::string> test_outputs;
+                std::vector<std::pair<std::string, bool>> tests; /* (output, is_cross) */
                 for (const auto& r : resolved)
                     if (r.target->is_test_target())
-                        test_outputs.push_back(r.output);
-                if (test_outputs.empty()) {
+                        tests.emplace_back(r.output, !r.triple.target.empty());
+                if (tests.empty()) {
                     log::warn("no targets marked is_test(); nothing to run");
                     return {};
                 }
-                if (auto r = run_samu(test_outputs); !r)
+                std::vector<std::string> to_build;
+                for (const auto& [exe, cross] : tests)
+                    to_build.push_back(exe);
+                if (auto r = run_samu(to_build); !r)
                     return r;
-                int failures = 0;
-                for (const auto& exe : test_outputs) {
+                int failures = 0, skipped = 0;
+                for (const auto& [exe, cross] : tests) {
+                    if (cross) {
+                        /* a cross-compiled test exe cannot run on the host:
+                         * built above, skipped here — never silently "passed" */
+                        log::warn("test '" + exe + "' skipped (cross target '" +
+                                  "built for a different machine; configure a runner to execute it)");
+                        ++skipped;
+                        continue;
+                    }
                     log::info("running " + exe);
                     const std::array argv {exe};
                     auto outcome = detail::run_process(argv, false);
@@ -1698,6 +1812,8 @@ Result<void> Project::build() {
                 }
                 if (failures)
                     return std::unexpected(Error {Error::Kind::Command, std::to_string(failures) + " test(s) failed"});
+                if (skipped)
+                    log::warn(std::to_string(skipped) + " cross-compiled test(s) skipped (no runner configured)");
                 log::success("all tests passed");
                 return {};
             }
@@ -1706,6 +1822,7 @@ Result<void> Project::build() {
                 /* --target narrows the candidates; otherwise the first
                  * declared executable runs */
                 std::vector<std::string> exe_outputs, exe_names;
+                std::vector<bool> exe_cross;
                 for (const auto& r : resolved) {
                     if (r.target->kind() != TargetKind::Executable || r.target->is_test_target())
                         continue;
@@ -1713,9 +1830,16 @@ Result<void> Project::build() {
                         continue;
                     exe_outputs.push_back(r.output);
                     exe_names.push_back(r.target->name());
+                    exe_cross.push_back(!r.triple.target.empty());
                 }
                 if (exe_outputs.empty())
                     return std::unexpected(Error {Error::Kind::Config, "no executable to run (test executables are excluded)"});
+                if (exe_cross.front())
+                    return std::unexpected(Error {
+                        Error::Kind::Config,
+                        "cannot run '" + exe_outputs.front() + "': it is cross-compiled for a different "
+                        "machine than the host; configure a runner (e.g. qemu/wine) to execute it",
+                    });
                 if (exe_outputs.size() > 1)
                     log::info("running '" + exe_names.front() + "' (" + std::to_string(exe_outputs.size())
                               + " executables; pick one with --target NAME)");

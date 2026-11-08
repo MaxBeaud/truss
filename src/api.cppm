@@ -166,10 +166,12 @@ struct Package {
 
 /// Artifact kind of a Target.
 enum class TargetKind {
-    Executable,     ///< linked binary under build/{mode}/bin/
-    StaticLibrary,  ///< .a / .lib under build/{mode}/lib/
-    SharedLibrary,  ///< .so / .dll under build/{mode}/lib/
-    Interface,      ///< header-only: usage requirements only, no artifact
+    Executable,      ///< linked binary under build/{mode}/bin/
+    StaticLibrary,   ///< .a / .lib under build/{mode}/lib/
+    SharedLibrary,   ///< .so / .dll under build/{mode}/lib/
+    Interface,       ///< header-only: usage requirements only, no artifact
+    ImportedLibrary, ///< prebuilt artifact(s) on disk (import_library()): linked
+                     ///< verbatim into dependents, never built by truss
 };
 
 /**
@@ -964,6 +966,24 @@ public:
      */
     Target& cross_target(TargetTriple t) { triple_ = t; return *this; }
     /**
+     * \brief Pin this target to the build host, ignoring the project's cross
+     * configuration (Config::target(...)). For the host-side tools of a cross
+     * build — code generators, embedders, protoc plugins — which must run on
+     * the build machine even while everything else targets the cross triple.
+     * A depends_on() edge must stay on one side of the host/target boundary
+     * (different ABI and C library): mixing them is a Config error.
+     */
+    Target& for_host() { for_host_ = true; return *this; }
+    /// \brief Import a prebuilt library file into this target (ImportedLibrary
+    /// targets only, from import_library()): an absolute path, or relative to
+    /// the project root. The file is linked verbatim into every dependent
+    /// (after their objects, in GNU ld order along with depends_on artifacts);
+    /// it must exist by build() time. Repeat calls accumulate.
+    Target& import_archive(std::string_view path) {
+        import_archives_.emplace_back(path);
+        return *this;
+    }
+    /**
      * \brief Depend on another target: links its artifact, inherits its
      * usage requirements (include dirs always; defines/link flags from
      * Interface targets). Order is tracked in the ninja graph.
@@ -1024,6 +1044,10 @@ public:
     /// First error handed to depends_on(Result) (reported by build()).
     const std::optional<Error>& deferred_error() const { return deferred_error_; }
     const std::optional<TargetTriple>& triple_override() const { return triple_; }
+    /// for_host() state: pinned to the build host by the build engine.
+    bool is_for_host() const { return for_host_; }
+    /// Prebuilt library files named with import_archive() (ImportedLibrary targets).
+    const std::vector<std::string>& import_archives() const { return import_archives_; }
     const std::vector<const Target*>& deps() const { return deps_; }
     const std::vector<const Target*>& merged_libraries() const { return merge_; }
     bool is_test_target() const { return test_; }
@@ -1060,6 +1084,8 @@ private:
     bool demoted_shared_ {false}; /* SharedLib turned into a static archive by static_link() */
     bool static_deps_ {false};
     StaticStdlib static_stdlib_ {};
+    bool for_host_ {false};
+    std::vector<std::string> import_archives_; /* ImportedLibrary: prebuilt files to link */
     std::optional<Error> deferred_error_;
     std::optional<TargetTriple> triple_;
     std::vector<const Target*> deps_;
@@ -1088,6 +1114,18 @@ public:
 class Interface : public Target {
 public:
     explicit Interface(std::string name) : Target(std::move(name), TargetKind::Interface) {}
+};
+/**
+ * \brief A prebuilt library consumed without being built (import_library()).
+ * Name its files with import_archive() (.a/.so/.dyfoo.lib), give it the
+ * headers' include_dirs()/system_include_dirs() and any extra link_libs() —
+ * consumers receive the usage requirements through depends_on() exactly as
+ * with an Interface target, plus the archive files on their link line.
+ * The build() engine never compiles or archives it; the files must exist.
+ */
+class ImportedLib : public Target {
+public:
+    explicit ImportedLib(std::string name) : Target(std::move(name), TargetKind::ImportedLibrary) {}
 };
 
 /**
@@ -1174,6 +1212,17 @@ public:
     SharedLib& add_shared_library(std::string name) { return add_target<SharedLib>(std::move(name)); }
     /// \copydoc add_executable
     Interface& add_interface_library(std::string name) { return add_target<Interface>(std::move(name)); }
+    /**
+     * \brief Create an ImportedLibrary target: a prebuilt library (`zlib.a`,
+     * `libfoo.so`, an SDK's `foo.lib`) that truss links but never builds.
+     * Chain `.import_archive("path")` for each prebuilt file, plus
+     * include_dirs()/system_include_dirs() for its headers and link_libs()
+     * for system libraries it needs. Consumers via depends_on() get the
+     * usage requirements and the archive files on their link line; a shared
+     * object (.so/.dylib) also adds an rpath to its directory (ELF/macOS).
+     * \param name bare target name (no path, no platform extension)
+     */
+    ImportedLib& import_library(std::string name) { return add_target<ImportedLib>(std::move(name)); }
     /**
      * \brief Register a named task: `./truss task <name>` builds first, then
      * runs fn. `./truss task list` prints every task with its description.
