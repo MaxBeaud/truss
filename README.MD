@@ -85,6 +85,8 @@ ninja manifest that samurai then executes incrementally.
   - [fetch](#fetch)
   - [conan](#conan)
   - [vcpkg](#vcpkg)
+  - [Imported prebuilt libraries](#imported-prebuilt-libraries)
+  - [Custom commands (codegen)](#custom-commands-codegen)
 - [Toolchain selection (Config)](#toolchain-selection-config)
 - [Cross-compiling & MSVC](#cross-compiling--msvc)
 - [Output layout](#output-layout)
@@ -140,7 +142,7 @@ Windows hosts are on the roadmap (see [Status](#status--support-matrix)).
 ## Command line
 
 ```
-./truss [debug|release] [task...] [-j N] [-v] [-n] [--explain] [--target NAME] [--build-dir PATH]
+./truss [debug|release] [task...] [-j N] [-v] [-n] [--explain] [--target NAME] [--build-dir PATH] [--cross TRIPLE]
 ```
 
 | Flag | Meaning |
@@ -153,6 +155,7 @@ Windows hosts are on the roadmap (see [Status](#status--support-matrix)).
 | `--explain` | Print *why* each edge is (re)built — samurai's explain mode. |
 | `--target NAME` | Build only this target (repeatable). |
 | `--build-dir PATH` | Relocate the build root (default `./build`). |
+| `--cross TRIPLE` | Cross-compile everything for TRIPLE without editing the script (overrides `Config::target`; `for_host()` tools stay on the host). |
 | `--version` / `-V` | Print truss version and exit. |
 | `--help` / `-h` / `help` | Print the full usage and exit. |
 | `-- ARGS...` | Everything after `--` is passed to the program started by `run`. |
@@ -195,6 +198,8 @@ truss, run `./bootstrap.sh` yourself.
 | `add_static_library(name)` | `lib/<triple>/lib<name>.a` | `lib/<triple>/<name>.lib` |
 | `add_shared_library(name)` | `lib/<triple>/lib<name>.so` (+ soname) | `lib/<triple>/<name>.dll` + import `.lib` |
 | `add_interface_library(name)` | none — usage requirements only | same |
+| `import_library(name)` | none — links prebuilt files you name (see [below](#imported-prebuilt-libraries)) | same |
+| `add_custom_command(name)` | generated files under `build/<mode>/gen/<name>/` | same |
 
 Target names must be bare names (no path separators, no platform extensions —
 truss adds them). Every builder method returns `Target&`, so you can chain:
@@ -211,7 +216,13 @@ proj.add_executable("server").sources_in("src/server").depends_on(net);
 ```
 
 `depends_on()` links the dependency (static/shared) or merges its usage
-requirements (interface), and orders the build correctly.
+requirements (interface/imported/custom), and orders the build correctly.
+Handles from `add_subdirectory()`/`conan()`/`vcpkg()` pass straight in — no
+dereferencing:
+
+```cpp
+proj.add_executable("app").sources_in("src").depends_on(proj.conan({"zlib/1.3.1"}));
+```
 
 ### Sources & globbing
 
@@ -632,6 +643,42 @@ target. Requires `VCPKG_ROOT` pointing at a vcpkg tree. As with conan, an
 unchanged `vcpkg.json` (sha256 fingerprint) + surviving install tree skips
 `vcpkg install` on later invocations.
 
+### Imported prebuilt libraries
+
+Link a library you already have as a file — a vendor drop, an SDK — instead
+of raw `-L`/`-l`. `import_library()` names the prebuilt `.a`/`.so`/`.dylib`/
+`.lib` file(s); dependents get them on their link line (in dependency order,
+after their objects) plus the usage requirements you set, and an imported
+`.so`/`.dylib` adds an rpath to its directory:
+
+```cpp
+auto& greet = proj.import_library("greet")
+                  .import_archive("prebuilt/libgreet.a")
+                  .system_include_dirs("prebuilt/include");
+proj.add_executable("app").sources_in("src").depends_on(greet);  // no deref needed
+```
+
+The files must exist by `build()` time; truss links them but never builds
+them. See `examples/imported`.
+
+### Custom commands (codegen)
+
+Run a command during the build — typically a `for_host()` tool — and feed its
+outputs to other targets. `uses(tool)` builds the tool first and expands to
+its path as `$tool`; outputs become implicit inputs of every consumer's
+compile edges, and each output's directory is added as an include dir:
+
+```cpp
+auto& gen = proj.add_executable("gen").sources("tools/gen.cpp").for_host();
+auto& out = proj.add_custom_command("generated")
+                .command({"$tool", "-o", "$out", "data.txt"})
+                .uses(gen)
+                .outputs({"gen/config.h"});   // default: build/<mode>/gen/generated/output
+proj.add_executable("app").sources_in("src").depends_on(out);
+```
+
+See `examples/cross-host` for the host-tool-in-a-cross-build pattern.
+
 ## Toolchain selection (Config)
 
 Pick the project-wide compiler, linker, and standard library with
@@ -689,8 +736,27 @@ proj.configure(truss::Config{}.toolchain(truss::Toolchain::Zig).target("aarch64-
 
 Plain clang works too with a sysroot (`.flags("--sysroot=...")`); GCC
 cross-compiles through a prefixed driver (`compiler("aarch64-linux-gnu-g++")`)
-and rejects `target()`. The design and roadmap are in
+and rejects `target()`. The CLI equivalent is `./truss release --cross
+aarch64-linux-musl` — no script edit needed. The design and roadmap are in
 [docs/cross-compilation.md](docs/cross-compilation.md).
+
+**Host tools in a cross build.** Mark build-time tools with `for_host()` —
+they always compile for the host triple, even when the project cross-compiles
+(`Config::target` or `--cross`), so generators and embedders run on the build
+machine. A `depends_on()` edge may not cross the host/target boundary (or join
+two different cross triples): different ABI, and truss fails with a Config
+error naming both sides. Run cross-compiled tests through a runner —
+`Config().runner("qemu-aarch64 -L /sysroot")` (or `"wine"`) — otherwise
+`./truss test` builds them but skips them with a warning (never silently
+"passed"):
+
+```cpp
+proj.configure(truss::Config{}.toolchain(truss::Toolchain::Zig).target("aarch64-linux-musl")
+                                 .runner("qemu-aarch64"));
+auto& gen = proj.add_executable("gen").sources("tools/gen.cpp").for_host();
+proj.add_executable("app").sources_in("src");              // cross
+proj.add_executable("test_app").sources("tests/app.cpp").is_test();  // runs via qemu
+```
 
 Every target defaults to that project triple (`truss::host_triple()` + the
 Config). Override per target with a `TargetTriple`:

@@ -1404,16 +1404,17 @@ public:
      */
     CustomCommand& add_custom_command(std::string name) { return add_target<CustomCommand>(std::move(name)); }
     /**
-     * \brief Register a named task: `./truss task <name>` builds first, then
-     * runs fn. `./truss task list` prints every task with its description.
-     * Task names live apart from the built-ins (`task test` is fine); `list`
-     * is reserved and duplicates are a Config error reported by build().
+     * \brief Register a named task: run via ./truss task NAME (builds first,
+     * then runs fn). `./truss task list` prints every task with its
+     * description. Task names live apart from the built-ins (`task test` is
+     * fine); `list` is reserved and duplicates are a Config error reported
+     * by build().
      * \param name task name, as typed after `./truss task`
      * \param description one line shown by `./truss task list`
      * \param fn the task body
      */
     void task(std::string name, std::string description, TaskFn fn);
-    /// \copydoc task(std::string, std::string, TaskFn)
+    /// \brief task() without a description (empty line in `task list`).
     void task(std::string name, TaskFn fn) { task(std::move(name), {}, std::move(fn)); }
 
     /**

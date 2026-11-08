@@ -809,3 +809,46 @@ merge_imports string round-trip, read_lines double-open).
   through a shared lib are skipped (the .so carries its own copy).
 - First build pays a one-time compile of std.cppm (~38 MB BMI, several seconds);
   afterwards it is cached by samu like any edge.
+
+## 30. Verified toolchain facts (1.0 push: for_host, import_library, phase-3 CLI/runner, custom commands)
+
+- `Target::for_host()` pins a target to `apply_config(config-with-target-cleared, host_triple())`
+  — compiler/stdlib/ar overlays apply, the cross `target` string never does. The host/target
+  boundary check compares resolved `triple.target` strings across every `depends_on` edge
+  (host "" vs cross "aarch64-linux-musl", or two different cross triples) and fails with a
+  mate-style Config error naming both sides. Interface/ImportedLibrary deps are exempt (no artifact).
+- `import_library(name)` (`TargetKind::ImportedLibrary`): no sources resolved, no edges, no `all`
+  entry; `import_archive()` files are validated at build() (non-empty, not '-'-prefixed,
+  path_is_safe, exists under cwd) and land verbatim on dependents' link lines via the dep walk
+  (GNU ld order); `.so`/`.so.N`/`.dylib` archives also add `-Wl,-rpath,<dir>`. `--target` on an
+  artifact-less target (Interface/ImportedLibrary) is a Config error. UsageWalk treats
+  ImportedLibrary like Interface for defines/link_paths/link_libs propagation.
+- Phase 3: `--cross TRIPLE` is parsed in the Project ctor and overlaid onto the Config before
+  apply_config (kHelp documents it); `Config::runner(cmd)` (validated: non-empty, not
+  '-'-prefixed) is split on spaces and prepended when executing cross test/run exes
+  (`argv_to_run` helper); without a runner, cross test exes are built then skipped with a
+  warning and `run` on a cross exe is a Config error. `proj.targets({...})` matrices were
+  DEFERRED: the emitter resolves one project triple, so per-triple subgraphs would re-resolve
+  the whole graph — documented as remaining in docs/cross-compilation.md.
+- `add_custom_command(name)` (`TargetKind::CustomCommand`): `.command({...})` tokens support
+  `$tool` (the `.uses(exe)` executable path), `$out` (per-output expansion), `$in` (depends_on
+  file inputs); one ninja edge carries all outputs as explicit outputs, the tool exe and file
+  inputs as explicit inputs. Consumers get outputs as implicit compile inputs + `-I` of each
+  output's dir via UsageWalk. Validation: no sources/is_test, non-empty command, `$tool` needs
+  uses(), uses() must be an Executable, outputs relative + path-safe + deduped. In a cross
+  project the used tool must be for_host() (else Config error); the host/target mismatch check
+  covers custom-command edges.
+- Public API ergonomics: `depends_on`/`merge` accept `Result<TargetRef>` by value — call sites
+  are deref-free (`depends_on(proj.conan({...}))`); failed Results defer into `deferred_error_`
+  and build() reports them ("depends_on()/merge() was given a failed result").
+- Fetch hardening: after extraction, `verify_no_escaping_links(dest)` walks the tree
+  (without following links) and rejects any symlink whose normalized target lands outside dest;
+  tar also gets `--no-same-owner`; a refused tarball's partial dest is removed.
+- proc.cpp: failed `waitpid` now yields exit_code -1 (was silently 0); failed
+  `posix_spawn_file_actions_init` with a non-empty cwd is an Io error instead of silently
+  running in the wrong directory.
+- Tests: 167 doctest cases green (`./setup.sh unit`); full `./setup.sh test` green incl.
+  examples/imported and examples/cross-host (wired into setup.sh cmd_examples).
+- Doxygen gotcha (found via docs-warning hunt): a backtick code span starting with
+  `./` (e.g. `` `./truss` ``) emits unmatched <tt> warnings — write ./truss without
+  backticks in doc comments. `./setup.sh docs` is now warning-free again (0 warnings).
