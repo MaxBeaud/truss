@@ -58,16 +58,44 @@ proj.add_custom_command(...).uses(gen);   // runs on the build machine
   vice versa (different ABI) — Config error.
 - `test`/`run` keep working for host targets regardless of the project target.
 
+**Phase 2 tail shipped — `add_custom_command(...).uses(host_tool)`:** a custom
+command always *executes* on the build host (that is the point of a host tool),
+even in a cross project:
+
+```cpp
+auto& gen = proj.add_executable("gen").sources("tools/gen.cpp").for_host();
+auto& out = proj.add_custom_command("generated")
+                .command({"$tool", "-o", "$out", "input.txt"}) // $tool/$out/$in expand at emit time
+                .uses(gen)                                     // explicit edge input: built first, re-runs on tool change
+                .outputs({"build/gen/out.h"});                 // default: build/<mode>/gen/<name>/output
+proj.add_executable("app").sources("app/main.cpp").depends_on(out);
+// app's compile edges get out.h as an implicit input; its dir propagates as -I
+```
+
+Cross hygiene: the command itself follows the project triple unless it is
+`.for_host()` itself, and the usual host/target `depends_on()` mismatch check
+applies to it (a target-triple consumer may not depend on a for_host custom
+command). The `uses()` tool is exempt from that check (it is executed, not
+linked) but must be runnable on the host — in a cross project it has to be
+`.for_host()` or the build fails with a Config error.
+
 ## Phase 3 — CLI selection and target matrices
 
+**Status: CLI + runner shipped; target matrices deferred** (one subgraph per
+triple would require resolving every target per triple — the emitter is
+single-triple today; revisit as its own phase).
+
 - `./truss release --cross aarch64-linux-musl` overrides `Config::target` without
-  editing the script (outputs already land in their own `triple_dir`).
+  editing the script (outputs already land in their own `triple_dir`). Parsed in
+  the `Project` ctor; malformed triples are Config errors reported by `build()`.
 - `proj.targets({"x86_64-linux-gnu.2.17", "aarch64-linux-musl", "x86_64-windows-gnu"})`
   emits one subgraph per triple into the same manifest, so samurai builds the
   whole matrix in parallel with a single invocation (`all` = every triple).
+  **Not yet implemented.**
 - Cross tests: `Config::runner("qemu-aarch64 -L <sysroot>")` / `"wine"`
-  prefixes `test`/`run` execution; without a runner, cross test executables are
-  built but skipped with a warning (never silently "passed").
+  prefixes `test`/`run` execution (split on spaces); without a runner, cross
+  test executables are built but skipped with a warning (never silently
+  "passed"), and `run` on a cross exe is a Config error.
 
 ## Phase 4 — packages follow the target
 

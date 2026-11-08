@@ -172,6 +172,8 @@ enum class TargetKind {
     Interface,       ///< header-only: usage requirements only, no artifact
     ImportedLibrary, ///< prebuilt artifact(s) on disk (import_library()): linked
                      ///< verbatim into dependents, never built by truss
+    CustomCommand,   ///< runs a command at build time (add_custom_command());
+                     ///< its outputs feed other targets as implicit inputs
 };
 
 /**
@@ -671,6 +673,16 @@ public:
     /// module BMI rules are never launched (ccache's module support is unreliable).
     Config& launcher(std::string name) { launcher_ = std::move(name); launcher_set_ = true; return *this; }
 
+    /**
+     * \brief Command prefix used to EXECUTE cross-compiled test/run exes on the
+     * host, e.g. "qemu-aarch64 -L /sysroot" or "wine" (split on spaces and
+     * prepended before the exe). Without a runner, cross test exes are built but
+     * skipped with a warning by `./truss test`, and `./truss run` on a cross exe
+     * is a Config error. Must be non-empty and not start with '-' (a Config
+     * error reported by build()).
+     */
+    Config& runner(std::string cmd) { runner_ = std::move(cmd); runner_set_ = true; return *this; }
+
     /// Expand a named bundle: LLVM = clang++ + libc++ + llvm-ar, GCC = g++ + libstdc++ + ar.
     Config& toolchain(Toolchain t) {
         switch (t) {
@@ -692,10 +704,13 @@ public:
     bool launcher_set() const { return launcher_set_; }
     StdLib stdlib() const { return stdlib_; }
     const std::string& target() const { return target_; }
+    const std::string& runner() const { return runner_; }
+    bool runner_set() const { return runner_set_; }
 
 private:
-    std::string compiler_, linker_, ar_, launcher_, target_;
+    std::string compiler_, linker_, ar_, launcher_, target_, runner_;
     bool launcher_set_ {false};
+    bool runner_set_ {false};
     StdLib stdlib_ {StdLib::Default};
 };
 
@@ -989,11 +1004,12 @@ public:
      * Interface targets). Order is tracked in the ninja graph.
      */
     Target& depends_on(const Target& dep);
-    /// \brief Depend on a target handle (`depends_on(*proj.add_subdirectory(...))`).
+    /// \brief Depend on a target handle by value — no deref (`t.depends_on(ref)`).
     /// Exact-match overload: without it, a TargetRef converts equally well to
     /// `const Target&` and to `Result<TargetRef>` (ambiguous call).
     Target& depends_on(TargetRef dep);
-    /// \brief Depend on a target from a Result (e.g., from conan()/vcpkg()).
+    /// \brief Depend on a target from a Result — no deref
+    /// (`t.depends_on(proj.conan({"zlib/1.3.1"}))`, `t.depends_on(proj.add_subdirectory(dir))`).
     /// An error Result is kept and reported by Project::build() (never dropped).
     Target& depends_on(Result<TargetRef> dep_result);
     /// Mark as a test executable (built and run by `./truss test`).
@@ -1007,8 +1023,17 @@ public:
      * pulled in, so depends_on() those separately if a consumer needs them.
      * Emitted via an `ar -M` MRI script (GNU ar / llvm-ar / zig ar); MSVC is a
      * Config error. A merged library needs no sources of its own.
+     * Accepts a target, a TargetRef handle, or a Result<TargetRef> — all by
+     * value, no deref at the call site.
      */
     Target& merge(const Target& lib) { merge_.push_back(&lib); return *this; }
+    /// \brief merge() a target handle by value — no deref (`merge(subdir_ref)`).
+    /// Exact-match overload (same ambiguity guard as depends_on(TargetRef)).
+    Target& merge(TargetRef lib);
+    /// \brief merge() a target from a Result — no deref
+    /// (`merge(proj.add_subdirectory(dir))`). An error Result is kept and
+    /// reported by Project::build() (never dropped).
+    Target& merge(Result<TargetRef> lib_result);
 
     /* --- read access (used by the build engine) --- */
     const std::string& name() const { return name_; }
@@ -1051,6 +1076,14 @@ public:
     const std::vector<const Target*>& deps() const { return deps_; }
     const std::vector<const Target*>& merged_libraries() const { return merge_; }
     bool is_test_target() const { return test_; }
+
+protected:
+    /// Record a failed-result error from depends_on(Result)/uses(Result)
+    /// (first one wins; reported by Project::build()).
+    void defer_error(Error e) {
+        if (!deferred_error_)
+            deferred_error_ = std::move(e);
+    }
 
 private:
     /// Shared append loop behind the braced-list/range builder overloads.
@@ -1129,10 +1162,118 @@ public:
 };
 
 /**
+ * \brief A command run during the build — usually a for_host() tool — whose
+ * outputs feed other targets (the codegen pattern):
+ * \code
+ * auto& gen = proj.add_executable("gen").sources("tools/gen.cpp").for_host();
+ * auto& out = proj.add_custom_command("generated")
+ *                 .command({"$tool", "-o", "$out", "input.txt"})
+ *                 .uses(gen)
+ *                 .outputs({"build/gen/out.h"});
+ * app.depends_on(out); // compile edges get out.h as an implicit input and
+ *                      // its directory as an include dir (-I)
+ * \endcode
+ *
+ * - `.command({...})` tokens are joined with spaces and run through the shell
+ *   like every other rule. The placeholders `$tool`, `$out` and `$in` are
+ *   expanded when the manifest is emitted: `$tool` = the path of the `.uses()`
+ *   executable, `$out` = the outputs (space-joined), `$in` = the file inputs
+ *   from `.depends_on()` (space-joined). Any other `$` reaches the shell
+ *   verbatim (ninja value escaping handles it).
+ * - `.uses(tool)` makes the tool an explicit input of the command edge, so it
+ *   is built first and the command re-runs when the tool changes. The tool
+ *   must be an Executable and must be runnable on the build host (in a cross
+ *   project mark it `.for_host()`); the command itself always executes on the
+ *   host, even in a cross build.
+ * - `.outputs({...})` names the files the command produces (relative to the
+ *   project root, path-safe). Default when omitted: a single file
+ *   `build/<mode>/gen/<name>/output`.
+ * - `.depends_on(...)` names file inputs: another custom command contributes
+ *   its outputs; any other artifact-producing target contributes its artifact.
+ * - Cross hygiene: like any artifact target, a custom command follows the
+ *   project triple unless `.for_host()` pins it to the host, and a consumer
+ *   built for a different triple may not `depends_on()` it (Config error).
+ */
+class CustomCommand : public Target {
+public:
+    explicit CustomCommand(std::string name) : Target(std::move(name), TargetKind::CustomCommand) {}
+
+    /// Add one command token (joined with spaces at emit time; `$tool`/`$out`/`$in`
+    /// placeholders are expanded then). Overloads: single, braced list, range.
+    CustomCommand& command(std::string_view token) {
+        command_tokens_.emplace_back(token);
+        return *this;
+    }
+    /// \copydoc command(std::string_view)
+    CustomCommand& command(std::initializer_list<std::string_view> tokens) {
+        for (const auto& t : tokens)
+            command_tokens_.emplace_back(t);
+        return *this;
+    }
+    /// \copydoc command(std::string_view)
+    template <StringRange R>
+    CustomCommand& command(R&& tokens) {
+        for (const auto& t : tokens)
+            command_tokens_.emplace_back(std::string_view(t));
+        return *this;
+    }
+    /**
+     * \brief The tool this command runs: an Executable target whose path
+     * expands `$tool` and which is an explicit input of the command edge
+     * (built first; the command re-runs when the tool is rebuilt).
+     * In a cross project the tool must be `.for_host()` (the command executes
+     * on the build host). Overloads: target, TargetRef handle, Result.
+     */
+    CustomCommand& uses(const Target& tool) {
+        used_tool_ = &tool;
+        return *this;
+    }
+    /// \copydoc uses(const Target&)
+    CustomCommand& uses(TargetRef tool);
+    /// \copydoc uses(const Target&)
+    CustomCommand& uses(Result<TargetRef> tool_result);
+    /**
+     * \brief Name an output file the command produces (relative to the project
+     * root). Default when never called: `build/<mode>/gen/<name>/output`.
+     * Overloads: single, braced list, range.
+     */
+    CustomCommand& outputs(std::string_view path) {
+        outputs_.emplace_back(path);
+        return *this;
+    }
+    /// \copydoc outputs(std::string_view)
+    CustomCommand& outputs(std::initializer_list<std::string_view> paths) {
+        for (const auto& p : paths)
+            outputs_.emplace_back(p);
+        return *this;
+    }
+    /// \copydoc outputs(std::string_view)
+    template <StringRange R>
+    CustomCommand& outputs(R&& paths) {
+        for (const auto& p : paths)
+            outputs_.emplace_back(std::string_view(p));
+        return *this;
+    }
+
+    /// The command tokens as given to command().
+    const std::vector<std::string>& command_tokens() const { return command_tokens_; }
+    /// The tool named with uses(), or nullptr when none was set.
+    const Target* used_tool() const { return used_tool_; }
+    /// The outputs as given to outputs() (empty = the default output is used).
+    const std::vector<std::string>& outputs() const { return outputs_; }
+
+private:
+    std::vector<std::string> command_tokens_;
+    std::vector<std::string> outputs_;
+    const Target* used_tool_ {nullptr};
+};
+
+/**
  * \brief Non-owning handle to a target created by add_subdirectory()/conan()/vcpkg().
  * std::expected cannot hold T&, so this is the reference-shaped stand-in:
- * never null, dereferenceable, and converts implicitly to Target& —
- * `depends_on(*proj.conan({"zlib/1.3.1"}))` just works.
+ * never null, converts implicitly to Target&, and is accepted by value by
+ * depends_on()/merge() — `depends_on(proj.conan({"zlib/1.3.1"}))` just works,
+ * no deref at the call site.
  */
 class TargetRef {
 public:
@@ -1157,6 +1298,32 @@ inline Target& Target::depends_on(Result<TargetRef> dep_result) {
     /* keep the first failure: build() reports it instead of linking without the dep */
     if (!deferred_error_)
         deferred_error_ = std::move(dep_result.error());
+    return *this;
+}
+
+inline Target& Target::merge(TargetRef lib) {
+    return merge(static_cast<const Target&>(lib.get()));
+}
+
+inline Target& Target::merge(Result<TargetRef> lib_result) {
+    if (lib_result)
+        return merge(static_cast<const Target&>(lib_result->get()));
+    /* keep the first failure: build() reports it instead of merging nothing */
+    if (!deferred_error_)
+        deferred_error_ = std::move(lib_result.error());
+    return *this;
+}
+
+// CustomCommand::uses overloads - TargetRef must be complete
+inline CustomCommand& CustomCommand::uses(TargetRef tool) {
+    return uses(static_cast<const Target&>(tool.get()));
+}
+
+inline CustomCommand& CustomCommand::uses(Result<TargetRef> tool_result) {
+    if (tool_result)
+        return uses(static_cast<const Target&>(tool_result->get()));
+    /* keep the first failure: build() reports it instead of running without the tool */
+    defer_error(std::move(tool_result.error()));
     return *this;
 }
 
@@ -1186,8 +1353,8 @@ public:
      * \param name project name (used in messages and generated vcpkg.json)
      * \param argv full process argv; truss parses `debug|release`, built-in
      *             tasks, `task NAME` / `task list`,
-     *             `-j`, `-v`, `-n`, `--explain`, `--target`, `--build-dir`,
-     *             `-h`/`--help`, and `--` (rest forwarded to `run`)
+     *             `-j`, `-v`, `-n`, `--explain`, `--target`, `--cross`,
+     *             `--build-dir`, `-h`/`--help`, and `--` (rest forwarded to `run`)
      *             (see README "Tasks & flags"); unknown options become a
      *             Config error reported by build().
      */
@@ -1223,6 +1390,19 @@ public:
      * \param name bare target name (no path, no platform extension)
      */
     ImportedLib& import_library(std::string name) { return add_target<ImportedLib>(std::move(name)); }
+    /**
+     * \brief Create a CustomCommand target: run a command during the build
+     * (usually a for_host() tool via .uses()) and feed its outputs to other
+     * targets. See the CustomCommand docs for the full semantics:
+     * `.command({...})` with `$tool`/`$out`/`$in` placeholders, `.uses(tool)`,
+     * `.outputs({...})` (default `build/<mode>/gen/<name>/output`),
+     * `.depends_on(...)` for file inputs. A target that depends_on() a custom
+     * command gets its outputs as implicit inputs of its compile edges and
+     * each output's directory as an include dir.
+     * \param name bare target name (no path, no platform extension)
+     * \return reference for builder chaining; the target lives as long as the Project.
+     */
+    CustomCommand& add_custom_command(std::string name) { return add_target<CustomCommand>(std::move(name)); }
     /**
      * \brief Register a named task: `./truss task <name>` builds first, then
      * runs fn. `./truss task list` prints every task with its description.
@@ -1342,6 +1522,8 @@ public:
     int jobs() const { return jobs_; }
     bool verbose() const { return verbose_; }
     const std::vector<std::string>& only_targets() const { return only_targets_; }
+    /// The `--cross TRIPLE` CLI override of Config::target (unset = use the script's Config).
+    const std::optional<std::string>& cross_override() const { return cross_override_; }
     /// Get the auto-discovered truss module paths.
     const std::vector<std::filesystem::path>& truss_module_paths() const { return truss_module_paths_; }
 
@@ -1374,6 +1556,7 @@ private:
     bool list_tasks_ {false};                   /* `task list` / bare `task` */
     std::vector<std::string> requested_tasks_;  /* user tasks as "task:<name>" */
     std::vector<std::string> only_targets_;
+    std::optional<std::string> cross_override_; /* --cross TRIPLE: overrides Config::target */
     std::vector<std::string> run_args_; /* after `--`, forwarded by run */
     std::optional<std::filesystem::path> build_root_;
     std::optional<Error> cli_error_;

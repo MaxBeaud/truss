@@ -18,6 +18,7 @@ module;
 #include <ranges>
 #include <set>
 #include <span>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -56,6 +57,55 @@ bool path_is_safe(const std::filesystem::path& p) {
     return s.find_first_of(" \t:$") == std::string::npos;
 }
 
+/* Split a command prefix on spaces ("qemu-aarch64 -L /sysroot" -> 3 words). */
+std::vector<std::string> split_words(std::string_view s) {
+    std::vector<std::string> words;
+    std::istringstream in {std::string(s)};
+    for (std::string w; in >> w;)
+        words.push_back(std::move(w));
+    return words;
+}
+
+/* Join parts with single spaces (custom-command $out/$in expansion). */
+std::string join_spaced(std::span<const std::string> parts) {
+    std::string out;
+    for (const auto& p : parts) {
+        if (!out.empty())
+            out += ' ';
+        out += p;
+    }
+    return out;
+}
+
+/* Replace every occurrence of `from` in `s` with `to` (placeholder expansion). */
+void replace_all(std::string& s, std::string_view from, std::string_view to) {
+    if (from.empty())
+        return;
+    for (size_t at = s.find(from); at != std::string::npos; at = s.find(from, at + to.size()))
+        s.replace(at, from.size(), to);
+}
+
+std::string_view kind_name(TargetKind k) {
+    switch (k) {
+    case TargetKind::Executable: return "Executable";
+    case TargetKind::StaticLibrary: return "StaticLibrary";
+    case TargetKind::SharedLibrary: return "SharedLibrary";
+    case TargetKind::Interface: return "Interface";
+    case TargetKind::ImportedLibrary: return "ImportedLibrary";
+    case TargetKind::CustomCommand: return "CustomCommand";
+    }
+    return "Unknown";
+}
+
+/* argv to execute `exe` on the host: a cross exe goes through Config::runner. */
+std::vector<std::string> exec_argv(const Config& conf, bool cross, const std::string& exe) {
+    std::vector<std::string> argv;
+    if (cross && conf.runner_set() && !conf.runner().empty())
+        argv = split_words(conf.runner());
+    argv.push_back(exe);
+    return argv;
+}
+
 /* A module unit (.cppm) compiled to a BMI + object. */
 struct BmiUnit {
     std::string source;       /* relative path */
@@ -74,6 +124,7 @@ struct ResolvedTarget {
     std::string objdir, output;                      /* relative to cwd */
     std::string implib;                              /* Windows import lib for shared libs */
     std::string static_twin;                         /* shared lib archived for static_deps() consumers */
+    std::vector<std::string> cmd_outputs;            /* CustomCommand: resolved output paths */
     bool needs_std {};                               /* some unit does `import std;` */
     bool needs_std_compat {};                        /* some unit does `import std.compat;` */
 };
@@ -183,6 +234,7 @@ struct Usage {
     std::vector<std::string> includes, defines, link_paths, link_libs;
     std::vector<std::string> system_includes, flags; /* flags: public_flags() of self + deps */
     std::vector<std::string> static_link_libs; /* from Interface deps marked static_link() */
+    std::vector<std::string> gen_outputs; /* outputs of depends_on custom commands */
 };
 
 /* One walk per consumer; the dedupe sets live for the whole walk (rebuilding
@@ -223,6 +275,18 @@ private:
             for (const auto& l : r.target->link_libs())
                 add(libs, link_libs_, l);
         }
+        /* a custom command's outputs are implicit inputs of the consumer's
+         * compile edges, and each output's directory is an include dir (-I) —
+         * the codegen-header pattern */
+        if (r.target->kind() == TargetKind::CustomCommand) {
+            for (const auto& o : r.cmd_outputs) {
+                add(out_.gen_outputs, gen_outputs_, o);
+                std::string dir = std::filesystem::path(o).parent_path().generic_string();
+                if (dir.empty())
+                    dir = ".";
+                add(out_.includes, includes_, dir);
+            }
+        }
         for (const Target* dep : r.target->deps())
             if (const auto it = idx_.find(dep->name()); it != idx_.end())
                 visit(*it->second);
@@ -232,6 +296,7 @@ private:
     Usage out_;
     std::set<const Target*> visited_;
     std::unordered_set<std::string> includes_, system_includes_, defines_, flags_, link_paths_, link_libs_;
+    std::unordered_set<std::string> gen_outputs_;
 };
 
 Result<std::vector<std::string>> resolve_sources(const Target& t) {
@@ -274,7 +339,7 @@ Result<void> validate(const std::vector<std::unique_ptr<Target>>& targets) {
         const std::string& name = t->name();
         if (const auto& err = t->deferred_error(); err) {
             Error e = *err;
-            e.message = "target '" + name + "': depends_on() was given a failed result:\n" + e.message;
+            e.message = "target '" + name + "': depends_on()/merge() was given a failed result:\n" + e.message;
             return std::unexpected(std::move(e));
         }
         if (name.empty())
@@ -293,6 +358,79 @@ Result<void> validate(const std::vector<std::unique_ptr<Target>>& targets) {
             });
         if (!path_is_safe(std::filesystem::path(name)))
             return std::unexpected(Error {Error::Kind::Config, "target name '" + name + "' contains unsupported characters (spaces, ':', '$')"});
+
+        if (t->kind() == TargetKind::CustomCommand) {
+            const auto& cc = static_cast<const CustomCommand&>(*t);
+            if (!cc.source_patterns().empty() || !t->removed_sources().empty())
+                return std::unexpected(Error {
+                    Error::Kind::Config,
+                    "custom command '" + name + "' takes no sources; describe the work with .command(...), e.g.:\n"
+                    "  correct:   proj.add_custom_command(\"generated\").command({\"$tool\", \"-o\", \"$out\"})\n"
+                    "  incorrect: proj.add_custom_command(\"generated\").sources(\"gen.cpp\")",
+                });
+            if (cc.is_test_target())
+                return std::unexpected(Error {
+                    Error::Kind::Config,
+                    "custom command '" + name + "' cannot be a test (is_test()); it produces files, not a runnable test",
+                });
+            if (cc.command_tokens().empty())
+                return std::unexpected(Error {
+                    Error::Kind::Config,
+                    "custom command '" + name + "' has an empty command; set one with .command(...), e.g.:\n"
+                    "  correct:   proj.add_custom_command(\"generated\").command({\"$tool\", \"-o\", \"$out\", \"input.txt\"})\n"
+                    "  incorrect: proj.add_custom_command(\"generated\")",
+                });
+            bool uses_tool_placeholder = false;
+            for (const auto& tok : cc.command_tokens()) {
+                if (tok.empty() || tok.find_first_of(" \t\n\r") != std::string::npos)
+                    return std::unexpected(Error {
+                        Error::Kind::Config,
+                        "custom command '" + name + "': command token '" + tok +
+                            "' is empty or contains whitespace (tokens are joined with spaces and run "
+                            "through the shell)",
+                    });
+                if (tok.find("$tool") != std::string::npos)
+                    uses_tool_placeholder = true;
+            }
+            if (uses_tool_placeholder && cc.used_tool() == nullptr)
+                return std::unexpected(Error {
+                    Error::Kind::Config,
+                    "custom command '" + name + "': the command uses the $tool placeholder but no tool was "
+                    "set; add one with .uses(tool), e.g.:\n"
+                    "  correct:   proj.add_custom_command(\"generated\").command({\"$tool\", \"-o\", \"$out\"}).uses(gen)\n"
+                    "  incorrect: proj.add_custom_command(\"generated\").command({\"$tool\", \"-o\", \"$out\"})",
+                });
+            if (const Target* tool = cc.used_tool(); tool != nullptr && tool->kind() != TargetKind::Executable)
+                return std::unexpected(Error {
+                    Error::Kind::Config,
+                    "custom command '" + name + "': uses('" + tool->name() + "') must name an executable "
+                    "target (add_executable), got a " + std::string(kind_name(tool->kind())) + " target",
+                });
+            for (const auto& out : cc.outputs()) {
+                const std::filesystem::path p(out);
+                if (out.empty())
+                    return std::unexpected(Error {
+                        Error::Kind::Config,
+                        "custom command '" + name + "': outputs() got an empty path",
+                    });
+                if (!path_is_safe(p) || p.is_absolute() || out.starts_with('-') ||
+                    p.generic_string().find("../") != std::string::npos ||
+                    p.generic_string() == "..")
+                    return std::unexpected(Error {
+                        Error::Kind::Config,
+                        "custom command '" + name + "': output '" + out + "' must be a relative, "
+                        "path-safe path inside the project (no spaces, ':', '$', no absolute paths, no '..')",
+                        p,
+                    });
+            }
+            for (size_t i = 0; i < cc.outputs().size(); ++i)
+                for (size_t j = i + 1; j < cc.outputs().size(); ++j)
+                    if (cc.outputs()[i] == cc.outputs()[j])
+                        return std::unexpected(Error {
+                            Error::Kind::Config,
+                            "custom command '" + name + "': duplicate output '" + cc.outputs()[i] + "'",
+                        });
+        }
     }
     for (size_t i = 0; i < targets.size(); ++i)
         for (size_t j = i + 1; j < targets.size(); ++j)
@@ -327,6 +465,8 @@ std::string output_path_for(const Target& t, const std::filesystem::path& build_
     case TargetKind::Interface:
     case TargetKind::ImportedLibrary:
         return {}; /* header-only / prebuilt: no built artifact */
+    case TargetKind::CustomCommand:
+        return {}; /* outputs are resolved separately (cmd_outputs) */
     }
     return name;
 }
@@ -463,6 +603,14 @@ Result<void> emit_manifest(const Project& proj, std::vector<ResolvedTarget>& res
         {"command", "$cxx -shared $soname_flag -o $out $in $flags $link"},
         {"description", "LINK $out"},
     });
+    if (std::ranges::any_of(resolved, [](const ResolvedTarget& r) { return r.target->kind() == TargetKind::CustomCommand; }))
+        w.rule("custom_command", {
+            /* the command string is fully expanded per edge ($tool/$out/$in
+             * placeholders resolved at emit time); rule bodies keep ninja
+             * placeholders verbatim, so only $command/$out appear here */
+            {"command", "$command"},
+            {"description", "GEN $out"},
+        });
 
     const bool any_msvc = std::ranges::any_of(resolved, [](const ResolvedTarget& r) {
         return r.triple.family == CompilerFamily::Msvc;
@@ -535,6 +683,67 @@ Result<void> emit_manifest(const Project& proj, std::vector<ResolvedTarget>& res
     std::vector<std::string> all_outputs;
     for (auto& r : resolved) {
         const Target& t = *r.target;
+        /* custom command: one edge with every output; the used tool and the
+         * depends_on file inputs are explicit inputs (built first, and a
+         * tool/input change re-runs the command) */
+        if (t.kind() == TargetKind::CustomCommand) {
+            const auto& cc = static_cast<const CustomCommand&>(t);
+            std::vector<std::string> file_inputs;
+            for (const Target* dep : t.deps()) {
+                if (dep->kind() == TargetKind::Interface)
+                    continue; /* header-only: no file to feed the command */
+                const auto it = by_name.find(dep->name());
+                if (it == by_name.end())
+                    return std::unexpected(Error {
+                        Error::Kind::Config,
+                        "custom command '" + t.name() + "' depends on unknown target '" + dep->name() + "'",
+                    });
+                if (dep->kind() == TargetKind::CustomCommand)
+                    file_inputs.insert(file_inputs.end(), it->second->cmd_outputs.begin(),
+                                       it->second->cmd_outputs.end());
+                else if (dep->kind() == TargetKind::ImportedLibrary)
+                    file_inputs.insert(file_inputs.end(), dep->import_archives().begin(),
+                                       dep->import_archives().end());
+                else if (!it->second->output.empty())
+                    file_inputs.push_back(it->second->output);
+            }
+            std::string tool_path;
+            if (const Target* tool = cc.used_tool(); tool != nullptr) {
+                const auto it = by_name.find(tool->name());
+                if (it == by_name.end() || it->second->output.empty())
+                    return std::unexpected(Error {
+                        Error::Kind::Config,
+                        "custom command '" + t.name() + "': uses('" + tool->name() +
+                            "') is not an executable target of this build",
+                    });
+                tool_path = it->second->output;
+            }
+            /* expand $tool/$out/$in per token; remaining '$' in the value is
+             * escaped by NinjaWriter and reaches the shell verbatim */
+            const std::string out_joined = join_spaced(r.cmd_outputs);
+            const std::string in_joined = join_spaced(file_inputs);
+            std::string command;
+            for (const auto& tok : cc.command_tokens()) {
+                std::string expanded = tok;
+                replace_all(expanded, "$tool", tool_path);
+                replace_all(expanded, "$out", out_joined);
+                replace_all(expanded, "$in", in_joined);
+                if (!command.empty())
+                    command += ' ';
+                command += expanded;
+            }
+            NinjaWriter::Edge e;
+            e.outputs = r.cmd_outputs;
+            e.rule = "custom_command";
+            e.inputs = std::move(file_inputs);
+            if (!tool_path.empty())
+                e.inputs.push_back(tool_path);
+            e.vars = {{"command", std::move(command)}};
+            w.build(std::move(e));
+            for (const auto& o : r.cmd_outputs)
+                all_outputs.push_back(o);
+            continue;
+        }
         /* header-only and imported-prebuilt targets contribute usage
          * requirements (via collect_usage) but produce no artifact and no edges */
         if (t.kind() == TargetKind::Interface || t.kind() == TargetKind::ImportedLibrary)
@@ -764,6 +973,10 @@ Result<void> emit_manifest(const Project& proj, std::vector<ResolvedTarget>& res
             e.rule = "compile_bmi";
             e.inputs = {b.source};
             e.implicit_ins = imp->second;
+            /* generated files from depends_on custom commands: order-only, so
+             * the command runs before this compile (the depfile then tracks
+             * the generated header for incremental rebuilds) */
+            e.implicit_ins.insert(e.implicit_ins.end(), usage.gen_outputs.begin(), usage.gen_outputs.end());
             std::string flags = cflags->compile;
             if (!imp->first.empty())
                 flags += " " + imp->first;
@@ -785,6 +998,7 @@ Result<void> emit_manifest(const Project& proj, std::vector<ResolvedTarget>& res
             e.implicit_ins = unit.imp_ins;
             if (!pch_out.empty())
                 e.implicit_ins.push_back(pch_out);
+            e.implicit_ins.insert(e.implicit_ins.end(), usage.gen_outputs.begin(), usage.gen_outputs.end());
             std::string flags = cflags->compile;
             if (!unit.imp_flags.empty())
                 flags += " " + unit.imp_flags;
@@ -806,6 +1020,7 @@ Result<void> emit_manifest(const Project& proj, std::vector<ResolvedTarget>& res
             e.outputs = {obj};
             e.rule = msvc ? "compile_c_msvc" : "compile_c";
             e.inputs = {src};
+            e.implicit_ins = usage.gen_outputs;
             e.vars = {
                 {"cc", cc},
                 {"flags", cflags->compile_c},
@@ -830,8 +1045,11 @@ Result<void> emit_manifest(const Project& proj, std::vector<ResolvedTarget>& res
             for (const Target* dep : d.deps()) {
                 if (!dep_seen.insert(dep).second)
                     continue;
-                if (dep->kind() == TargetKind::Interface)
-                    continue; /* header-only: no artifact to link */
+                /* header-only: no artifact to link; custom-command outputs are
+                 * implicit compile inputs + include dirs, never link inputs */
+                if (dep->kind() == TargetKind::Interface ||
+                    dep->kind() == TargetKind::CustomCommand)
+                    continue;
                 const auto it = by_name.find(dep->name());
                 if (it == by_name.end())
                     return std::unexpected(Error {
@@ -1183,6 +1401,9 @@ constexpr std::string_view kHelp =
     "  -n, --dry-run    show what would run without running it\n"
     "      --explain    explain why each step is rebuilt\n"
     "      --target NAME  build (or run) only NAME; repeatable\n"
+    "      --cross TRIPLE  override the script's Config::target for this invocation,\n"
+    "                      e.g. --cross aarch64-linux-musl (outputs land in their\n"
+    "                      own build/<mode>/bin/<triple> dir)\n"
     "      --build-dir PATH  build root (default: build)\n"
     "  -V, --version    print the truss version\n"
     "  -h, --help       show this help\n"
@@ -1221,6 +1442,12 @@ Project::Project(std::string name, std::span<char* const> argv) : name_(std::mov
         else if (a == "--target") {
             if (++i >= argv.size()) { cli_error_ = Error {Error::Kind::Config, "--target requires a name"}; continue; }
             only_targets_.emplace_back(argv[i]);
+        }
+        else if (a == "--cross") {
+            /* overrides Config::target for this invocation only; validated by
+             * apply_config in build() (malformed triples are Config errors) */
+            if (++i >= argv.size()) { cli_error_ = Error {Error::Kind::Config, "--cross requires a target triple"}; continue; }
+            cross_override_ = argv[i];
         }
         else if (a == "--build-dir") {
             if (++i >= argv.size()) { cli_error_ = Error {Error::Kind::Config, "--build-dir requires a path"}; continue; }
@@ -1369,13 +1596,54 @@ Result<void> Project::build() {
 
     /* project-wide toolchain: Config overlaid on the host triple (per-target
      * cross_target() overrides completely; for_host() pins targets back onto
-     * the host while keeping the Config's compiler/stdlib/ar overlays) */
-    auto base_triple = detail::apply_config(config_, host_triple());
-    if (!base_triple) {
-        log::error(base_triple.error());
-        return std::unexpected(base_triple.error());
+     * the host while keeping the Config's compiler/stdlib/ar overlays).
+     * The --cross CLI flag overrides Config::target for this invocation only. */
+    Config eff_config = config_;
+    if (cross_override_) {
+        if (cross_override_->empty()) {
+            Error e {
+                Error::Kind::Config,
+                "--cross requires a non-empty target triple, e.g.:\n"
+                "  correct:   --cross aarch64-linux-musl\n"
+                "  incorrect: --cross \"\"",
+            };
+            log::error(e);
+            return std::unexpected(std::move(e));
+        }
+        eff_config.target(*cross_override_);
     }
-    Config host_config = config_;
+    /* Config::runner validates here: a malformed runner is a Config error,
+     * never a silently wrong command line */
+    if (eff_config.runner_set()) {
+        if (eff_config.runner().empty()) {
+            Error e {
+                Error::Kind::Config,
+                "runner(\"\"): the runner must be a non-empty command prefix, e.g.:\n"
+                "  correct:   conf.runner(\"qemu-aarch64 -L /sysroot\")\n"
+                "  incorrect: conf.runner(\"\")",
+            };
+            log::error(e);
+            return std::unexpected(std::move(e));
+        }
+        if (eff_config.runner().starts_with('-')) {
+            Error e {
+                Error::Kind::Config,
+                "runner('" + eff_config.runner() + "'): the runner must be a command, not a flag; "
+                "did you mean runner(\"qemu-aarch64\") or a flag like --cross?",
+            };
+            log::error(e);
+            return std::unexpected(std::move(e));
+        }
+    }
+    auto base_triple = detail::apply_config(eff_config, host_triple());
+    if (!base_triple) {
+        Error e = std::move(base_triple.error());
+        if (cross_override_)
+            e.message = "--cross '" + *cross_override_ + "': " + e.message;
+        log::error(e);
+        return std::unexpected(std::move(e));
+    }
+    Config host_config = eff_config;
     host_config.target(""); /* a for_host() tool never crosses, whatever the project does */
     auto host_pinned = detail::apply_config(host_config, host_triple());
     if (!host_pinned) {
@@ -1391,9 +1659,10 @@ Result<void> Project::build() {
         r.target = t.get();
         r.triple = t->is_for_host() ? *host_pinned : t->triple_override().value_or(*base_triple);
 
-        /* imported prebuilt libraries resolve no sources (nothing to build) */
+        /* imported prebuilt libraries and custom commands resolve no sources
+         * (nothing to compile) */
         std::vector<std::string> sources;
-        if (t->kind() != TargetKind::ImportedLibrary) {
+        if (t->kind() != TargetKind::ImportedLibrary && t->kind() != TargetKind::CustomCommand) {
             auto rs = resolve_sources(*t);
             if (!rs) {
                 log::error(rs.error());
@@ -1402,7 +1671,8 @@ Result<void> Project::build() {
             sources = std::move(*rs);
         }
         if (sources.empty() && t->kind() != TargetKind::Interface &&
-            t->kind() != TargetKind::ImportedLibrary && t->merged_libraries().empty()) {
+            t->kind() != TargetKind::ImportedLibrary && t->kind() != TargetKind::CustomCommand &&
+            t->merged_libraries().empty()) {
             Error e {
                 Error::Kind::Config,
                 "target '" + t->name() + "' has no sources; add some with .sources(...) or .sources_in(...)",
@@ -1435,6 +1705,35 @@ Result<void> Project::build() {
                 log::error(e);
                 return std::unexpected(std::move(e));
             }
+        }
+
+        /* a custom command executes on the build host (that is the point of a
+         * host tool), so its uses() tool must be a host binary — in a cross
+         * project the tool has to be for_host() */
+        if (t->kind() == TargetKind::CustomCommand) {
+            const auto& cc = static_cast<const CustomCommand&>(*t);
+            if (const Target* tool = cc.used_tool(); tool != nullptr) {
+                const TargetTriple tool_triple = tool->is_for_host()
+                                                     ? *host_pinned
+                                                     : tool->triple_override().value_or(*base_triple);
+                if (!tool_triple.target.empty()) {
+                    Error e {
+                        Error::Kind::Config,
+                        "custom command '" + t->name() + "' uses '" + tool->name() + "', which is built for '" +
+                            tool_triple.target + "', but the command runs on the build host:\n"
+                            "  mark the tool with .for_host() so it is built for the host, e.g.:\n"
+                            "  correct:   proj.add_executable(\"gen\").sources(\"gen.cpp\").for_host()\n"
+                            "  incorrect: proj.add_executable(\"gen\").sources(\"gen.cpp\")   // in a cross project",
+                    };
+                    log::error(e);
+                    return std::unexpected(std::move(e));
+                }
+            }
+            /* resolve the outputs: user-given, else the default
+             * build/<mode>/gen/<name>/output */
+            r.cmd_outputs = cc.outputs();
+            if (r.cmd_outputs.empty())
+                r.cmd_outputs.push_back((bld / "gen" / t->name() / "output").generic_string());
         }
 
         /* import_archive() is an ImportedLibrary-only builder: on anything
@@ -1620,6 +1919,8 @@ Result<void> Project::build() {
         }
 
         r.output = output_path_for(*t, bld, tdir, r.triple);
+        if (t->kind() == TargetKind::CustomCommand)
+            r.output = r.cmd_outputs.front(); /* --target/all address the first output */
         if (t->kind() == TargetKind::SharedLibrary &&
             (r.triple.family == CompilerFamily::Msvc || r.triple.os == Os::Windows))
             r.implib = import_lib_path(*t, bld, tdir, r.triple);
@@ -1790,9 +2091,10 @@ Result<void> Project::build() {
                     to_build.push_back(exe);
                 if (auto r = run_samu(to_build); !r)
                     return r;
+                const bool has_runner = config_.runner_set() && !config_.runner().empty();
                 int failures = 0, skipped = 0;
                 for (const auto& [exe, cross] : tests) {
-                    if (cross) {
+                    if (cross && !has_runner) {
                         /* a cross-compiled test exe cannot run on the host:
                          * built above, skipped here — never silently "passed" */
                         log::warn("test '" + exe + "' skipped (cross target '" +
@@ -1800,8 +2102,8 @@ Result<void> Project::build() {
                         ++skipped;
                         continue;
                     }
-                    log::info("running " + exe);
-                    const std::array argv {exe};
+                    log::info("running " + exe + (cross ? " (via runner '" + config_.runner() + "')" : ""));
+                    const auto argv = exec_argv(config_, cross, exe);
                     auto outcome = detail::run_process(argv, false);
                     if (!outcome)
                         return std::unexpected(outcome.error());
@@ -1834,7 +2136,8 @@ Result<void> Project::build() {
                 }
                 if (exe_outputs.empty())
                     return std::unexpected(Error {Error::Kind::Config, "no executable to run (test executables are excluded)"});
-                if (exe_cross.front())
+                const bool has_runner = config_.runner_set() && !config_.runner().empty();
+                if (exe_cross.front() && !has_runner)
                     return std::unexpected(Error {
                         Error::Kind::Config,
                         "cannot run '" + exe_outputs.front() + "': it is cross-compiled for a different "
@@ -1845,7 +2148,7 @@ Result<void> Project::build() {
                               + " executables; pick one with --target NAME)");
                 if (auto r = run_samu(std::span(exe_outputs).first(1)); !r)
                     return r;
-                std::vector<std::string> argv {exe_outputs.front()};
+                auto argv = exec_argv(config_, exe_cross.front(), exe_outputs.front());
                 argv.insert(argv.end(), run_args_.begin(), run_args_.end());
                 auto outcome = detail::run_process(argv, false);
                 if (!outcome)
