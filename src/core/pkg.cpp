@@ -111,6 +111,60 @@ Result<void> tarball_fetch(const std::string& url, const std::string& sha256,
     return {};
 }
 
+/* Post-extraction hardening (defense in depth on top of system tar, which
+ * already refuses `..` members and strips leading '/'): a tarball can still
+ * ship a symlink (created early) whose target escapes dest, and subsequent
+ * members or later build code would read/write through it outside the
+ * package directory. Walk the tree and reject any symlink whose normalized
+ * target lands outside dest; same check for the directories the tree
+ * exposes (dangling dir links catch at target resolution, this catches at
+ * fetch time with the package named). */
+Result<void> verify_no_escaping_links(const std::filesystem::path& dest) {
+    std::error_code ec;
+    const std::string dest_str = std::filesystem::weakly_canonical(dest, ec).generic_string();
+    if (ec)
+        return std::unexpected(Error {Error::Kind::Io, "cannot stat extracted package dir", dest});
+    std::filesystem::path it_err;
+    for (auto it = std::filesystem::recursive_directory_iterator(
+             dest, std::filesystem::directory_options::skip_permission_denied, ec);
+         it != std::filesystem::recursive_directory_iterator {}; it.increment(ec)) {
+        if (ec) {
+            it_err = it->path();
+            break;
+        }
+        /* never descend through a link: the scan must see what shipping the
+         * tarball planted, not what it points at */
+        if (it->is_symlink(ec)) {
+            auto target = std::filesystem::read_symlink(it->path(), ec);
+            if (ec) {
+                it_err = it->path();
+                break;
+            }
+            const bool escapes = target.is_absolute() ?
+                                     /* absolute link target: escapes unless it stays inside */
+                                     !std::filesystem::weakly_canonical(target, ec).generic_string()
+                                          .starts_with(dest_str + "/") :
+                                     !std::filesystem::path(
+                                          (it->path().parent_path() / target).lexically_normal())
+                                          .generic_string()
+                                          .starts_with(dest_str + "/");
+            if (ec)
+                return std::unexpected(Error {Error::Kind::Io, "cannot read symlink in package", it->path()});
+            if (escapes)
+                return std::unexpected(Error {
+                    Error::Kind::Fetch,
+                    "refusing package: '" + it->path().lexically_relative(dest).generic_string() +
+                        "' is a link escaping the package directory (target '" + target.generic_string() + "')",
+                    it->path(),
+                });
+            it.disable_recursion_pending();
+        }
+    }
+    if (ec)
+        return std::unexpected(Error {Error::Kind::Io, "cannot scan extracted package", it_err.empty() ? dest : it_err});
+    return {};
+}
+
 Result<void> extract_tarball(const std::filesystem::path& tarball, const std::filesystem::path& dest) {
     const std::string name = tarball.filename().generic_string();
     std::string_view mode = "xzf"; /* .tar.gz / .tgz */
@@ -121,8 +175,12 @@ Result<void> extract_tarball(const std::filesystem::path& tarball, const std::fi
     else if (name.ends_with(".tar"))
         mode = "xf";
     const std::vector<std::string> argv {"tar", std::string(mode), tarball.generic_string(),
-                                         "-C", dest.generic_string(), "--strip-components=1"};
-    return run_tool(argv, "tar");
+                                         "-C", dest.generic_string(), "--strip-components=1",
+                                         /* never restore ownership from the tarball (running as root) */
+                                         "--no-same-owner"};
+    if (auto r = run_tool(argv, "tar"); !r)
+        return r;
+    return verify_no_escaping_links(dest);
 }
 
 /* Any compilable source directly in this directory (not nested)? */
@@ -274,7 +332,12 @@ Result<void> materialize_fetch(const std::string& pkg_name, const FetchOptions& 
     std::filesystem::remove_all(dest, ec);
     if (auto r = detail::make_dirs(dest); !r)
         return std::unexpected(r.error());
-    return extract_tarball(tar_cache, dest);
+    if (auto r = extract_tarball(tar_cache, dest); !r) {
+        /* a refused tarball must not leave a (partly escaped) tree behind */
+        std::filesystem::remove_all(dest, ec);
+        return r;
+    }
+    return {};
 }
 
 } // namespace

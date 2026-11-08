@@ -11,6 +11,24 @@ import :impl;
 
 using namespace truss;
 
+namespace {
+
+bool contains(std::string_view hay, std::string_view needle) {
+    return hay.find(needle) != std::string_view::npos;
+}
+
+/* RAII chdir so fetch/package tests work in their own directory */
+struct ChdirTo {
+    std::filesystem::path prev;
+    explicit ChdirTo(const std::filesystem::path& d)
+        : prev(std::filesystem::current_path()) {
+        std::filesystem::current_path(d);
+    }
+    ~ChdirTo() { std::filesystem::current_path(prev); }
+};
+
+} // namespace
+
 TEST_CASE("lockfile: parse comments, whitespace, empty values") {
     const auto p = std::filesystem::temp_directory_path() / "truss-lock-parse-test.lock";
     auto w = detail::write_file(p,
@@ -147,4 +165,35 @@ TEST_CASE("copy_tree: hardlink materialization, .git skipped") {
     REQUIRE(detail::copy_tree(root / "src", dest).has_value());
     CHECK(detail::read_file(dest / "a.h").value() == "edited\n");
     std::filesystem::remove_all(root);
+}
+
+TEST_CASE("fetch: tarball whose symlink escapes the package dir is refused") {
+    const auto scratch = std::filesystem::temp_directory_path() / "truss-evil-tar";
+    std::filesystem::remove_all(scratch);
+    std::filesystem::create_directories(scratch);
+    ChdirTo into_scratch {scratch};
+    REQUIRE(detail::write_file("pkgsrc/keep.txt", "harmless\n").has_value());
+    REQUIRE(std::filesystem::create_directory("pkgsrc/evil"));
+    std::error_code esc;
+    std::filesystem::create_symlink("../outside", "pkgsrc/evil/link", esc);
+    REQUIRE_FALSE(esc);
+    auto tar = os::capture({"tar", "-czf", "evil.tar.gz", "-C", "pkgsrc", "evil", "keep.txt"});
+    REQUIRE(tar.has_value());
+    auto sha = fs::sha256_file("evil.tar.gz");
+    REQUIRE(sha.has_value());
+    const std::string url = "file://" + (std::filesystem::current_path() / "evil.tar.gz").string();
+
+    char prog[] = "truss-tests";
+    char* argv[] = {prog};
+    Project proj("evil", 1, argv);
+    const FetchOptions opts { .url = url, .sha256 = *sha };
+    auto r = proj.fetch("evil", opts);
+    REQUIRE_FALSE(r.has_value());
+    CHECK(r.error().kind == Error::Kind::Fetch);
+    CHECK(contains(r.error().message, "escaping the package dir"));
+    /* nothing was materialized under build/ */
+    CHECK_FALSE(std::filesystem::exists("build/debug/packages/evil"));
+    std::filesystem::remove_all("pkgsrc");
+    std::filesystem::remove_all("build");
+    std::filesystem::remove("evil.tar.gz");
 }
