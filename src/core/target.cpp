@@ -204,6 +204,14 @@ Result<std::string> resolve_launcher(const Config& conf) {
     if (conf.launcher_set()) {
         if (conf.launcher().empty())
             return std::string {};
+        /* the launcher is prefixed to every compile command, which samurai
+         * runs via /bin/sh -c: only a plain program name/path is allowed */
+        if (conf.launcher().find_first_of("\"'`$;|&<>()\\") != std::string::npos)
+            return std::unexpected(Error {
+                Error::Kind::Config,
+                "launcher '" + conf.launcher() + "' contains unsupported characters "
+                "(it is prefixed to shell-run compile commands; name a program or path)",
+            });
         if (!os::program_exists(conf.launcher()))
             return std::unexpected(Error {
                 Error::Kind::Config,

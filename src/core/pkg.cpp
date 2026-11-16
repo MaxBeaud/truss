@@ -10,6 +10,7 @@ module;
 #include <string>
 #include <string_view>
 #include <thread>
+#include <unordered_set>
 #include <vector>
 
 #include <cstdlib>
@@ -50,7 +51,10 @@ class lockfile_guard {
 public:
     explicit lockfile_guard(const std::filesystem::path& file) {
 #if !defined(_WIN32)
-        fd_ = ::open(file.c_str(), O_CREAT | O_RDWR, 0666);
+        /* O_CLOEXEC: the guard is held across materialize_fetch, which spawns
+         * git/curl/tar — an inherited fd would carry the flock into children
+         * that can outlive truss and hold the lock forever */
+        fd_ = ::open(file.c_str(), O_CREAT | O_RDWR | O_CLOEXEC, 0666);
         if (fd_ == -1)
             return;
         while (::flock(fd_, LOCK_EX) != 0)
@@ -59,6 +63,7 @@ public:
                 fd_ = -1;
                 return;
             }
+        locked_ = true;
 #endif
     }
     lockfile_guard(const lockfile_guard&) = delete;
@@ -71,9 +76,13 @@ public:
         }
 #endif
     }
+    /// False when the lockfile could not be opened/locked — callers must fail
+    /// instead of silently racing on the read-modify-write.
+    bool locked() const { return locked_; }
 
 private:
     int fd_ {-1};
+    bool locked_ {false};
 };
 
 /* --- truss.lock: tiny key=value pin file in the project root -------------- */
@@ -115,11 +124,14 @@ Result<void> git_fetch(const std::string& url, const std::string& ref,
     const std::filesystem::path tmp = staging_path(dest);
     std::error_code ec;
     std::filesystem::remove_all(tmp, ec); /* best effort */
+    const auto cleanup = [&] { std::filesystem::remove_all(tmp, ec); };
     if (!looks_like_commit(ref)) {
         const std::vector<std::string> argv {"git", "clone", "--depth", "1", "--branch", ref, url,
                                             tmp.generic_string()};
-        if (auto r = run_tool(argv, "git clone"); !r)
+        if (auto r = run_tool(argv, "git clone"); !r) {
+            cleanup(); /* a failed clone must not leave staging garbage */
             return r;
+        }
     } else {
         const std::string d = tmp.generic_string();
         for (const std::vector<std::string>& argv :
@@ -127,13 +139,23 @@ Result<void> git_fetch(const std::string& url, const std::string& ref,
               std::vector<std::string> {"git", "-C", d, "remote", "add", "origin", url},
               std::vector<std::string> {"git", "-C", d, "fetch", "--depth", "1", "origin", ref},
               std::vector<std::string> {"git", "-C", d, "checkout", "--detach", "FETCH_HEAD"}}) {
-            if (auto r = run_tool(argv, "git"); !r)
+            if (auto r = run_tool(argv, "git"); !r) {
+                cleanup();
                 return r;
+            }
         }
     }
     std::filesystem::rename(tmp, dest, ec);
-    if (ec)
+    if (ec) {
+        /* a concurrent truss process may have won the clone race: its
+         * completed cache is as good as ours */
+        std::error_code dir_ec;
+        if (std::filesystem::is_directory(dest, dir_ec)) {
+            cleanup();
+            return {};
+        }
         return std::unexpected(Error {Error::Kind::Io, "could not move git cache into place", tmp});
+    }
     return {};
 }
 
@@ -155,8 +177,10 @@ Result<void> tarball_fetch(const std::string& url, const std::string& sha256,
         return r;
     }
     auto actual = fs::sha256_file(tmp);
-    if (!actual)
+    if (!actual) {
+        std::filesystem::remove(tmp, ec);
         return std::unexpected(actual.error());
+    }
     if (*actual != sha256) {
         std::filesystem::remove(tmp, ec);
         return std::unexpected(Error {
@@ -165,8 +189,10 @@ Result<void> tarball_fetch(const std::string& url, const std::string& sha256,
         });
     }
     std::filesystem::rename(tmp, cache_file, ec);
-    if (ec)
+    if (ec) {
+        std::filesystem::remove(tmp, ec);
         return std::unexpected(Error {Error::Kind::Io, "could not move tarball into cache", tmp});
+    }
     return {};
 }
 
@@ -295,7 +321,30 @@ Result<void> copy_tree(const std::filesystem::path& from, const std::filesystem:
             continue;
         }
         const std::filesystem::path dest = to / rel;
-        if (it->is_directory(ec)) {
+        if (it->is_symlink(ec)) {
+            /* branch BEFORE the following is_regular/is_directory checks: a
+             * link must be recreated as a link (hardlinking through it would
+             * copy its target's content, a link-to-dir would otherwise become
+             * an empty real directory) — and its target must stay inside the
+             * tree, same discipline as the tarball path */
+            auto target = std::filesystem::read_symlink(it->path(), ec);
+            if (ec)
+                return std::unexpected(Error {Error::Kind::Io, "cannot read symlink", it->path()});
+            const std::string resolved =
+                (it->path().parent_path() / target).lexically_normal().generic_string();
+            if (!resolved.starts_with(from.generic_string() + "/"))
+                return std::unexpected(Error {
+                    Error::Kind::Fetch,
+                    "refusing package: '" + rel.generic_string() +
+                        "' is a link escaping the package directory (target '" +
+                        target.generic_string() + "')",
+                    it->path(),
+                });
+            it.disable_recursion_pending();
+            std::filesystem::create_symlink(target, dest, ec);
+            if (ec)
+                return std::unexpected(Error {Error::Kind::Io, "cannot create symlink", dest});
+        } else if (it->is_directory(ec)) {
             std::filesystem::create_directories(dest, ec);
             if (ec)
                 return std::unexpected(Error {Error::Kind::Io, "cannot create directory", dest});
@@ -352,10 +401,29 @@ Result<void> validate_fetch(const std::string& pkg_name, const FetchOptions& opt
         return std::unexpected(Error {
             Error::Kind::Config, "fetch('" + pkg_name + "'): invalid tag '" + opts.tag + "'",
         });
+    /* tags/urls land in argv (never a shell) and in the lockfile (one pin per
+     * line): whitespace and control characters serve no purpose there and
+     * would corrupt the pin file */
+    for (const std::string* v : {&opts.git, &opts.tag, &opts.url})
+        for (const char c : *v)
+            if (c == ' ' || static_cast<unsigned char>(c) < 0x20 || c == 0x7f)
+                return std::unexpected(Error {
+                    Error::Kind::Config, "fetch('" + pkg_name + "'): '" + *v +
+                                             "' must not contain whitespace or control characters",
+                });
     if (use_git && opts.tag.empty())
         return std::unexpected(Error {Error::Kind::Config, "fetch('" + pkg_name + "'): git source needs a tag"});
     if (use_tarball && opts.sha256.empty())
         return std::unexpected(Error {Error::Kind::Config, "fetch('" + pkg_name + "'): tarball source needs sha256"});
+    /* the sha256 names the cache file and pins the tarball: 64 hex chars */
+    if (use_tarball && (opts.sha256.size() != 64 ||
+                        !std::ranges::all_of(opts.sha256, [](char c) {
+                            return std::isxdigit(static_cast<unsigned char>(c));
+                        })))
+        return std::unexpected(Error {
+            Error::Kind::Config,
+            "fetch('" + pkg_name + "'): sha256 must be 64 hex characters",
+        });
     return {};
 }
 
@@ -379,6 +447,10 @@ Result<void> materialize_fetch(const std::string& pkg_name, const FetchOptions& 
             if (auto r = detail::make_dirs(git_cache.parent_path()); !r)
                 return std::unexpected(r.error());
             if (auto r = git_fetch(opts.git, opts.tag, git_cache); !r)
+                return std::unexpected(r.error());
+            /* a git repo can ship symlinks exactly like a tarball: the same
+             * escape check runs here before anything hardlinks the tree */
+            if (auto r = verify_no_escaping_links(git_cache); !r)
                 return std::unexpected(r.error());
         }
         std::filesystem::remove_all(dest, ec);
@@ -412,34 +484,12 @@ Result<void> materialize_fetch(const std::string& pkg_name, const FetchOptions& 
 } // namespace
 
 Result<Package> Project::fetch(std::string_view name, const FetchOptions& opts) {
-    const std::string pkg_name(name);
-    if (auto r = validate_fetch(pkg_name, opts); !r)
-        return std::unexpected(r.error());
-
-    const std::string pin = opts.git.empty() ? opts.sha256 : opts.tag;
-    const std::filesystem::path dest = build_dir() / "packages" / pkg_name;
-    const std::filesystem::path lock_file = cwd_ / "truss.lock";
-
-    /* the guard serializes the read-modify-write below against concurrent
-     * truss processes; it is held across the fetch (rare, and correctness
-     * beats concurrency here) */
-    const lockfile_guard lock_guard(lock_file);
-    auto lock = detail::read_lockfile(lock_file);
-    const auto pin_it = lock.find(lock_key(pkg_name));
-    const bool pinned = pin_it != lock.end() && pin_it->second == pin;
-    std::error_code ec;
-    if (pinned && std::filesystem::exists(dest, ec))
-        return Package {pkg_name, dest}; /* offline fast path */
-
-    if (auto r = materialize_fetch(pkg_name, opts, dest); !r)
-        return std::unexpected(r.error());
-
-    if (!pinned) { /* only touch the lockfile when the pin actually changes */
-        lock[lock_key(pkg_name)] = pin;
-        if (auto r = detail::write_lockfile(lock_file, lock); !r)
-            return std::unexpected(r.error());
-    }
-    return Package {pkg_name, dest};
+    /* thin wrapper over fetch_all: identical validation, caching, pinning and
+     * lockfile discipline — one code path, no drift */
+    auto all = fetch_all({{std::string(name), opts}});
+    if (!all)
+        return std::unexpected(all.error());
+    return std::move((*all)[0]);
 }
 
 Result<std::vector<Package>> Project::fetch_all(std::vector<std::pair<std::string, FetchOptions>> requests) {
@@ -464,8 +514,15 @@ Result<std::vector<Package>> Project::fetch_all(std::vector<std::pair<std::strin
     };
     const std::filesystem::path lock_file = cwd_ / "truss.lock";
     /* held across the pool: the final read-modify-write below must be atomic
-     * against concurrent truss processes (see lockfile_guard) */
+     * against concurrent truss processes (see lockfile_guard). Failing loudly
+     * when the lock cannot be taken beats silently racing on the pins. */
     const lockfile_guard lock_guard(lock_file);
+    if (!lock_guard.locked())
+        return std::unexpected(Error {
+            Error::Kind::Io,
+            "fetch_all: cannot lock " + lock_file.generic_string() +
+                " (concurrent fetches would corrupt the pin file)",
+        });
     auto lock = detail::read_lockfile(lock_file);
     std::vector<Job> jobs;
     jobs.reserve(requests.size());
@@ -476,22 +533,33 @@ Result<std::vector<Package>> Project::fetch_all(std::vector<std::pair<std::strin
         job.pin = opts.git.empty() ? opts.sha256 : opts.tag;
         job.dest = build_dir() / "packages" / name;
         const auto pin_it = lock.find(lock_key(name));
+        /* the completion marker (written after a full materialize) must be
+         * present too: a dest left partial by an interrupted run must not
+         * pass as fetched */
         job.offline = pin_it != lock.end() && pin_it->second == job.pin &&
-                      std::filesystem::exists(job.dest, ec);
+                      std::filesystem::exists(job.dest / ".truss-ok", ec);
         jobs.push_back(std::move(job));
     }
 
     /* worker threads pull disjoint jobs (round-robin chunks); the network and
      * tar/git processes dominate, so 8 concurrent fetches is plenty */
+    /* nthreads must outlive the pool: workers read it on every iteration,
+     * and it is destroyed before the pool joins at scope end otherwise */
+    const size_t nthreads = std::min<size_t>(jobs.size(), 8);
     {
         std::vector<std::jthread> pool;
-        const size_t nthreads = std::min<size_t>(jobs.size(), 8);
         for (size_t t = 0; t < nthreads; ++t)
             pool.emplace_back([&, t] {
                 for (size_t i = t; i < jobs.size(); i += nthreads) {
                     if (jobs[i].offline)
                         continue;
                     jobs[i].outcome = materialize_fetch(jobs[i].name, requests[i].second, jobs[i].dest);
+                    if (jobs[i].outcome) {
+                        /* completion marker for the offline fast path */
+                        auto stamp = detail::write_file(jobs[i].dest / ".truss-ok", jobs[i].pin);
+                        if (!stamp)
+                            jobs[i].outcome = std::unexpected(stamp.error());
+                    }
                     jobs[i].fetched = jobs[i].outcome.has_value();
                 }
             });
@@ -654,14 +722,12 @@ Result<TargetRef> Project::conan(std::string_view conanfile) {
         link_paths = json_str_array(spec, "link_paths");
         libs = json_str_array(spec, "libs");
         defines = json_str_array(spec, "defines");
-        if (auto r = check_spec_values(includes, "include dir"); !r)
-            return std::unexpected(r.error());
-        if (auto r = check_spec_values(link_paths, "library path"); !r)
-            return std::unexpected(r.error());
-        if (auto r = check_spec_values(libs, "library"); !r)
-            return std::unexpected(r.error());
-        if (auto r = check_spec_values(defines, "define"); !r)
-            return std::unexpected(r.error());
+        for (const auto& [values, what] :
+             {std::pair{std::cref(includes), "include dir"},
+              std::pair{std::cref(link_paths), "library path"},
+              std::pair{std::cref(libs), "library"}, std::pair{std::cref(defines), "define"}})
+            if (auto r = check_spec_values(values.get(), what); !r)
+                return std::unexpected(r.error());
         auto& iface = add_interface_library("conan");
         for (const auto& d : includes)
             iface.system_include_dirs(d);
@@ -678,7 +744,11 @@ Result<TargetRef> Project::conan(std::string_view conanfile) {
         const auto j = cached
             ? nlohmann::json::parse(*cached, nullptr, false)
             : nlohmann::json {};
-        bool alive = j.is_object() && j.value("fingerprint", std::string {}) == fingerprint;
+        bool alive = j.is_object();
+        if (alive) { /* .value() would throw on a non-string key: use find() */
+            const auto fp = j.find("fingerprint");
+            alive = fp != j.end() && fp->is_string() && fp->get<std::string>() == fingerprint;
+        }
         if (alive)
             for (const char* key : {"includes", "link_paths"})
                 if (j.contains(key) && j[key].is_array())
@@ -847,7 +917,9 @@ Result<TargetRef> Project::vcpkg(std::vector<std::string> packages) {
     if (!fingerprint.empty() && std::filesystem::is_directory(tdir, ec))
         if (auto cached = detail::read_file(spec_path); cached) {
             const auto j = nlohmann::json::parse(*cached, nullptr, false);
-            skip_install = j.is_object() && j.value("fingerprint", std::string {}) == fingerprint;
+            /* .value() would throw on a non-string key: use find() */
+            const auto fp = j.is_object() ? j.find("fingerprint") : j.end();
+            skip_install = fp != j.end() && fp->is_string() && fp->get<std::string>() == fingerprint;
         }
     if (skip_install) {
         log::info("vcpkg: up to date (skipped vcpkg install)");
@@ -874,6 +946,7 @@ Result<TargetRef> Project::vcpkg(std::vector<std::string> packages) {
     if (std::filesystem::is_directory(libdir, ec)) {
         iface.link_paths(libdir.generic_string());
         std::vector<std::string> names;
+        std::unordered_set<std::string> seen;
         for (auto it = std::filesystem::directory_iterator(libdir, ec);
              it != std::filesystem::directory_iterator {}; it.increment(ec)) {
             if (ec)
@@ -890,7 +963,7 @@ Result<TargetRef> Project::vcpkg(std::vector<std::string> packages) {
                 base.erase(dot);
             else
                 base.erase(base.size() - 2); /* strip ".a" */
-            if (!base.empty() && std::ranges::find(names, base) == names.end())
+            if (!base.empty() && seen.insert(base).second)
                 names.push_back(base);
         }
         if (auto r = check_spec_values(names, "library"); !r)

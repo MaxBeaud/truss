@@ -52,13 +52,20 @@ std::string_view mode_dir_name(BuildMode m) {
     return m == BuildMode::Release ? "release" : "debug";
 }
 
+/* Flags, defines and dirs land in ninja edge variables (executed by samurai
+ * through /bin/sh -c): a control character — above all a newline — would end
+ * the binding and let the rest inject manifest statements. */
+bool no_control_chars(std::string_view s) {
+    return std::ranges::none_of(s, [](unsigned char c) { return c < 0x20 || c == 0x7f; });
+}
+
 bool path_is_safe(const std::filesystem::path& p) {
     const std::string s = p.generic_string();
     /* these strings end up in ninja build statements (executed by samurai
      * through /bin/sh -c) and in `ar -M` MRI scripts, so anything the shell,
      * ninja or the MRI lexer would interpret is refused up front */
     return s.find_first_of(" \t:$\"'`;|&<>()\\#~*?") == std::string::npos
-        && std::ranges::none_of(s, [](unsigned char c) { return c < 0x20 || c == 0x7f; });
+        && no_control_chars(s);
 }
 
 /* Split a command prefix on spaces ("qemu-aarch64 -L /sysroot" -> 3 words);
@@ -363,6 +370,41 @@ Result<void> validate(const std::vector<std::unique_ptr<Target>>& targets) {
         if (!path_is_safe(std::filesystem::path(name)))
             return std::unexpected(Error {Error::Kind::Config, "target name '" + name + "' contains unsupported characters"});
 
+        /* flags/defines/dirs land in ninja edge variables (shell-run by
+         * samurai): a control character — above all a newline — would end the
+         * binding and let the rest inject manifest statements */
+        {
+            const auto first_bad = [](auto&& v) -> const std::string* {
+                for (const auto& s : v)
+                    if (!s.empty() && !no_control_chars(s))
+                        return &s;
+                return nullptr;
+            };
+            std::string what;
+            if (const auto* s = first_bad(t->defines()))
+                what = "define '" + *s + "'";
+            else if (const auto* s = first_bad(t->public_defines()))
+                what = "public define '" + *s + "'";
+            else if (const auto* s = first_bad(t->include_dirs()))
+                what = "include dir '" + *s + "'";
+            else if (const auto* s = first_bad(t->system_include_dirs()))
+                what = "system include dir '" + *s + "'";
+            else if (const auto* s = first_bad(t->link_libs()))
+                what = "link lib '" + *s + "'";
+            else if (const auto* s = first_bad(t->link_paths()))
+                what = "link path '" + *s + "'";
+            else if (!t->flags().empty() && !no_control_chars(t->flags()))
+                what = "flags()";
+            else if (!t->linker_flags().empty() && !no_control_chars(t->linker_flags()))
+                what = "linker_flags()";
+            if (!what.empty())
+                return std::unexpected(Error {
+                    Error::Kind::Config,
+                    "target '" + name + "': " + what + " contains control characters "
+                    "(it lands in a ninja command line executed through the shell)",
+                });
+        }
+
         if (t->kind() == TargetKind::CustomCommand) {
             const auto& cc = static_cast<const CustomCommand&>(*t);
             if (!cc.source_patterns().empty() || !t->removed_sources().empty())
@@ -479,7 +521,7 @@ std::string output_path_for(const Target& t, const std::filesystem::path& build_
     case TargetKind::CustomCommand:
         return {}; /* outputs are resolved separately (cmd_outputs) */
     }
-    return name;
+    std::unreachable(); /* the switch covers every TargetKind */
 }
 
 /* Windows shared libraries come with an import lib in lib/ (the dll itself
@@ -541,8 +583,14 @@ Result<void> emit_manifest(const Project& proj, std::vector<ResolvedTarget>& res
             if (!r.triple.target.empty())
                 en.flags += " --target=" + r.triple.target;
             en.flags += " -fPIC -Wno-reserved-module-identifier";
-            for (const auto& d : man->system_dirs)
+            for (const auto& d : man->system_dirs) {
+                if (!path_is_safe(std::filesystem::path(d)))
+                    return std::unexpected(Error {
+                        Error::Kind::Toolchain,
+                        "libc++'s module manifest has an unsafe system include dir '" + d + "'",
+                    });
                 en.flags += " -isystem \"" + d + "\"";
+            }
             en.manifest = std::move(*man);
             emit(en, en.manifest.std_source, en.paths.obj, en.paths.pcm, "", {});
             it = std_modules.emplace(key, std::move(en)).first;
@@ -2019,8 +2067,9 @@ Result<void> Project::build() {
 
     for (const auto& task : tasks) {
         Result<void> step = [&]() -> Result<void> {
-            if (task == "clean")
-                return detail::remove_tree(bld);
+            /* note: "clean" never reaches this loop — a clean-only run
+             * short-circuits above, and clean combined with other tasks is
+             * rejected (it would delete the manifest they need) */
 
             if (task == "build")
                 return run_samu({});
@@ -2087,11 +2136,13 @@ Result<void> Project::build() {
 
                 // Create a temporary file next to the current executable:
                 // pid-suffixed staging name (like fs::write_file's temp), so
-                // two concurrent truss runs never clobber each other's copy
-                // and a pre-placed symlink at a predictable name is not followed
+                // two concurrent truss runs never clobber each other's copy.
+                // copy_file follows a symlink at the destination, so any stale
+                // entry (including a pre-placed link) is unlinked first.
                 auto temp_path = current_exe;
                 temp_path += ".tmp_reload." + std::to_string(::getpid());
-                
+                std::filesystem::remove(temp_path, ec);
+
                 // Copy the new binary to temp location
                 std::filesystem::copy_file(truss_rt->output, temp_path,
                                           std::filesystem::copy_options::overwrite_existing, ec);
@@ -2157,8 +2208,9 @@ Result<void> Project::build() {
                     if (cross && !has_runner) {
                         /* a cross-compiled test exe cannot run on the host:
                          * built above, skipped here — never silently "passed" */
-                        log::warn("test '" + exe + "' skipped (cross target '" +
-                                  "built for a different machine; configure a runner to execute it)");
+                        log::warn("test '" + exe +
+                                  "' skipped: it was built for a different machine "
+                                  "(configure Config::runner to execute cross-compiled tests)");
                         ++skipped;
                         continue;
                     }

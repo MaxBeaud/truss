@@ -122,7 +122,8 @@ enum class Hardening {
  * \brief How .cppm sources in a user target get compiled and wired.
  * Auto (the default): BMI edges for every .cppm; consumers are wired from a
  * fast regex scan of each file's import declarations (heuristic: can miss
- * macro-generated imports or false-positive on `import` in comments).
+ * macro-generated imports; comments/strings/raw strings and header-unit
+ * imports are correctly ignored).
  * Manual: same wiring but the import lists come from clang-scan-deps
  * (p1689) at configure time — authoritative, at ~10 ms per TU; clang only.
  */
@@ -270,8 +271,6 @@ public:
             return !it.handle_ || it.handle_.done();
         }
         friend bool operator==(std::default_sentinel_t s, const iterator& it) { return it == s; }
-        friend bool operator!=(const iterator& it, std::default_sentinel_t s) { return !(it == s); }
-        friend bool operator!=(std::default_sentinel_t s, const iterator& it) { return !(it == s); }
 
     private:
         handle_t handle_ {};
@@ -293,6 +292,8 @@ public:
     }
 
     iterator begin() {
+        if (!handle_) /* moved-from generator: empty range, no null-handle resume */
+            return iterator {};
         handle_.resume();
         if (handle_.done()) {
             if (handle_.promise().exception)
@@ -570,7 +571,7 @@ struct WalkOptions {
  * \param dir directory to walk; entries are yielded as dir/entry paths
  * \param opts depth cap and hidden-entry policy
  */
-generator<std::filesystem::path> walk(const std::filesystem::path& dir, WalkOptions opts = {});
+generator<std::filesystem::path> walk(std::filesystem::path dir, WalkOptions opts = {});
 
 /**
  * \brief Search for a file in from_dir and every parent (workspace-root /
@@ -777,11 +778,10 @@ public:
                         * whole tree; the target then fails validation with
                         * 'has no sources' */
             return self;
-        self.source_patterns_.push_back(d + "/**.cpp");
-        self.source_patterns_.push_back(d + "/**.cc");
-        self.source_patterns_.push_back(d + "/**.cxx");
-        self.source_patterns_.push_back(d + "/**.c");
-        self.source_patterns_.push_back(d + "/**.cppm");
+        /* one literal prefix + one trailing pattern per language (no "/**"
+         * sequences: doxygen's comment scanner counts them as nested opens) */
+        for (const std::string_view suffix : {"**.cpp", "**.cc", "**.cxx", "**.c", "**.cppm"})
+            self.source_patterns_.push_back(d + "/" + suffix);
         return self;
     }
     /// Exclude a previously matched file (exact resolved path).

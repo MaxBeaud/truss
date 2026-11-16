@@ -21,6 +21,7 @@ module;
 #include <vector>
 
 #include <unistd.h>
+#include <fcntl.h>
 
 module truss;
 import :api;
@@ -110,7 +111,7 @@ std::string glob_to_regex(std::string_view pattern) {
 
 bool is_hidden(const std::filesystem::path& rel) {
     for (const auto& part : rel) {
-        const std::string s = part.string();
+        const auto& s = part.native(); /* reference: no per-component copy */
         if (!s.empty() && s.front() == '.') return true;
     }
     return false;
@@ -253,7 +254,9 @@ Result<std::string> read_file(const std::filesystem::path& p) {
         s.resize(static_cast<std::size_t>(size));
         in.read(s.data(), size);
         s.resize(static_cast<std::size_t>(in.gcount()));
-    } else { // unseekable or empty: stream it out
+    } else if (size == 0) { // empty regular file: nothing to read
+        return s;
+    } else { // unseekable: stream it out
         std::ostringstream ss;
         ss << in.rdbuf();
         s = ss.str();
@@ -272,24 +275,30 @@ Result<void> write_file(const std::filesystem::path& p, std::string_view data) {
 
     /* write a sibling temp file then rename over the target: an interrupted
      * run never leaves a truncated manifest/lockfile/spec behind (rename is
-     * atomic within a filesystem). The pid+counter keeps concurrent writers
-     * apart, and removing any stale entry first refuses to write through a
-     * pre-placed symlink at the temp name. */
+     * atomic within a filesystem). The temp is created exclusively (O_EXCL)
+     * under a pid+counter name: concurrent writers stay apart and a
+     * pre-placed symlink at a guessed name is never followed. */
     static std::atomic<unsigned> tmp_seq {0};
     std::filesystem::path tmp = p;
     tmp += ".truss-tmp." + std::to_string(getpid()) + "."
          + std::to_string(tmp_seq.fetch_add(1, std::memory_order_relaxed));
-    std::filesystem::remove(tmp, ec); /* unlinks a stale file or symlink */
+    const int fd = ::open(tmp.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0666);
+    if (fd == -1)
+        return std::unexpected(Error {Error::Kind::Io, "failed to open file for writing", p});
     {
-        std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
-        if (!out)
-            return std::unexpected(Error {Error::Kind::Io, "failed to open file for writing", p});
-        out.write(data.data(), static_cast<std::streamsize>(data.size()));
-        out.close();
-        if (!out) {
-            std::filesystem::remove(tmp, ec);
-            return std::unexpected(Error {Error::Kind::Io, "failed to write file", p});
+        size_t written = 0;
+        while (written < data.size()) {
+            const ssize_t n = ::write(fd, data.data() + written, data.size() - written);
+            if (n < 0) {
+                if (errno == EINTR)
+                    continue;
+                ::close(fd);
+                std::filesystem::remove(tmp, ec);
+                return std::unexpected(Error {Error::Kind::Io, "failed to write file", p});
+            }
+            written += static_cast<std::size_t>(n);
         }
+        ::close(fd);
     }
     std::filesystem::rename(tmp, p, ec);
     if (ec) {
@@ -471,7 +480,10 @@ Result<std::vector<std::filesystem::path>> glob(std::initializer_list<std::strin
     return detail::glob_multi(pats);
 }
 
-generator<std::filesystem::path> walk(const std::filesystem::path& dir, WalkOptions opts) {
+/* The path is taken BY VALUE: a coroutine frame stores reference parameters
+ * as references, and the lazy generator first touches `dir` only when the
+ * caller advances begin() — a temporary argument would dangle by then. */
+generator<std::filesystem::path> walk(std::filesystem::path dir, WalkOptions opts) {
     std::error_code ec;
     auto it = std::filesystem::recursive_directory_iterator(
         dir, std::filesystem::directory_options::skip_permission_denied, ec);
@@ -482,8 +494,8 @@ generator<std::filesystem::path> walk(const std::filesystem::path& dir, WalkOpti
         if (ec)
             break; // unreadable directory: stop rather than fail the loop
         if (opts.skip_hidden) {
-            const std::string name = it->path().filename().string();
-            if (!name.empty() && name.front() == '.') {
+            const auto fname = it->path().filename().native();
+            if (!fname.empty() && fname.front() == '.') {
                 it.disable_recursion_pending();
                 continue;
             }
@@ -598,11 +610,15 @@ Result<void> write_text_if_changed(const std::filesystem::path& p, std::string_v
 }
 
 namespace {
-generator<std::string> lines_of(std::filesystem::path p) {
-    std::ifstream in(p);
+/* the stream is MOVED into the frame: one open, no re-open TOCTOU between
+ * the validation open and the read */
+generator<std::string> lines_of(std::ifstream in) {
     std::string line;
-    while (std::getline(in, line))
+    while (std::getline(in, line)) {
+        if (!line.empty() && line.back() == '\r') /* CRLF input */
+            line.pop_back();
         co_yield line; // stream errors mid-file simply end the iteration
+    }
 }
 } // namespace
 
@@ -610,7 +626,7 @@ Result<generator<std::string>> read_lines(const std::filesystem::path& p) {
     std::ifstream in(p);
     if (!in)
         return std::unexpected(Error {Error::Kind::Io, "failed to open file for reading", p});
-    return lines_of(std::move(p));
+    return lines_of(std::move(in));
 }
 
 Result<std::string> sha256_file(const std::filesystem::path& p) {

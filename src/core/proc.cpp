@@ -86,11 +86,18 @@ Result<ProcOutcome> run_impl(std::span<const std::string> argv, int capture_mode
     if (capture_mode && cloexec_pipe(pipe_fd) != 0)
         return std::unexpected(Error {Error::Kind::Io, std::string("cannot create capture pipe: ") + std::strerror(errno)});
     if (capture_mode) {
-        posix_spawn_file_actions_adddup2(&actions, pipe_fd[1], STDOUT_FILENO);
-        if (capture_mode == 1)
-            posix_spawn_file_actions_adddup2(&actions, pipe_fd[1], STDERR_FILENO);
-        posix_spawn_file_actions_addclose(&actions, pipe_fd[0]);
-        posix_spawn_file_actions_addclose(&actions, pipe_fd[1]);
+        /* these actions return error numbers like addchdir: a silent failure
+         * would run the child without the requested redirect/close */
+        if (int rc = posix_spawn_file_actions_adddup2(&actions, pipe_fd[1], STDOUT_FILENO); rc != 0)
+            return std::unexpected(Error {Error::Kind::Io, std::string("cannot dup2 stdout: ") + std::strerror(rc)});
+        if (capture_mode == 1) {
+            if (int rc = posix_spawn_file_actions_adddup2(&actions, pipe_fd[1], STDERR_FILENO); rc != 0)
+                return std::unexpected(Error {Error::Kind::Io, std::string("cannot dup2 stderr: ") + std::strerror(rc)});
+        }
+        if (int rc = posix_spawn_file_actions_addclose(&actions, pipe_fd[0]); rc != 0)
+            return std::unexpected(Error {Error::Kind::Io, std::string("cannot close pipe read end: ") + std::strerror(rc)});
+        if (int rc = posix_spawn_file_actions_addclose(&actions, pipe_fd[1]); rc != 0)
+            return std::unexpected(Error {Error::Kind::Io, std::string("cannot close pipe write end: ") + std::strerror(rc)});
     }
 
     pid_t pid {};
@@ -107,7 +114,7 @@ Result<ProcOutcome> run_impl(std::span<const std::string> argv, int capture_mode
 
     if (capture_mode && pipe_fd[1] != -1) {
         close(pipe_fd[1]);
-        std::array<char, 4096> buf;
+        std::array<char, 64 * 1024> buf; /* 64 KiB: fewer read syscalls on chatty captures */
         /* a runaway child must not grow the buffer without end: past the cap
          * the pipe is drained (so the child never blocks) but dropped */
         constexpr std::size_t kMaxCapture = 16u << 20;

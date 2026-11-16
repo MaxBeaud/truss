@@ -168,6 +168,12 @@ inline int init(std::span<char* const> args) {
                                          std::filesystem::perms::owner_exec | std::filesystem::perms::group_exec |
                                              std::filesystem::perms::others_exec,
                                          std::filesystem::perm_options::add, ec);
+            if (ec) {
+                log::error(Error {Error::Kind::Io,
+                                  "init: cannot make bootstrap.sh executable (run chmod +x on it)",
+                                  path});
+                return 1;
+            }
         }
     }
 

@@ -1,5 +1,6 @@
 module;
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <expected>
 #include <filesystem>
@@ -80,10 +81,9 @@ std::string strip_non_code(std::string_view s) {
             while (i < stop)
                 blank(s[i++]);
         } else if (c == '"' || c == '\'') { /* plain string or char literal */
-            /* an apostrophe can also be a digit separator (1'000'000): when the
-             * previous character is part of a token, it is not a literal */
-            if (c == '\'' && i > 0
-                && (std::isalnum(static_cast<unsigned char>(s[i - 1])) || s[i - 1] == '_')) {
+            /* an apostrophe is a digit separator only right after a digit
+             * (1'000, 0x1'b): L'a' / u'a' are (encoding-prefixed) literals */
+            if (c == '\'' && i > 0 && std::isdigit(static_cast<unsigned char>(s[i - 1]))) {
                 out += c;
                 ++i;
                 continue;
@@ -119,21 +119,27 @@ Result<ModuleUnitInfo> scan_module_unit(const std::string& path) {
 
     ModuleUnitInfo info;
     info.path = path;
-    /* comments and string/char/raw literals are blanked first: module and
-     * import statements only count when they are real code */
-    std::string s = strip_non_code(std::move(*text));
-    /* cheap pre-filter: no module/import keyword anywhere means a plain TU
-     * (the regexes are line-anchored, so this only skips a superset) */
+    std::string s = std::move(*text);
+    /* cheap pre-filter on the RAW text first: a file that never mentions
+     * module/import anywhere (the majority of TUs) skips the strip+regex
+     * work entirely (the strip can only remove matches, never add them) */
     if (s.find("module") == std::string::npos && s.find("import") == std::string::npos)
         return info;
+    /* comments and string/char/raw literals are blanked: module and import
+     * statements only count when they are real code */
+    s = strip_non_code(s);
     std::smatch m;
     if (std::regex_search(s, m, module_re))
         info.module_name = m[2];
     for (auto it = std::sregex_iterator(s.begin(), s.end(), import_re);
          it != std::sregex_iterator(); ++it) {
         const std::string name = (*it)[2];
+        if (name.starts_with('<'))
+            continue; /* header-unit import (import <vector>;): no BMI wiring */
         /* split partition lists like `import :a, :b;` */
         for (auto part_rng : std::views::split(name, ',')) {
+            if (part_rng.empty())
+                continue; /* `import a,;` — an empty part between separators */
             const std::string_view part(&*part_rng.begin(), static_cast<std::size_t>(std::ranges::distance(part_rng)));
             const auto b = part.find_first_not_of(" \t");
             const auto e = part.find_last_not_of(" \t");
@@ -167,12 +173,12 @@ resolve_module_imports(const ModuleUnitInfo& u, const std::map<std::string, std:
         if (it == bmis.end())
             return false;
         /* A primary interface's BMI references its partitions (export import),
-         * so consumers of the primary need every partition BMI too. */
+         * so consumers of the primary need every partition BMI too. The map is
+         * sorted: start at the prefix and stop at the first non-match. */
         if (!name.contains(':')) {
             const std::string prefix = std::string(name) + ":";
-            for (const auto& kv : bmis)
-                if (kv.first.starts_with(prefix))
-                    add_one(kv);
+            for (auto p = bmis.lower_bound(prefix); p != bmis.end() && p->first.starts_with(prefix); ++p)
+                add_one(*p);
         }
         add_one(*it);
         return true;
@@ -212,13 +218,14 @@ resolve_module_imports(const ModuleUnitInfo& u, const std::map<std::string, std:
                     ok = false;
         };
         visit_imports(name);
-        /* a primary also carries its partitions' imports */
+        /* a primary also carries its partitions' imports (sorted map: prefix
+         * range instead of a full scan) */
         if (!name.contains(':')) {
             const std::string prefix = name + ":";
-            for (const auto& kv : module_imports)
-                if (kv.first.starts_with(prefix))
-                    if (!self(kv.first, name))
-                        ok = false;
+            for (auto p = module_imports.lower_bound(prefix);
+                 p != module_imports.end() && p->first.starts_with(prefix); ++p)
+                if (!self(p->first, name))
+                    ok = false;
         }
         return ok;
     };
@@ -283,10 +290,13 @@ scan_deps_requires(const std::string& compiler, std::string_view compile_flags,
         if (c == '/' || c == '.')
             c = '_';
     /* distinct sources can flatten to the same name (src/a/b.cpp vs
-     * src/a_b.cpp) and concurrent workers share the scratch dir: the source's
-     * hash keeps each TU's compilation database apart */
+     * src/a_b.cpp) and concurrent workers share the scratch dir: a per-call
+     * counter keeps each TU's compilation database apart (a hash could
+     * collide, and std::hash is not stable across runs) */
+    static std::atomic<unsigned> cdb_seq {0};
     const std::filesystem::path cdb =
-        scratch / ("cdb_" + std::to_string(std::hash<std::string> {}(source)) + "_" + flat + ".json");
+        scratch / ("cdb_" + std::to_string(cdb_seq.fetch_add(1, std::memory_order_relaxed))
+                   + "_" + flat + ".json");
     const std::string cmd = compiler + " " + std::string(compile_flags) + " -c " + source;
     const nlohmann::json entry {
         {"directory", cwd.generic_string()},

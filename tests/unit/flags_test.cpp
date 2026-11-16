@@ -150,9 +150,8 @@ TEST_CASE("flags: MSVC compile mapping (cl.exe / clang-cl syntax)") {
     CHECK(contains(r->compile, "/Od"));
     CHECK(contains(r->compile, "/utf-8 /EHsc /nologo"));
     CHECK(contains(r->compile, "/DFOO=1"));
-    CHECK(contains(r->compile, "/Iinclude"));
-    CHECK_FALSE(contains(r->compile, "-fPIC"));    /* no PIC on Windows */
-    CHECK_FALSE(contains(r->compile, "-std="));
+    CHECK(contains(r->compile, "/I\"include\""));
+    CHECK_FALSE(contains(r->compile, "-fPIC"));    /* no PIC on Windows */    CHECK_FALSE(contains(r->compile, "-std="));
     CHECK(contains(r->compile_c, "/std:c17"));
     CHECK_FALSE(contains(r->compile_c, "/std:c++"));
 }

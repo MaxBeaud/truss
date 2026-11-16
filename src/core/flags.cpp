@@ -93,9 +93,8 @@ constexpr std::array<std::string_view, 5> kSanitizerCompileFlagsMsvc {
     "", "", "/fsanitize=address", "/fsanitize=undefined", "/fsanitize=address,undefined",
 };
 /* driver-side (before /link) and linker-side (after /link) halves */
-constexpr std::array<std::string_view, 5> kSanitizerLinkDriverFlagsMsvc {
-    "", "", "/fsanitize=address", "/fsanitize=undefined", "/fsanitize=address,undefined",
-};
+constexpr std::array<std::string_view, 5> kSanitizerLinkDriverFlagsMsvc =
+    kSanitizerCompileFlagsMsvc; /* same flags, driver side of /link */
 constexpr std::array<std::string_view, 5> kSanitizerLinkerFlagsMsvc {
     "", "", "/INCREMENTAL:NO", "", "/INCREMENTAL:NO",
 };
@@ -231,8 +230,6 @@ Result<LinkFlags> static_stdlib_flags(const TargetTriple& t, StaticStdlib s) {
             });
         lf.driver = "-static";
         break;
-    case StaticStdlib::Default:
-        break;
     }
     return lf;
 }
@@ -300,8 +297,8 @@ Result<FlagSet> build_flags(const TargetTriple& triple, BuildMode mode,
     if (msvc) add_both("/utf-8 /EHsc /nologo");
     const auto wi = static_cast<std::size_t>(resolve_warnings(warnings));
     add_both(msvc ? kWarningFlagsMsvc[wi] : kWarningFlags[wi]);
-    add_both(msvc ? kDebugFlagsMsvc[static_cast<std::size_t>(resolve_debug(mode, debug))]
-                  : kDebugFlags[static_cast<std::size_t>(resolve_debug(mode, debug))]);
+    const auto di = static_cast<std::size_t>(resolve_debug(mode, debug));
+    add_both(msvc ? kDebugFlagsMsvc[di] : kDebugFlags[di]);
 
     const Optimization opt = optimization == Optimization::Default
                                  ? (mode == BuildMode::Debug ? Optimization::None : Optimization::O2)
@@ -332,8 +329,10 @@ Result<FlagSet> build_flags(const TargetTriple& triple, BuildMode mode,
         add_both("-fPIC"); /* Windows has no position-independent code (MinGW ignores -fPIC) */
     if (mode == BuildMode::Release) add_both(msvc ? "/DNDEBUG" : "-DNDEBUG");
 
-    for (const auto& d : defines) add_both((msvc ? "/D" : "-D") + d);
-    for (const auto& i : includes) add_both(msvc ? "/I" + i : "-I\"" + i + "\"");
+    for (const auto& d : defines)
+        if (!d.empty()) add_both((msvc ? "/D" : "-D") + d);
+    for (const auto& i : includes)
+        add_both(msvc ? "/I\"" + i + "\"" : "-I\"" + i + "\"");
     /* system dirs after -I (searched later); MSVC needs /external:W0 to
      * actually silence them */
     if (msvc && !system_includes.empty()) add_both("/external:W0");
@@ -366,6 +365,7 @@ Result<LinkFlags> link_flags(const TargetTriple& triple, BuildMode mode, DebugIn
         add(lf.driver, "-fuse-ld=" + triple.linker);
     const Hardening hard = resolve_hardening(hardening);
     const auto hi = static_cast<std::size_t>(hard);
+    const auto di = static_cast<std::size_t>(resolve_debug(mode, debug));
     if (triple.family == CompilerFamily::Msvc) {
         /* driver-side flags go before `/link`, linker-side after it */
         add(lf.driver, kSanitizerLinkDriverFlagsMsvc[static_cast<std::size_t>(sanitizer)]);
@@ -376,10 +376,16 @@ Result<LinkFlags> link_flags(const TargetTriple& triple, BuildMode mode, DebugIn
             if (hard >= Hardening::Medium) add(lf.linker, kHardeningLinkCfMsvc);
             if (hard == Hardening::Max) add(lf.linker, kHardeningLinkCetMsvc);
         }
-        if (resolve_debug(mode, debug) != DebugInfo::None)
+        if (di != static_cast<std::size_t>(DebugInfo::None))
             add(lf.linker, "/DEBUG");
         for (const auto& p : link_paths) add(lf.linker, "/LIBPATH:\"" + p + "\"");
-        for (const auto& l : libs) add(lf.linker, l + ".lib");
+        for (const auto& l : libs) {
+            /* link_libs("foo.lib") must not become foo.lib.lib */
+            const std::string_view base = std::string_view(l).ends_with(".lib")
+                                              ? std::string_view(l).substr(0, l.size() - 4)
+                                              : std::string_view(l);
+            add(lf.linker, std::string(base) + ".lib");
+        }
         if (!static_libs.empty())
             return std::unexpected(Error {
                 Error::Kind::Config,

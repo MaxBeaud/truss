@@ -941,3 +941,83 @@ All items below are covered by the unit suite (`./setup.sh unit`, 178 cases).
   NOT done on purpose: wholesale `and_then`-chaining of the error checks
   (churn without behavioral gain), `views::join_with` for `join_spaced`
   (libc++ support uncertain).
+
+## 32. Second review round (docs + hardening, Nov 2026)
+
+Documentation: main page (docs/mainpage.dox) mirrors the README with links into
+the generated reference; grp_api/grp_internals groups; 0 doxygen warnings
+(./setup.sh docs). Gotchas: a /** sequence INSIDE a comment or a string literal
+in an INPUT file makes doxygen count nested comment opens (write patterns as
+"**.cpp" + "/" concatenation in sources_in); a standalone \defgroup + \{ comment
+must sit INSIDE the namespace it brackets, or the \} pairing fails ("end of file
+while inside a group"); deducing-this templates break @copydoc targets — write
+self-contained briefs on overload families instead.
+
+Review round (all verified by ASan/unit suite):
+
+- **fetch_all worker pool lifetime**: `nthreads` was declared after the
+  `jthread` pool vector, so at scope exit it was destroyed BEFORE the pool
+  joined — workers read a dead stack variable every loop iteration
+  (`i += nthreads`). Latent race (timing-dependent under ASan), caught as a
+  deterministic stack-use-after-scope once the per-job stamp write changed
+  worker timing. Rule: every variable a worker reads is declared BEFORE the
+  pool vector (same rule as the §13 jthread note; the scan-deps pool in
+  build.cpp already did this).
+- **fetch validation**: sha256 must be 64 hex (it names the cache file) — a
+  first cut reused looks_like_commit (40-hex git commits) and broke every
+  tarball fetch; tags/urls reject whitespace/control characters (they land in
+  argv and in the one-pin-per-line lockfile).
+- **fetch_all integrity**: a `.truss-ok` completion marker is written after a
+  full materialize and required by the offline fast path (a dest left partial
+  by an interrupted run is no longer served forever); the lockfile guard takes
+  O_CLOEXEC (an inherited fd carries the flock into children and would wedge
+  the project's lockfile after a SIGKILL) and reports failure instead of
+  silently racing; a lost clone race (rename over an existing dest) is a win,
+  not an error; failed clones/fetches clean up their staging trees.
+- **git-sourced packages get the same symlink-escape check as tarballs**, and
+  copy_tree recreates symlinks as links (branching on is_symlink BEFORE the
+  is_regular/is_directory checks — following them hardlinked escaping targets
+  into the build tree and turned link-to-dir into empty real directories).
+- **write_file creates its temp exclusively** (::open O_CREAT|O_EXCL|O_NOFOLLOW
+  + write + rename) — the old remove-then-ofstream had a symlink-planting
+  TOCTOU window and the comment overclaimed protection.
+- **fs::walk takes the directory BY VALUE** — a coroutine frame stores
+  reference parameters as references, and the lazy generator first touches
+  `dir` only when the caller advances begin(); a temporary argument dangled.
+  Same discipline as lines_of. Also: read_lines opens once (stream moved into
+  the frame) and strips CR (CRLF); read_file returns early for empty files;
+  is_hidden/walk use path::native() components (no per-entry allocation).
+- **Manifest injection closed at the boundary**: validate() rejects control
+  characters (above all \n — ninja ends a binding there and the rest injects
+  statements) in flags/defines/dirs/libs; resolve_sources rejects them in
+  globbed file paths; path_is_safe already covers the rest.
+- **find_truss_modules**: BMI-presence check factored into try_add (all three
+  branches now require both BMIs), results deduped, and a moved-from path
+  push_back (insert(std::move(p)) then push_back(p)) fixed.
+- **proc**: adddup2/addclose return codes checked (a silent failure ran the
+  child without the redirect); capture buffer 64 KiB.
+- **Small fixes**: generator::begin() guards a null handle; redundant
+  operator!= removed (C++20 rewrite); ModulesMode::Auto docs match the fixed
+  scanner; launcher() rejects shell metacharacters (it prefixes every compile
+  command); libc++ manifest -isystem dirs go through path_is_safe;
+  cross-config target triples are charset-validated; output_path_for ends in
+  std::unreachable(); the dead clean/compdb branches, kind_name fallback,
+  <sstream> include removed; has_runner factored; the compdb task calls
+  Project::compile_commands(); the cross-test skip warning reads like a
+  sentence (setup.sh cross-host asserts the new text); MSVC /I and .lib names
+  quoted/normalized; empty defines skipped; unreachable switch case removed;
+  sanitize driver flags table aliased to the compile table; resolve_debug
+  hoisted; flag-table indexing shared; kGray renamed kCyan (ANSI 36);
+  amalgamate uses string::starts_with; init checks the chmod result; setup.sh
+  usage() parses the header instead of a fixed line range, cmd_dist uses
+  find -print -quit (SIGPIPE under pipefail), add-package creates nested
+  vendor dirs, cmd_unit compiles echo through job().
+
+Deliberately left (documented, not bugs): the five dep-graph DFS walks are not
+unified into one generic walker (each has different policy/error plumbing —
+consolidation is a refactor, not a cleanup); resolve_module_imports keeps the
+space-joined flags string (BMI paths are path-is-safe relative paths under the
+project invariant; a vector-of-pairs return would ripple through tests);
+glob's regex-per-entry matching and depth pruning (the literal-prefix rooting
+already bounds the common case); std::exit(0) in the CLI --help path (fine for
+the bundled CLI); esc_value/esc_path remain as the unit-tested escaping seam.

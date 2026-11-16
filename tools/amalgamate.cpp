@@ -37,10 +37,6 @@ std::string read_all(const std::filesystem::path& p) {
     return ss.str();
 }
 
-bool starts_with(const std::string& s, const char* p) {
-    return s.rfind(p, 0) == 0;
-}
-
 /* process one source file; `path` is used to resolve local includes */
 void process(const std::filesystem::path& path) {
     static const std::regex module_decl(R"(^\s*(export\s+)?module\s+[A-Za-z_][A-Za-z0-9_:.]*\s*;)");
@@ -54,10 +50,10 @@ void process(const std::filesystem::path& path) {
 
         if (line == "module;" || std::regex_search(line, module_decl) || std::regex_search(line, partition_import))
             continue;
-        if (starts_with(line, "#pragma once"))
+        if (line.starts_with("#pragma once"))
             continue;
 
-        if (starts_with(line, "#include \"")) {
+        if (line.starts_with("#include \"")) {
             const auto end = line.find('"', 10);
             const std::filesystem::path inc = line.substr(10, end - 10);
             /* search: including file's dir, then the repo's include roots
@@ -83,11 +79,11 @@ void process(const std::filesystem::path& path) {
             process(full);
             continue;
         }
-        if (starts_with(line, "#include <")) {
+        if (line.starts_with("#include <")) {
             system_includes.insert(line);
             continue;
         }
-        if (starts_with(line, "export namespace "))
+        if (line.starts_with("export namespace "))
             line = line.substr(7);
         body += line;
         body += '\n';

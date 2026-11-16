@@ -12,7 +12,7 @@ namespace truss::log {
 namespace {
 
 constexpr const char* kReset = "\x1b[0m";
-constexpr const char* kGray = "\x1b[0;36m";
+constexpr const char* kCyan = "\x1b[0;36m"; // ANSI 36 = cyan (was mislabeled kGray)
 constexpr const char* kRed = "\x1b[0;31m";
 constexpr const char* kGreen = "\x1b[0;32m";
 constexpr const char* kOrange = "\x1b[0;33m";
@@ -32,7 +32,7 @@ void log_line(const char* color, const char* level, std::string_view msg) {
 
 } // namespace
 
-void info(std::string_view msg) { log_line(kGray, "[INFO]", msg); }
+void info(std::string_view msg) { log_line(kCyan, "[INFO]", msg); }
 void warn(std::string_view msg) { log_line(kOrange, "[WARN]", msg); }
 void success(std::string_view msg) { log_line(kGreen, "[SUCCESS]", msg); }
 void error(std::string_view msg) { log_line(kRed, "[ERROR]", msg); }

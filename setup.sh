@@ -23,8 +23,10 @@ set -euo pipefail
 INVOCATION_DIR=$(pwd)
 cd "$(dirname "$0")"
 
-usage() { sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//'; }
-
+usage() {
+    # print the header comment block, robust to header edits (no fixed line range)
+    awk 'NR > 1 && $0 !~ /^#/ && $0 !~ /^$/ { exit } NR > 1 { print }' "$0" | sed 's/^# \{0,1\}//'
+}
 CXX="${CXX:-clang++}"
 CC="${CC:-clang}"
 OUT="build/bootstrap"
@@ -116,7 +118,7 @@ cmd_unit() {
         -fmodule-output="$UBMI/truss.pcm" -o "$TOBJ/iface_truss.o"
     # truss implementation units recompiled with sanitizers against the ASan BMIs
     for src in src/core/*.cpp; do
-        "$CXX" -c "$src" "${CXXFLAGS[@]}" "${SAN[@]}" -fno-sanitize-recover=all -Ivendor/samurai -Ivendor \
+        job "$CXX" -c "$src" "${CXXFLAGS[@]}" "${SAN[@]}" -fno-sanitize-recover=all -Ivendor/samurai -Ivendor \
             -fmodule-file="truss=$UBMI/truss.pcm" \
             -fmodule-file="truss:api=$UBMI/truss_api.pcm" \
             -fmodule-file="truss:impl=$UBMI/truss_impl.pcm" \
@@ -124,7 +126,7 @@ cmd_unit() {
     done
     # test units (module truss; implementation units + doctest main TU)
     for src in tests/unit/*.cpp; do
-        "$CXX" -c "$src" "${CXXFLAGS[@]}" "${SAN[@]}" -fno-sanitize-recover=all \
+        job "$CXX" -c "$src" "${CXXFLAGS[@]}" "${SAN[@]}" -fno-sanitize-recover=all \
             -Itests -Ivendor/samurai -Ivendor \
             -fmodule-file="truss=$UBMI/truss.pcm" \
             -fmodule-file="truss:api=$UBMI/truss_api.pcm" \
@@ -132,7 +134,7 @@ cmd_unit() {
             -o "$TOBJ/test_$(basename "${src%.cpp}").o"
     done
     # link: sanitized interface units + sanitized core + samu + tests
-    "$CXX" "${CXXFLAGS[@]}" "$TOBJ"/*.o "$OBJ"/samu_*.o \
+    job "$CXX" "${CXXFLAGS[@]}" "$TOBJ"/*.o "$OBJ"/samu_*.o \
         -fsanitize=address,undefined -o build/truss-tests
     ./build/truss-tests
 }
@@ -162,7 +164,7 @@ cmd_examples() {
     run_example cross-host debug
     run_example cross-host run --target gen
     run_example cross-host test
-    ( cd examples/cross-host && ./truss test 2>&1 | grep -q "skipped (cross target" ) \
+    ( cd examples/cross-host && ./truss test 2>&1 | grep -q "skipped: it was built for a different machine" ) \
         || { echo "setup: cross-host './truss test' did not warn about the skipped cross test" >&2; return 1; }
 }
 
@@ -234,7 +236,7 @@ cmd_dist() {
     [ -x ./truss ] || cmd_build
     ./truss release --target truss-dist
     local bin
-    bin=$(find build/release/bin -name truss-dist -type f | head -n1)
+    bin=$(find build/release/bin -name truss-dist -type f -print -quit)
     [ -n "$bin" ] || { echo "setup: truss-dist was not produced" >&2; exit 1; }
     mkdir -p build/dist/bin
     cp "$bin" build/dist/bin/truss
@@ -393,7 +395,7 @@ cmd_docs() {
 }
 
 cmd_clean() {
-    rm -rf build/ .xmake/ dist/ build-bootstrap/ compile_commands.json truss
+    rm -rf build/ .xmake/ compile_commands.json truss
     rm -rf examples/*/build examples/*/truss examples/fetch/truss.lock \
            examples/conan/conan.lock examples/vcpkg/vcpkg.json
     echo "setup: cleaned"
@@ -415,7 +417,7 @@ cmd_add_package() {
         ls -1 "$pkg_root" | grep -i "$package" >&2 || true
         exit 1
     fi
-    mkdir -p vendor
+    mkdir -p "vendor/$(dirname "$package")"
     ln -sf "$pkg_root/$package" "vendor/$package"
     echo "setup: linked vendor/$package"
 }

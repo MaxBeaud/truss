@@ -68,12 +68,15 @@ int main(int argc, char** argv) {
         .static_stdlib(truss::StaticStdlib::Gcc)
         .depends_on(lib);
     
-    /* compdb failures must not silently exit 0 */
+    auto result = proj.build(); /* build() logs its own errors */
+    if (!result)
+        return 1;
+
+    /* compdb after build(): compile_commands needs the generated manifest,
+     * so a fresh checkout must build first */
     if (auto cc = proj.compile_commands(); !cc) {
         truss::log::error(cc.error());
         return 1;
     }
-
-    auto result = proj.build();
-    return result ? 0 : 1;
+    return 0;
 }
