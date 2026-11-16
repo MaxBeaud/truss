@@ -167,6 +167,28 @@ TEST_CASE("msvc: system includes use /external:I with /external:W0") {
     CHECK(r->compile.find("/external:I\"third/include\"") != std::string::npos);
 }
 
+TEST_CASE("msvc: /LIBPATH is quoted (spaces in library paths)") {
+    const std::array<std::string, 0> none {};
+    const std::array<std::string, 1> paths {"C:/Program Files/Libs"};
+    auto r = detail::link_flags(clang_cl_triple(), BuildMode::Debug, DebugInfo::Default,
+                                Sanitizer::Default, Lto::Default, Hardening::None, paths, none,
+                                none, none, "", none, StaticStdlib::Default);
+    REQUIRE(r.has_value());
+    CHECK(r->linker.find("/LIBPATH:\"C:/Program Files/Libs\"") != std::string::npos);
+}
+
+TEST_CASE("flags: no -fPIC for non-MSVC Windows targets (MinGW ignores it)") {
+    const std::array<std::string, 0> none {};
+    auto mingw = clang_cl_triple();
+    mingw.family = CompilerFamily::Clang; /* zig c++ / g++ targeting windows-gnu */
+    mingw.compiler = "zig c++";
+    auto r = detail::build_flags(mingw, BuildMode::Debug, CppStandard::Default, Warnings::Default,
+                                 DebugInfo::Default, Optimization::Default, Sanitizer::Default,
+                                 Lto::Default, Hardening::None, /*pic=*/true, none, none, "");
+    REQUIRE(r.has_value());
+    CHECK_FALSE(r->compile.find("-fPIC") != std::string::npos);
+}
+
 TEST_CASE("msvc: .cppm sources are rejected, not silently miscompiled") {
     if (!msvc_toolchain_available()) {
         WARN("clang-cl/lld-link/llvm-lib not on PATH: skipping MSVC integration test");

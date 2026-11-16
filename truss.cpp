@@ -68,8 +68,12 @@ int main(int argc, char** argv) {
         .static_stdlib(truss::StaticStdlib::Gcc)
         .depends_on(lib);
     
-    proj.compile_commands();
-    
+    /* compdb failures must not silently exit 0 */
+    if (auto cc = proj.compile_commands(); !cc) {
+        truss::log::error(cc.error());
+        return 1;
+    }
+
     auto result = proj.build();
     return result ? 0 : 1;
 }

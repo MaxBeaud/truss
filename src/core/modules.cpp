@@ -1,5 +1,6 @@
 module;
 #include <algorithm>
+#include <cctype>
 #include <expected>
 #include <filesystem>
 #include <map>
@@ -18,6 +19,94 @@ import :impl;
 
 namespace truss::detail {
 
+namespace {
+
+/* True when the R at s[i] introduces a raw string (R"delim( ), optionally
+ * behind an encoding prefix (u8R, uR, UR, LR) — and not the tail of a longer
+ * identifier (abcR"x" is an identifier followed by a plain string). */
+bool raw_string_at(std::string_view s, std::size_t i) {
+    if (i + 1 >= s.size() || s[i + 1] != '"')
+        return false;
+    const auto ident = [](char c) {
+        return static_cast<bool>(std::isalnum(static_cast<unsigned char>(c))) || c == '_';
+    };
+    std::size_t j = i;
+    if (j > 0 && (s[j - 1] == 'u' || s[j - 1] == 'U' || s[j - 1] == 'L'))
+        --j;
+    else if (j > 1 && s[j - 1] == '8' && s[j - 2] == 'u')
+        j -= 2;
+    return j == 0 || !ident(s[j - 1]);
+}
+
+/* Blank out everything that is not code — comments, string literals (plain and
+ * raw, any encoding prefix) and char literals — keeping every newline so the
+ * line-anchored regexes still see the original line structure. Without this,
+ * test sources embedding TS/HTML in raw strings get their `import ...;` lines
+ * scanned as C++ module imports. */
+std::string strip_non_code(std::string_view s) {
+    std::string out;
+    out.reserve(s.size());
+    const auto blank = [&](char c) { out += c == '\n' ? '\n' : ' '; };
+    std::size_t i = 0;
+    while (i < s.size()) {
+        const char c = s[i];
+        if (c == '/' && i + 1 < s.size() && s[i + 1] == '/') { /* line comment */
+            while (i < s.size() && s[i] != '\n')
+                blank(s[i++]);
+        } else if (c == '/' && i + 1 < s.size() && s[i + 1] == '*') { /* block comment */
+            blank(s[i++]);
+            blank(s[i++]);
+            while (i < s.size()) {
+                if (s[i] == '*' && i + 1 < s.size() && s[i + 1] == '/') {
+                    blank(s[i++]);
+                    blank(s[i++]);
+                    break;
+                }
+                blank(s[i++]);
+            }
+        } else if (c == 'R' && raw_string_at(s, i)) { /* raw string */
+            std::size_t j = i + 2;
+            while (j < s.size() && s[j] != '(' && s[j] != ')' && s[j] != '\\'
+                   && !std::isspace(static_cast<unsigned char>(s[j])))
+                ++j;
+            std::size_t stop = s.size();
+            if (j < s.size() && s[j] == '(' && j - (i + 2) <= 16) {
+                const std::string close = ")" + std::string(s.substr(i + 2, j - (i + 2))) + "\"";
+                const std::size_t end = s.find(close, j + 1);
+                if (end != std::string_view::npos)
+                    stop = end + close.size();
+            } else /* malformed: blank the rest of the line like a plain string */
+                for (stop = i; stop < s.size() && s[stop] != '\n'; ++stop) {}
+            while (i < stop)
+                blank(s[i++]);
+        } else if (c == '"' || c == '\'') { /* plain string or char literal */
+            /* an apostrophe can also be a digit separator (1'000'000): when the
+             * previous character is part of a token, it is not a literal */
+            if (c == '\'' && i > 0
+                && (std::isalnum(static_cast<unsigned char>(s[i - 1])) || s[i - 1] == '_')) {
+                out += c;
+                ++i;
+                continue;
+            }
+            blank(s[i++]);
+            while (i < s.size() && s[i] != c) {
+                const bool esc = s[i] == '\\' && i + 1 < s.size();
+                blank(s[i++]);
+                if (esc && i < s.size())
+                    blank(s[i++]);
+            }
+            if (i < s.size())
+                blank(s[i++]); /* closing quote */
+        } else {
+            out += c;
+            ++i;
+        }
+    }
+    return out;
+}
+
+} // namespace
+
 Result<ModuleUnitInfo> scan_module_unit(const std::string& path) {
     auto text = read_file(path);
     if (!text)
@@ -30,7 +119,9 @@ Result<ModuleUnitInfo> scan_module_unit(const std::string& path) {
 
     ModuleUnitInfo info;
     info.path = path;
-    std::string s = std::move(*text);
+    /* comments and string/char/raw literals are blanked first: module and
+     * import statements only count when they are real code */
+    std::string s = strip_non_code(std::move(*text));
     /* cheap pre-filter: no module/import keyword anywhere means a plain TU
      * (the regexes are line-anchored, so this only skips a superset) */
     if (s.find("module") == std::string::npos && s.find("import") == std::string::npos)
@@ -41,13 +132,13 @@ Result<ModuleUnitInfo> scan_module_unit(const std::string& path) {
     for (auto it = std::sregex_iterator(s.begin(), s.end(), import_re);
          it != std::sregex_iterator(); ++it) {
         const std::string name = (*it)[2];
-        /* split partition lists like `import :a, :b;` — one stream for the whole line */
-        std::istringstream in(name);
-        for (std::string part; std::getline(in, part, ',');) {
+        /* split partition lists like `import :a, :b;` */
+        for (auto part_rng : std::views::split(name, ',')) {
+            const std::string_view part(&*part_rng.begin(), static_cast<std::size_t>(std::ranges::distance(part_rng)));
             const auto b = part.find_first_not_of(" \t");
             const auto e = part.find_last_not_of(" \t");
-            if (b != std::string::npos)
-                info.imports.push_back(part.substr(b, e - b + 1));
+            if (b != std::string_view::npos)
+                info.imports.emplace_back(part.substr(b, e - b + 1));
         }
     }
     return info;
@@ -62,7 +153,7 @@ resolve_module_imports(const ModuleUnitInfo& u, const std::map<std::string, std:
     const std::string primary = u.module_name.substr(0, u.module_name.find(':'));
 
     auto add_one = [&](const std::pair<const std::string, std::string>& kv) {
-        if (std::ranges::find(added, kv.first) != added.end())
+        if (std::ranges::contains(added, kv.first))
             return;
         added.push_back(kv.first);
         if (!flags.empty())
@@ -89,21 +180,36 @@ resolve_module_imports(const ModuleUnitInfo& u, const std::map<std::string, std:
 
     /* A module's BMI embeds (or needs to resolve) everything it imports,
      * exported or not: wire the full transitive closure. The unit never
-     * consumes its own BMI, so it starts out visited (also ends cycles). */
+     * consumes its own BMI, so it starts out visited (also ends cycles).
+     * An unresolved module anywhere in the closure fails the walk — a missing
+     * transitive BMI would otherwise surface only as an opaque clang error.
+     * std / std.compat are exempt: they are wired from the toolchain's std
+     * manifest (std_for), never from target BMIs. */
+    std::string first_unresolved, unresolved_importer;
     std::set<std::string, std::less<>> visited;
     if (u.is_bmi_source)
         visited.insert(u.module_name);
-    auto wire = [&](this auto&& self, const std::string& name) -> bool {
+    auto wire = [&](this auto&& self, const std::string& name,
+                    const std::string& importer) -> bool {
         if (!visited.insert(name).second)
             return true;
         const bool known = add_bmi(name);
+        bool ok = true;
+        if (!known && name != "std" && name != "std.compat") {
+            ok = false;
+            if (first_unresolved.empty()) {
+                first_unresolved = name;
+                unresolved_importer = importer;
+            }
+        }
         const auto visit_imports = [&](const std::string& mod) {
             const auto mi = module_imports.find(mod);
             if (mi == module_imports.end())
                 return;
             const std::string mod_primary = mod.substr(0, mod.find(':'));
             for (const auto& raw : mi->second)
-                self(raw.starts_with(':') ? mod_primary + raw : raw);
+                if (!self(raw.starts_with(':') ? mod_primary + raw : raw, mod))
+                    ok = false;
         };
         visit_imports(name);
         /* a primary also carries its partitions' imports */
@@ -111,22 +217,38 @@ resolve_module_imports(const ModuleUnitInfo& u, const std::map<std::string, std:
             const std::string prefix = name + ":";
             for (const auto& kv : module_imports)
                 if (kv.first.starts_with(prefix))
-                    self(kv.first);
+                    if (!self(kv.first, name))
+                        ok = false;
         }
-        return known;
+        return ok;
+    };
+
+    /* the error names the module that actually has no BMI: the direct import,
+     * or the transitive one the closure stumbled over */
+    const auto unresolved = [&](const std::string& name, const std::string& what) -> Error {
+        if (first_unresolved.empty() || first_unresolved == name)
+            return Error {
+                Error::Kind::Config,
+                "'" + u.path + "' " + what + " '" + name +
+                    "', but no .cppm exporting it is part of this target (or its depends_on targets)",
+                std::filesystem::path(u.path),
+            };
+        return Error {
+            Error::Kind::Config,
+            "'" + u.path + "' needs module '" + first_unresolved + "' (imported by '" +
+                unresolved_importer + "'), but no .cppm exporting it is part of "
+                "this target (or its depends_on targets)",
+            std::filesystem::path(u.path),
+        };
     };
 
     /* An implementation unit (module m; in a .cpp) implicitly imports its
      * primary interface — it needs the primary BMI even with no explicit import.
      * A BMI source never consumes its own BMI. */
     if (!u.module_name.empty() && !u.is_bmi_source) {
-        if (!wire(primary))
-            return std::unexpected(Error {
-                Error::Kind::Config,
-                "'" + u.path + "' is an implementation unit of module '" + primary +
-                    "', but no .cppm exporting it is part of this target (or its depends_on targets)",
-                std::filesystem::path(u.path),
-            });
+        if (!wire(primary, u.path))
+            return std::unexpected(unresolved(
+                primary, "is an implementation unit of module"));
     }
 
     for (const auto& raw : u.imports) {
@@ -142,13 +264,8 @@ resolve_module_imports(const ModuleUnitInfo& u, const std::map<std::string, std:
         }
         if (u.is_bmi_source && name == u.module_name)
             continue; /* a BMI source never consumes its own BMI */
-        if (!wire(name))
-            return std::unexpected(Error {
-                Error::Kind::Config,
-                "'" + u.path + "' imports module '" + name + "', but no .cppm exporting it is part of "
-                "this target (or its depends_on targets)",
-                std::filesystem::path(u.path),
-            });
+        if (!wire(name, u.path))
+            return std::unexpected(unresolved(name, "imports module"));
     }
     return std::make_pair(flags, order);
 }
@@ -165,7 +282,11 @@ scan_deps_requires(const std::string& compiler, std::string_view compile_flags,
     for (char& c : flat)
         if (c == '/' || c == '.')
             c = '_';
-    const std::filesystem::path cdb = scratch / ("cdb_" + flat + ".json");
+    /* distinct sources can flatten to the same name (src/a/b.cpp vs
+     * src/a_b.cpp) and concurrent workers share the scratch dir: the source's
+     * hash keeps each TU's compilation database apart */
+    const std::filesystem::path cdb =
+        scratch / ("cdb_" + std::to_string(std::hash<std::string> {}(source)) + "_" + flat + ".json");
     const std::string cmd = compiler + " " + std::string(compile_flags) + " -c " + source;
     const nlohmann::json entry {
         {"directory", cwd.generic_string()},

@@ -69,6 +69,25 @@ TEST_CASE("glob: ** crosses separators") {
           std::vector<std::string>{"sub/a.cpp", "sub/deep/c.cpp", "sub/deep/more/d.cpp"});
 }
 
+TEST_CASE("glob: a full **/ component matches whole components only") {
+    ScratchDir s("glob-starstar");
+    s.touch("a/b.cpp");
+    s.touch("a/x/b.cpp");
+    s.touch("fox.cpp");
+    s.touch("a/xb.cpp");
+    /* a whole double-star component: zero or more complete components */
+    CHECK(s.glob_strs("**/b.cpp") == std::vector<std::string>{"a/b.cpp", "a/x/b.cpp"});
+    CHECK(s.glob_strs("a/**/b.cpp") == std::vector<std::string>{"a/b.cpp", "a/x/b.cpp"});
+    /* a partial `**` (not a whole component) keeps its old meaning */
+    CHECK(s.glob_strs("f**.cpp") == std::vector<std::string>{"fox.cpp"});
+}
+
+TEST_CASE("glob: a non-directory base matches nothing instead of erroring") {
+    ScratchDir s("glob-filebase");
+    s.touch("plain.txt");
+    CHECK(s.glob_strs("plain.txt/*.cpp").empty());
+}
+
 TEST_CASE("glob: ? matches exactly one char") {
     ScratchDir s("glob3");
     s.touch("a.cpp");

@@ -720,8 +720,11 @@ class TargetRef;
 /**
  * \brief A build target: options holder built with method chaining.
  *
- * Every builder method returns Target& so calls chain; concrete kinds are
- * Executable, StaticLib, SharedLib and Interface.
+ * Every builder method is a deducing-`this` template returning the *derived*
+ * type (`Executable&`, `StaticLib&`, `CustomCommand&`, ...), so derived-only
+ * methods chain after base ones in any order
+ * (`proj.add_custom_command("g").for_host().command({...})`). Called through a
+ * `Target&`, they return `Target&` as before.
  */
 class Target {
 public:
@@ -736,39 +739,62 @@ public:
     /// `?` one char, `{a,b}` alternation. e.g. "src/**.cpp", "src/*.c".
     /// Overloads: single pattern, braced list, any range of strings.
     /// \param pattern glob, or literal path (which must exist).
-    /// \return `*this` for chaining.
-    Target& sources(std::string_view pattern) {
-        source_patterns_.emplace_back(pattern);
-        return *this;
+    /// \return the target for chaining.
+    template <class Self>
+    Self& sources(this Self& self, std::string_view pattern) {
+        self.source_patterns_.emplace_back(pattern);
+        return self;
     }
-    Target& sources(std::initializer_list<std::string_view> patterns) {
-        append_strings(source_patterns_, patterns);
-        return *this;
+    template <class Self>
+    Self& sources(this Self& self, std::initializer_list<std::string_view> patterns) {
+        append_strings(self.source_patterns_, patterns);
+        return self;
     }
-    template <StringRange R>
-    Target& sources(R&& patterns) {
-        append_strings(source_patterns_, std::forward<R>(patterns));
-        return *this;
+    template <class Self, StringRange R>
+    Self& sources(this Self& self, R&& patterns) {
+        append_strings(self.source_patterns_, std::forward<R>(patterns));
+        return self;
     }
     /// Every .cpp/.cc/.c under `dir`, recursively.
-    Target& sources_in(std::string_view dir);
+    template <class Self>
+    Self& sources_in(this Self& self, std::string_view dir) {
+        std::string d(dir);
+        while (!d.empty() && (d.back() == '/' || d.back() == '\\'))
+            d.pop_back();
+        if (d.empty()) /* "" or "/": contributing nothing beats globbing
+                        * "/**.cpp"; the target then fails validation with
+                        * 'has no sources' */
+            return self;
+        self.source_patterns_.push_back(d + "/**.cpp");
+        self.source_patterns_.push_back(d + "/**.cc");
+        self.source_patterns_.push_back(d + "/**.cxx");
+        self.source_patterns_.push_back(d + "/**.c");
+        self.source_patterns_.push_back(d + "/**.cppm");
+        return self;
+    }
     /// Exclude a previously matched file (exact resolved path).
-    Target& remove_source(std::string_view path);
+    template <class Self>
+    Self& remove_source(this Self& self, std::string_view path) {
+        self.removed_sources_.emplace_back(path);
+        return self;
+    }
 
     /* --- usage requirements --- */
     /// Add an include directory (-I). Overloads: single, braced list, range.
-    Target& include_dirs(std::string_view dir) {
-        include_dirs_.emplace_back(dir);
-        return *this;
+    template <class Self>
+    Self& include_dirs(this Self& self, std::string_view dir) {
+        self.include_dirs_.emplace_back(dir);
+        return self;
     }
-    Target& include_dirs(std::initializer_list<std::string_view> dirs) {
-        append_strings(include_dirs_, dirs);
-        return *this;
+    template <class Self>
+    Self& include_dirs(this Self& self, std::initializer_list<std::string_view> dirs) {
+        append_strings(self.include_dirs_, dirs);
+        return self;
     }
-    template <StringRange R>
-    Target& include_dirs(R&& dirs) {
-        append_strings(include_dirs_, std::forward<R>(dirs));
-        return *this;
+    template <class Self, StringRange R>
+    Self& include_dirs(this Self& self, R&& dirs) {
+        append_strings(self.include_dirs_, std::forward<R>(dirs));
+        return self;
     }
     /**
      * \brief Add a system include directory (`-isystem`, MSVC `/external:I`):
@@ -776,158 +802,185 @@ public:
      * Propagates to every dependent like include_dirs(). Overloads: single,
      * braced list, range.
      */
-    Target& system_include_dirs(std::string_view dir) {
-        system_include_dirs_.emplace_back(dir);
-        return *this;
+    template <class Self>
+    Self& system_include_dirs(this Self& self, std::string_view dir) {
+        self.system_include_dirs_.emplace_back(dir);
+        return self;
     }
-    Target& system_include_dirs(std::initializer_list<std::string_view> dirs) {
-        append_strings(system_include_dirs_, dirs);
-        return *this;
+    template <class Self>
+    Self& system_include_dirs(this Self& self, std::initializer_list<std::string_view> dirs) {
+        append_strings(self.system_include_dirs_, dirs);
+        return self;
     }
-    template <StringRange R>
-    Target& system_include_dirs(R&& dirs) {
-        append_strings(system_include_dirs_, std::forward<R>(dirs));
-        return *this;
+    template <class Self, StringRange R>
+    Self& system_include_dirs(this Self& self, R&& dirs) {
+        append_strings(self.system_include_dirs_, std::forward<R>(dirs));
+        return self;
     }
     /// Add preprocessor defines (-D). Overloads: single, braced list, range.
     /// Private to this target (Interface targets: passed to dependents); see public_defines().
-    Target& defines(std::string_view def) {
-        defines_.emplace_back(def);
-        return *this;
+    template <class Self>
+    Self& defines(this Self& self, std::string_view def) {
+        self.defines_.emplace_back(def);
+        return self;
     }
-    Target& defines(std::initializer_list<std::string_view> defs) {
-        append_strings(defines_, defs);
-        return *this;
+    template <class Self>
+    Self& defines(this Self& self, std::initializer_list<std::string_view> defs) {
+        append_strings(self.defines_, defs);
+        return self;
     }
-    template <StringRange R>
-    Target& defines(R&& defs) {
-        append_strings(defines_, std::forward<R>(defs));
-        return *this;
+    template <class Self, StringRange R>
+    Self& defines(this Self& self, R&& defs) {
+        append_strings(self.defines_, std::forward<R>(defs));
+        return self;
     }
     /**
      * \brief Add defines used by this target *and* every dependent, transitively
      * (CMake's PUBLIC): for macros the library's headers need to agree on.
      * Overloads: single, braced list, range.
      */
-    Target& public_defines(std::string_view def) {
-        public_defines_.emplace_back(def);
-        return *this;
+    template <class Self>
+    Self& public_defines(this Self& self, std::string_view def) {
+        self.public_defines_.emplace_back(def);
+        return self;
     }
-    Target& public_defines(std::initializer_list<std::string_view> defs) {
-        append_strings(public_defines_, defs);
-        return *this;
+    template <class Self>
+    Self& public_defines(this Self& self, std::initializer_list<std::string_view> defs) {
+        append_strings(self.public_defines_, defs);
+        return self;
     }
-    template <StringRange R>
-    Target& public_defines(R&& defs) {
-        append_strings(public_defines_, std::forward<R>(defs));
-        return *this;
+    template <class Self, StringRange R>
+    Self& public_defines(this Self& self, R&& defs) {
+        append_strings(self.public_defines_, std::forward<R>(defs));
+        return self;
     }
     /// Add libraries to link (-l). Overloads: single, braced list, range.
-    Target& link_libs(std::string_view lib) {
-        link_libs_.emplace_back(lib);
-        return *this;
+    template <class Self>
+    Self& link_libs(this Self& self, std::string_view lib) {
+        self.link_libs_.emplace_back(lib);
+        return self;
     }
-    Target& link_libs(std::initializer_list<std::string_view> libs) {
-        append_strings(link_libs_, libs);
-        return *this;
+    template <class Self>
+    Self& link_libs(this Self& self, std::initializer_list<std::string_view> libs) {
+        append_strings(self.link_libs_, libs);
+        return self;
     }
-    template <StringRange R>
-    Target& link_libs(R&& libs) {
-        append_strings(link_libs_, std::forward<R>(libs));
-        return *this;
+    template <class Self, StringRange R>
+    Self& link_libs(this Self& self, R&& libs) {
+        append_strings(self.link_libs_, std::forward<R>(libs));
+        return self;
     }
     /// Add library search directories (-L). Overloads: single, braced list, range.
-    Target& link_paths(std::string_view path) {
-        link_paths_.emplace_back(path);
-        return *this;
+    template <class Self>
+    Self& link_paths(this Self& self, std::string_view path) {
+        self.link_paths_.emplace_back(path);
+        return self;
     }
-    Target& link_paths(std::initializer_list<std::string_view> paths) {
-        append_strings(link_paths_, paths);
-        return *this;
+    template <class Self>
+    Self& link_paths(this Self& self, std::initializer_list<std::string_view> paths) {
+        append_strings(self.link_paths_, paths);
+        return self;
     }
-    template <StringRange R>
-    Target& link_paths(R&& paths) {
-        append_strings(link_paths_, std::forward<R>(paths));
-        return *this;
+    template <class Self, StringRange R>
+    Self& link_paths(this Self& self, R&& paths) {
+        append_strings(self.link_paths_, std::forward<R>(paths));
+        return self;
     }
     /// Apple-only: link a framework. Overloads: single, braced list, range.
-    Target& link_frameworks(std::string_view fw) {
-        frameworks_.emplace_back(fw);
-        return *this;
+    template <class Self>
+    Self& link_frameworks(this Self& self, std::string_view fw) {
+        self.frameworks_.emplace_back(fw);
+        return self;
     }
-    Target& link_frameworks(std::initializer_list<std::string_view> fw) {
-        append_strings(frameworks_, fw);
-        return *this;
+    template <class Self>
+    Self& link_frameworks(this Self& self, std::initializer_list<std::string_view> fw) {
+        append_strings(self.frameworks_, fw);
+        return self;
     }
-    template <StringRange R>
-    Target& link_frameworks(R&& fw) {
-        append_strings(frameworks_, std::forward<R>(fw));
-        return *this;
+    template <class Self, StringRange R>
+    Self& link_frameworks(this Self& self, R&& fw) {
+        append_strings(self.frameworks_, std::forward<R>(fw));
+        return self;
     }
     /// Apple-only: framework search directories (-F). Overloads: single, braced list, range.
-    Target& framework_paths(std::string_view path) {
-        framework_paths_.emplace_back(path);
-        return *this;
+    template <class Self>
+    Self& framework_paths(this Self& self, std::string_view path) {
+        self.framework_paths_.emplace_back(path);
+        return self;
     }
-    Target& framework_paths(std::initializer_list<std::string_view> paths) {
-        append_strings(framework_paths_, paths);
-        return *this;
+    template <class Self>
+    Self& framework_paths(this Self& self, std::initializer_list<std::string_view> paths) {
+        append_strings(self.framework_paths_, paths);
+        return self;
     }
-    template <StringRange R>
-    Target& framework_paths(R&& paths) {
-        append_strings(framework_paths_, std::forward<R>(paths));
-        return *this;
+    template <class Self, StringRange R>
+    Self& framework_paths(this Self& self, R&& paths) {
+        append_strings(self.framework_paths_, std::forward<R>(paths));
+        return self;
     }
 
     /* raw escape hatches (verbatim, compiler-specific) */
     /// Raw compiler flags, appended verbatim (repeat calls accumulate).
-    Target& flags(std::string_view raw) {
-        if (!flags_.empty() && !raw.empty())
-            flags_ += ' ';
-        flags_ += raw;
-        return *this;
+    template <class Self>
+    Self& flags(this Self& self, std::string_view raw) {
+        if (!self.flags_.empty() && !raw.empty())
+            self.flags_ += ' ';
+        self.flags_ += raw;
+        return self;
     }
     /**
      * \brief Raw compile flags for this target *and* every dependent,
      * transitively (CMake's PUBLIC), e.g. `-pthread`, `-fno-rtti` for a library
      * whose ABI needs it. Appended verbatim; repeat calls accumulate.
      */
-    Target& public_flags(std::string_view raw) {
+    template <class Self>
+    Self& public_flags(this Self& self, std::string_view raw) {
         if (!raw.empty())
-            public_flags_.emplace_back(raw);
-        return *this;
+            self.public_flags_.emplace_back(raw);
+        return self;
     }
     /// Raw linker flags, appended verbatim (repeat calls accumulate).
-    Target& linker_flags(std::string_view raw) {
-        if (!linker_flags_.empty() && !raw.empty())
-            linker_flags_ += ' ';
-        linker_flags_ += raw;
-        return *this;
+    template <class Self>
+    Self& linker_flags(this Self& self, std::string_view raw) {
+        if (!self.linker_flags_.empty() && !raw.empty())
+            self.linker_flags_ += ' ';
+        self.linker_flags_ += raw;
+        return self;
     }
 
     /* --- options --- */
     /// C++ standard (Default = C++23).
-    Target& cpp_standard(CppStandard s) { std_ = s; return *this; }
+    template <class Self>
+    Self& cpp_standard(this Self& self, CppStandard s) { self.std_ = s; return self; }
     /// Warning level (Default = -Wall -Wextra).
-    Target& warnings(Warnings w) { warnings_ = w; return *this; }
+    template <class Self>
+    Self& warnings(this Self& self, Warnings w) { self.warnings_ = w; return self; }
     /// Debug symbol level (Default resolves per mode).
-    Target& debug_info(DebugInfo d) { debug_ = d; return *this; }
+    template <class Self>
+    Self& debug_info(this Self& self, DebugInfo d) { self.debug_ = d; return self; }
     /// Optimization level (Default resolves per mode).
-    Target& optimization(Optimization o) { optimization_ = o; return *this; }
+    template <class Self>
+    Self& optimization(this Self& self, Optimization o) { self.optimization_ = o; return self; }
     /// Sanitizer set (Default = off).
-    Target& sanitizer(Sanitizer s) { sanitizer_ = s; return *this; }
+    template <class Self>
+    Self& sanitizer(this Self& self, Sanitizer s) { self.sanitizer_ = s; return self; }
     /// Link-time optimization (Default = off).
-    Target& lto(Lto l) { lto_ = l; return *this; }
+    template <class Self>
+    Self& lto(this Self& self, Lto l) { self.lto_ = l; return self; }
     /// Hardening tier (Default = Light: truss's default hardening stack).
-    Target& harden(Hardening h) { hardening_ = h; return *this; }
+    template <class Self>
+    Self& harden(this Self& self, Hardening h) { self.hardening_ = h; return self; }
     /**
      * \brief Precompiled header for this target's C++ sources.
-     * clang: `-include-pch`; GCC: `.gch` + `-I`/`-include`. Output lives
+     * clang: `-include-pch`; GCC: `.gch` + `-include`, with the PCH directory
+     * searched ahead of every other -I so the `.gch` is found even when the
+     * header's own directory is also an include dir. Output lives
      * under build/{mode}/pch/{target}/ and is dependency-tracked. Not yet
      * supported on MSVC targets (clear error); module BMI and C rules never use it.
      * \param path the header, relative to the project root.
      */
-    Target& pch(std::string_view path) { pch_ = std::string(path); return *this; }
+    template <class Self>
+    Self& pch(this Self& self, std::string_view path) { self.pch_ = std::string(path); return self; }
     /**
      * \brief Unity build: concatenate this target's C/C++ sources into batch
      * TUs (16 per batch) under build/{mode}/unity/{target}/, compiled instead
@@ -935,11 +988,14 @@ public:
      * builds; coarser incremental rebuilds.
      * \param v true to enable (default when called with no argument).
      */
-    Target& unity(bool v = true) { unity_ = v; return *this; }
+    template <class Self>
+    Self& unity(this Self& self, bool v = true) { self.unity_ = v; return self; }
     /// .cppm handling mode (Default = Auto).
-    Target& modules_mode(ModulesMode m) { modules_ = m; return *this; }
+    template <class Self>
+    Self& modules_mode(this Self& self, ModulesMode m) { self.modules_ = m; return self; }
     /// Position-independent code (on by default for libraries).
-    Target& pic(bool v) { pic_ = v; return *this; }
+    template <class Self>
+    Self& pic(this Self& self, bool v) { self.pic_ = v; return self; }
     /**
      * \brief Link this dependency statically into whatever consumes it.
      * (`static` is a C++ keyword, hence the name.)
@@ -950,13 +1006,14 @@ public:
      * ELF targets only (Linux, FreeBSD, Android, MinGW); a Config error on macOS/MSVC.
      * \param v true to enable (default when called with no argument).
      */
-    Target& static_link(bool v = true) {
-        if (kind_ == TargetKind::SharedLibrary || demoted_shared_) {
-            kind_ = v ? TargetKind::StaticLibrary : TargetKind::SharedLibrary;
-            demoted_shared_ = v;
+    template <class Self>
+    Self& static_link(this Self& self, bool v = true) {
+        if (self.kind_ == TargetKind::SharedLibrary || self.demoted_shared_) {
+            self.kind_ = v ? TargetKind::StaticLibrary : TargetKind::SharedLibrary;
+            self.demoted_shared_ = v;
         }
-        static_link_ = v;
-        return *this;
+        self.static_link_ = v;
+        return self;
     }
     /**
      * \brief Link every dependency of this executable/shared library statically
@@ -966,7 +1023,8 @@ public:
      * dl, rt, ...) and the C++ runtime stay dynamic — use static_stdlib() for the latter.
      * \param v true to enable (default when called with no argument).
      */
-    Target& static_deps(bool v = true) { static_deps_ = v; return *this; }
+    template <class Self>
+    Self& static_deps(this Self& self, bool v = true) { self.static_deps_ = v; return self; }
     /**
      * \brief Link the C++ runtime statically (see StaticStdlib). Validated at
      * build() against the project toolchain: Gcc needs libstdc++, Llvm needs
@@ -974,12 +1032,14 @@ public:
      * musl-targeting driver. Typical portable Linux binary:
      * `.static_deps().static_stdlib(truss::StaticStdlib::Gcc)` -> depends on glibc only.
      */
-    Target& static_stdlib(StaticStdlib s) { static_stdlib_ = s; return *this; }
+    template <class Self>
+    Self& static_stdlib(this Self& self, StaticStdlib s) { self.static_stdlib_ = s; return self; }
     /**
      * \brief Full triple override for this target (cross-compiling); wins
      * over proj.configure() completely (it is not merged with the Config).
      */
-    Target& cross_target(TargetTriple t) { triple_ = t; return *this; }
+    template <class Self>
+    Self& cross_target(this Self& self, TargetTriple t) { self.triple_ = std::move(t); return self; }
     /**
      * \brief Pin this target to the build host, ignoring the project's cross
      * configuration (Config::target(...)). For the host-side tools of a cross
@@ -988,32 +1048,41 @@ public:
      * A depends_on() edge must stay on one side of the host/target boundary
      * (different ABI and C library): mixing them is a Config error.
      */
-    Target& for_host() { for_host_ = true; return *this; }
+    template <class Self>
+    Self& for_host(this Self& self) { self.for_host_ = true; return self; }
     /// \brief Import a prebuilt library file into this target (ImportedLibrary
     /// targets only, from import_library()): an absolute path, or relative to
     /// the project root. The file is linked verbatim into every dependent
     /// (after their objects, in GNU ld order along with depends_on artifacts);
     /// it must exist by build() time. Repeat calls accumulate.
-    Target& import_archive(std::string_view path) {
-        import_archives_.emplace_back(path);
-        return *this;
+    template <class Self>
+    Self& import_archive(this Self& self, std::string_view path) {
+        self.import_archives_.emplace_back(path);
+        return self;
     }
     /**
      * \brief Depend on another target: links its artifact, inherits its
      * usage requirements (include dirs always; defines/link flags from
      * Interface targets). Order is tracked in the ninja graph.
      */
-    Target& depends_on(const Target& dep);
+    template <class Self>
+    Self& depends_on(this Self& self, const Target& dep) {
+        self.deps_.push_back(&dep);
+        return self;
+    }
     /// \brief Depend on a target handle by value — no deref (`t.depends_on(ref)`).
     /// Exact-match overload: without it, a TargetRef converts equally well to
     /// `const Target&` and to `Result<TargetRef>` (ambiguous call).
-    Target& depends_on(TargetRef dep);
+    template <class Self>
+    Self& depends_on(this Self& self, TargetRef dep);
     /// \brief Depend on a target from a Result — no deref
     /// (`t.depends_on(proj.conan({"zlib/1.3.1"}))`, `t.depends_on(proj.add_subdirectory(dir))`).
     /// An error Result is kept and reported by Project::build() (never dropped).
-    Target& depends_on(Result<TargetRef> dep_result);
+    template <class Self>
+    Self& depends_on(this Self& self, Result<TargetRef> dep_result);
     /// Mark as a test executable (built and run by `./truss test`).
-    Target& is_test(bool v = true) { test_ = v; return *this; }
+    template <class Self>
+    Self& is_test(this Self& self, bool v = true) { self.test_ = v; return self; }
     /**
      * \brief Combine another static library's archive into this one.
      *
@@ -1026,14 +1095,17 @@ public:
      * Accepts a target, a TargetRef handle, or a Result<TargetRef> — all by
      * value, no deref at the call site.
      */
-    Target& merge(const Target& lib) { merge_.push_back(&lib); return *this; }
+    template <class Self>
+    Self& merge(this Self& self, const Target& lib) { self.merge_.push_back(&lib); return self; }
     /// \brief merge() a target handle by value — no deref (`merge(subdir_ref)`).
     /// Exact-match overload (same ambiguity guard as depends_on(TargetRef)).
-    Target& merge(TargetRef lib);
+    template <class Self>
+    Self& merge(this Self& self, TargetRef lib);
     /// \brief merge() a target from a Result — no deref
     /// (`merge(proj.add_subdirectory(dir))`). An error Result is kept and
     /// reported by Project::build() (never dropped).
-    Target& merge(Result<TargetRef> lib_result);
+    template <class Self>
+    Self& merge(this Self& self, Result<TargetRef> lib_result);
 
     /* --- read access (used by the build engine) --- */
     const std::string& name() const { return name_; }
@@ -1200,22 +1272,24 @@ public:
 
     /// Add one command token (joined with spaces at emit time; `$tool`/`$out`/`$in`
     /// placeholders are expanded then). Overloads: single, braced list, range.
-    CustomCommand& command(std::string_view token) {
-        command_tokens_.emplace_back(token);
-        return *this;
+    template <class Self>
+    Self& command(this Self& self, std::string_view token) {
+        self.command_tokens_.emplace_back(token);
+        return self;
     }
     /// \copydoc command(std::string_view)
-    CustomCommand& command(std::initializer_list<std::string_view> tokens) {
+    template <class Self>
+    Self& command(this Self& self, std::initializer_list<std::string_view> tokens) {
         for (const auto& t : tokens)
-            command_tokens_.emplace_back(t);
-        return *this;
+            self.command_tokens_.emplace_back(t);
+        return self;
     }
     /// \copydoc command(std::string_view)
-    template <StringRange R>
-    CustomCommand& command(R&& tokens) {
+    template <class Self, StringRange R>
+    Self& command(this Self& self, R&& tokens) {
         for (const auto& t : tokens)
-            command_tokens_.emplace_back(std::string_view(t));
-        return *this;
+            self.command_tokens_.emplace_back(std::string_view(t));
+        return self;
     }
     /**
      * \brief The tool this command runs: an Executable target whose path
@@ -1224,35 +1298,40 @@ public:
      * In a cross project the tool must be `.for_host()` (the command executes
      * on the build host). Overloads: target, TargetRef handle, Result.
      */
-    CustomCommand& uses(const Target& tool) {
-        used_tool_ = &tool;
-        return *this;
+    template <class Self>
+    Self& uses(this Self& self, const Target& tool) {
+        self.used_tool_ = &tool;
+        return self;
     }
     /// \copydoc uses(const Target&)
-    CustomCommand& uses(TargetRef tool);
+    template <class Self>
+    Self& uses(this Self& self, TargetRef tool);
     /// \copydoc uses(const Target&)
-    CustomCommand& uses(Result<TargetRef> tool_result);
+    template <class Self>
+    Self& uses(this Self& self, Result<TargetRef> tool_result);
     /**
      * \brief Name an output file the command produces (relative to the project
      * root). Default when never called: `build/<mode>/gen/<name>/output`.
      * Overloads: single, braced list, range.
      */
-    CustomCommand& outputs(std::string_view path) {
-        outputs_.emplace_back(path);
-        return *this;
+    template <class Self>
+    Self& outputs(this Self& self, std::string_view path) {
+        self.outputs_.emplace_back(path);
+        return self;
     }
     /// \copydoc outputs(std::string_view)
-    CustomCommand& outputs(std::initializer_list<std::string_view> paths) {
+    template <class Self>
+    Self& outputs(this Self& self, std::initializer_list<std::string_view> paths) {
         for (const auto& p : paths)
-            outputs_.emplace_back(p);
-        return *this;
+            self.outputs_.emplace_back(p);
+        return self;
     }
     /// \copydoc outputs(std::string_view)
-    template <StringRange R>
-    CustomCommand& outputs(R&& paths) {
+    template <class Self, StringRange R>
+    Self& outputs(this Self& self, R&& paths) {
         for (const auto& p : paths)
-            outputs_.emplace_back(std::string_view(p));
-        return *this;
+            self.outputs_.emplace_back(std::string_view(p));
+        return self;
     }
 
     /// The command tokens as given to command().
@@ -1287,44 +1366,58 @@ private:
     std::reference_wrapper<Target> ref_;
 };
 
-// Inline implementation of depends_on(Result<TargetRef>) - TargetRef must be complete
-inline Target& Target::depends_on(TargetRef dep) {
-    return depends_on(static_cast<const Target&>(dep.get()));
+// Inline implementations of the TargetRef/Result builder overloads — TargetRef
+// must be complete. Deducing this keeps the derived return type of the chain.
+template <class Self>
+Self& Target::depends_on(this Self& self, TargetRef dep) {
+    self.deps_.push_back(&dep.get());
+    return self;
 }
 
-inline Target& Target::depends_on(Result<TargetRef> dep_result) {
-    if (dep_result)
-        return depends_on(static_cast<const Target&>(dep_result->get()));
+template <class Self>
+Self& Target::depends_on(this Self& self, Result<TargetRef> dep_result) {
+    if (dep_result) {
+        self.deps_.push_back(&dep_result->get());
+        return self;
+    }
     /* keep the first failure: build() reports it instead of linking without the dep */
-    if (!deferred_error_)
-        deferred_error_ = std::move(dep_result.error());
-    return *this;
+    self.defer_error(std::move(dep_result.error()));
+    return self;
 }
 
-inline Target& Target::merge(TargetRef lib) {
-    return merge(static_cast<const Target&>(lib.get()));
+template <class Self>
+Self& Target::merge(this Self& self, TargetRef lib) {
+    self.merge_.push_back(&lib.get());
+    return self;
 }
 
-inline Target& Target::merge(Result<TargetRef> lib_result) {
-    if (lib_result)
-        return merge(static_cast<const Target&>(lib_result->get()));
+template <class Self>
+Self& Target::merge(this Self& self, Result<TargetRef> lib_result) {
+    if (lib_result) {
+        self.merge_.push_back(&lib_result->get());
+        return self;
+    }
     /* keep the first failure: build() reports it instead of merging nothing */
-    if (!deferred_error_)
-        deferred_error_ = std::move(lib_result.error());
-    return *this;
+    self.defer_error(std::move(lib_result.error()));
+    return self;
 }
 
 // CustomCommand::uses overloads - TargetRef must be complete
-inline CustomCommand& CustomCommand::uses(TargetRef tool) {
-    return uses(static_cast<const Target&>(tool.get()));
+template <class Self>
+Self& CustomCommand::uses(this Self& self, TargetRef tool) {
+    self.used_tool_ = &tool.get();
+    return self;
 }
 
-inline CustomCommand& CustomCommand::uses(Result<TargetRef> tool_result) {
-    if (tool_result)
-        return uses(static_cast<const Target&>(tool_result->get()));
+template <class Self>
+Self& CustomCommand::uses(this Self& self, Result<TargetRef> tool_result) {
+    if (tool_result) {
+        self.used_tool_ = &tool_result->get();
+        return self;
+    }
     /* keep the first failure: build() reports it instead of running without the tool */
-    defer_error(std::move(tool_result.error()));
-    return *this;
+    self.defer_error(std::move(tool_result.error()));
+    return self;
 }
 
 /// Context handed to tasks and build hooks (the ./truss NAME dispatch).
@@ -1337,7 +1430,9 @@ struct TaskContext {
     int jobs {0};                             ///< parallelism (-j, 0 = auto)
     bool verbose {false};                     ///< -v flag
 };
-/// Signature of tasks and build hooks.
+/// Signature of tasks and build hooks. (std::move_only_function is the
+/// intended type once libc++ ships it: hooks capturing move-only state would
+/// then be accepted too.)
 using TaskFn = std::function<Result<void>(const TaskContext&)>;
 
 /**
@@ -1421,7 +1516,10 @@ public:
      * \brief Build hooks, run in registration order: pre_build fires once before
      * the first compile step, post_build once after the first successful compile
      * step (before test/run binaries execute). A failing hook aborts the
-     * build. clean/compdb never fire hooks.
+     * build. clean/compdb never fire hooks, and neither does a dry run (-n).
+     * Hooks also fire for partial builds (`./truss test`, `--target`): a hook
+     * that reads artifacts outside the requested graph must tolerate them
+     * being absent (e.g. skip with a warning until a full build produced them).
      */
     Project& pre_build(TaskFn fn) { pre_build_.push_back(std::move(fn)); return *this; }
     /// \copydoc pre_build

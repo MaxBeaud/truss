@@ -1,6 +1,7 @@
 module;
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <coroutine>
 #include <cstdint>
 #include <cstring>
@@ -79,9 +80,18 @@ std::string glob_to_regex(std::string_view pattern) {
         switch (c) {
         case '*':
             if (i + 1 < pattern.size() && pattern[i + 1] == '*') {
-                r += ".*";
-                i += 2;
-                if (i < pattern.size() && pattern[i] == '/') ++i; // "**/" consumes separator
+                if ((i == 0 || pattern[i - 1] == '/') && i + 2 < pattern.size() && pattern[i + 2] == '/') {
+                    /* a full double-star component followed by a slash: zero or
+                     * more whole components (never a partial name), so "a" +
+                     * double-star + "/b" matches a/b and a/x/b but not a/xb,
+                     * and a leading double-star does not swallow fox.cpp */
+                    r += "(?:[^/]+/)*";
+                    i += 3;
+                } else {
+                    r += ".*";
+                    i += 2;
+                    if (i < pattern.size() && pattern[i] == '/') ++i; // "**/" consumes separator
+                }
             } else {
                 r += "[^/]*";
                 ++i;
@@ -158,8 +168,8 @@ Result<std::vector<std::filesystem::path>> glob_multi(std::span<const std::strin
     std::vector<std::filesystem::path> matches;
     std::error_code ec;
     for (const auto& base : roots) {
-        if (!std::filesystem::exists(base, ec))
-            continue; // a missing base simply matches nothing
+        if (!std::filesystem::is_directory(base, ec))
+            continue; // a missing (or non-directory) base simply matches nothing
         ec.clear();
         auto it = std::filesystem::recursive_directory_iterator(
             base, std::filesystem::directory_options::skip_permission_denied, ec);
@@ -186,8 +196,9 @@ Result<std::vector<std::filesystem::path>> glob_multi(std::span<const std::strin
                 }
             }
         }
-        if (ec)
-            return std::unexpected(io_error(ec, base));
+        /* an increment error (an entry deleted by a concurrent process mid
+         * walk) degrades to the matches collected so far — like fs::walk —
+         * instead of failing the whole glob */
     }
 
     std::ranges::sort(matches);
@@ -261,9 +272,14 @@ Result<void> write_file(const std::filesystem::path& p, std::string_view data) {
 
     /* write a sibling temp file then rename over the target: an interrupted
      * run never leaves a truncated manifest/lockfile/spec behind (rename is
-     * atomic within a filesystem); the pid keeps concurrent truss runs apart */
+     * atomic within a filesystem). The pid+counter keeps concurrent writers
+     * apart, and removing any stale entry first refuses to write through a
+     * pre-placed symlink at the temp name. */
+    static std::atomic<unsigned> tmp_seq {0};
     std::filesystem::path tmp = p;
-    tmp += ".truss-tmp." + std::to_string(getpid());
+    tmp += ".truss-tmp." + std::to_string(getpid()) + "."
+         + std::to_string(tmp_seq.fetch_add(1, std::memory_order_relaxed));
+    std::filesystem::remove(tmp, ec); /* unlinks a stale file or symlink */
     {
         std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
         if (!out)
@@ -320,9 +336,13 @@ std::map<std::string, std::string> read_lockfile(const std::filesystem::path& fi
         return b == std::string::npos ? std::string {} : s.substr(b, e - b + 1);
     };
     while (std::getline(in, line)) {
-        const auto hash = line.find('#');
-        if (hash != std::string::npos)
-            line.erase(hash);
+        /* a '#' starts a comment only at line start or after whitespace:
+         * pinned values (git tags, URLs) may contain '#' themselves */
+        for (std::size_t i = 0; i < line.size(); ++i)
+            if (line[i] == '#' && (i == 0 || line[i - 1] == ' ' || line[i - 1] == '\t')) {
+                line.erase(i);
+                break;
+            }
         const auto eq = line.find('=');
         if (eq == std::string::npos)
             continue;
@@ -536,17 +556,9 @@ const std::vector<std::filesystem::path>& system_library_dirs() {
             const auto value = os::env(var);
             if (!value)
                 return;
-            size_t start = 0;
-            while (start <= value->size()) {
-                const size_t sep = value->find(':', start);
-                const std::string entry =
-                    value->substr(start, sep == std::string::npos ? std::string::npos : sep - start);
+            for (const std::string_view entry : detail::split_env_list(*value))
                 if (!entry.empty())
                     out.emplace_back(entry);
-                if (sep == std::string::npos)
-                    break;
-                start = sep + 1;
-            }
         };
         if constexpr (os::is_linux())
             add_env("LD_LIBRARY_PATH");

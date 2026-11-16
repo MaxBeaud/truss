@@ -48,28 +48,44 @@ Result<ProcOutcome> run_impl(std::span<const std::string> argv, int capture_mode
 
     ProcOutcome outcome;
     int pipe_fd[2] = {-1, -1};
-    posix_spawn_file_actions_t actions;
-    const bool have_actions = posix_spawn_file_actions_init(&actions) == 0;
-    /* without file actions we cannot honour cwd at all — fail loudly instead
-     * of running the command in the wrong directory */
-    if (!have_actions && !cwd.empty())
+    /* RAII over posix_spawn_file_actions_t: every early return below stays
+     * leak-proof without hand-written destroy calls */
+    struct actions_guard {
+        posix_spawn_file_actions_t actions {};
+        bool valid {false};
+        actions_guard() {
+            valid = posix_spawn_file_actions_init(&actions) == 0;
+        }
+        ~actions_guard() {
+            if (valid)
+                posix_spawn_file_actions_destroy(&actions);
+        }
+        actions_guard(const actions_guard&) = delete;
+        actions_guard& operator=(const actions_guard&) = delete;
+    } guard;
+    /* without file actions neither the cwd nor the capture dup2 can be
+     * honoured — fail loudly (init only fails on OOM) instead of silently
+     * running in the wrong directory or dropping the requested capture */
+    if (!guard.valid)
         return std::unexpected(Error {Error::Kind::Io, "cannot init spawn file actions"});
+    auto& actions = guard.actions;
 
-    if (!cwd.empty() && have_actions &&
-        posix_spawn_file_actions_addchdir_np(&actions, cwd.c_str()) != 0) {
-        posix_spawn_file_actions_destroy(&actions);
-        return std::unexpected(Error {Error::Kind::Config, "cannot spawn in cwd '" + path_str(cwd) + "'"});
+    if (!cwd.empty()) {
+        const int chdir_rc = posix_spawn_file_actions_addchdir_np(&actions, cwd.c_str());
+        if (chdir_rc != 0) /* these actions return an error number, not -1 */
+            return std::unexpected(Error {
+                Error::Kind::Io,
+                "cannot spawn in cwd '" + path_str(cwd) + "': " + std::strerror(chdir_rc),
+            });
     }
 
     /* O_CLOEXEC: fetch_all and scan-deps spawn from several threads at once;
      * an inheritable pipe end leaks into the sibling children, which then hold
      * the write end open and delay this reader's EOF until they exit. The
      * dup2 file action clears the flag on the child's stdout/stderr copy. */
-    if (capture_mode && have_actions && cloexec_pipe(pipe_fd) != 0) {
-        posix_spawn_file_actions_destroy(&actions);
+    if (capture_mode && cloexec_pipe(pipe_fd) != 0)
         return std::unexpected(Error {Error::Kind::Io, std::string("cannot create capture pipe: ") + std::strerror(errno)});
-    }
-    if (capture_mode && have_actions) {
+    if (capture_mode) {
         posix_spawn_file_actions_adddup2(&actions, pipe_fd[1], STDOUT_FILENO);
         if (capture_mode == 1)
             posix_spawn_file_actions_adddup2(&actions, pipe_fd[1], STDERR_FILENO);
@@ -79,9 +95,7 @@ Result<ProcOutcome> run_impl(std::span<const std::string> argv, int capture_mode
 
     pid_t pid {};
     /* spawnp: search PATH like a shell, matching ninja/samu job semantics */
-    const int rc = posix_spawnp(&pid, cargv[0], have_actions ? &actions : nullptr, nullptr, cargv.data(), environ);
-    if (have_actions)
-        posix_spawn_file_actions_destroy(&actions);
+    const int rc = posix_spawnp(&pid, cargv[0], &actions, nullptr, cargv.data(), environ);
 
     if (rc != 0) {
         if (pipe_fd[0] != -1) { close(pipe_fd[0]); close(pipe_fd[1]); }
@@ -93,10 +107,16 @@ Result<ProcOutcome> run_impl(std::span<const std::string> argv, int capture_mode
 
     if (capture_mode && pipe_fd[1] != -1) {
         close(pipe_fd[1]);
-        std::array<char, 4096> buf {};
+        std::array<char, 4096> buf;
+        /* a runaway child must not grow the buffer without end: past the cap
+         * the pipe is drained (so the child never blocks) but dropped */
+        constexpr std::size_t kMaxCapture = 16u << 20;
         for (;;) {
             const ssize_t n = read(pipe_fd[0], buf.data(), buf.size());
-            if (n > 0) outcome.output.append(buf.data(), static_cast<size_t>(n));
+            if (n > 0) {
+                if (outcome.output.size() < kMaxCapture)
+                    outcome.output.append(buf.data(), static_cast<size_t>(n));
+            }
             else if (n == 0) break;
             else if (errno != EINTR) break;
         }

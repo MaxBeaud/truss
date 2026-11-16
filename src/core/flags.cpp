@@ -151,6 +151,11 @@ Hardening resolve_hardening(Hardening h) {
     return h == Hardening::Default ? Hardening::Light : h;
 }
 
+Warnings resolve_warnings(Warnings w) {
+    /* the default warning level is All (-Wall -Wextra) */
+    return w == Warnings::Default ? Warnings::All : w;
+}
+
 Result<void> require_supported(const TargetTriple& t) {
     if (t.family != CompilerFamily::Gcc && t.family != CompilerFamily::Clang &&
         t.family != CompilerFamily::Msvc)
@@ -293,8 +298,8 @@ Result<FlagSet> build_flags(const TargetTriple& triple, BuildMode mode,
         add_both(triple.stdlib == StdLib::Libcxx ? "-stdlib=libc++" : "-stdlib=libstdc++");
     add_both(target_flag(triple));
     if (msvc) add_both("/utf-8 /EHsc /nologo");
-    add_both(msvc ? kWarningFlagsMsvc[static_cast<std::size_t>(warnings)]
-                  : kWarningFlags[static_cast<std::size_t>(warnings)]);
+    const auto wi = static_cast<std::size_t>(resolve_warnings(warnings));
+    add_both(msvc ? kWarningFlagsMsvc[wi] : kWarningFlags[wi]);
     add_both(msvc ? kDebugFlagsMsvc[static_cast<std::size_t>(resolve_debug(mode, debug))]
                   : kDebugFlags[static_cast<std::size_t>(resolve_debug(mode, debug))]);
 
@@ -323,7 +328,8 @@ Result<FlagSet> build_flags(const TargetTriple& triple, BuildMode mode,
         if (hi >= static_cast<std::size_t>(Hardening::Medium))
             add(fs.compile, kHardeningStdlibDefines[hi]);
     }
-    if (pic && !msvc) add_both("-fPIC"); /* Windows has no position-independent code */
+    if (pic && !msvc && triple.os != Os::Windows)
+        add_both("-fPIC"); /* Windows has no position-independent code (MinGW ignores -fPIC) */
     if (mode == BuildMode::Release) add_both(msvc ? "/DNDEBUG" : "-DNDEBUG");
 
     for (const auto& d : defines) add_both((msvc ? "/D" : "-D") + d);
@@ -372,7 +378,7 @@ Result<LinkFlags> link_flags(const TargetTriple& triple, BuildMode mode, DebugIn
         }
         if (resolve_debug(mode, debug) != DebugInfo::None)
             add(lf.linker, "/DEBUG");
-        for (const auto& p : link_paths) add(lf.linker, "/LIBPATH:" + p);
+        for (const auto& p : link_paths) add(lf.linker, "/LIBPATH:\"" + p + "\"");
         for (const auto& l : libs) add(lf.linker, l + ".lib");
         if (!static_libs.empty())
             return std::unexpected(Error {

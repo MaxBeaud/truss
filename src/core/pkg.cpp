@@ -1,5 +1,6 @@
 module;
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <expected>
 #include <filesystem>
@@ -12,6 +13,12 @@ module;
 #include <vector>
 
 #include <cstdlib>
+#include <unistd.h>
+
+#if !defined(_WIN32)
+#include <fcntl.h>
+#include <sys/file.h>
+#endif
 
 #include <nlohmann/json.hpp>
 
@@ -22,6 +29,52 @@ import :impl;
 namespace truss {
 
 namespace {
+
+/* Unique staging path next to `p` (pid + sequence). Two fetches of the same
+ * package — two truss processes, or two packages sharing a url — must never
+ * share a temp file: one could rename the other's unverified bytes into the
+ * permanent cache. */
+std::filesystem::path staging_path(const std::filesystem::path& p) {
+    static std::atomic<unsigned> seq {0};
+    return p.string() + ".tmp." + std::to_string(::getpid()) + "."
+         + std::to_string(seq.fetch_add(1, std::memory_order_relaxed));
+}
+
+/* Advisory exclusive lock over the lockfile's read-modify-write: two
+ * concurrent truss processes must not lose each other's pins. Taken on the
+ * lockfile itself; write_lockfile publishes through temp+rename, so a third
+ * process opening the renamed file can in principle see a stale inode —
+ * self-healing (the pin is re-fetched and rewritten). POSIX only; a no-op
+ * elsewhere (single-user machines). */
+class lockfile_guard {
+public:
+    explicit lockfile_guard(const std::filesystem::path& file) {
+#if !defined(_WIN32)
+        fd_ = ::open(file.c_str(), O_CREAT | O_RDWR, 0666);
+        if (fd_ == -1)
+            return;
+        while (::flock(fd_, LOCK_EX) != 0)
+            if (errno != EINTR) {
+                ::close(fd_);
+                fd_ = -1;
+                return;
+            }
+#endif
+    }
+    lockfile_guard(const lockfile_guard&) = delete;
+    lockfile_guard& operator=(const lockfile_guard&) = delete;
+    ~lockfile_guard() {
+#if !defined(_WIN32)
+        if (fd_ != -1) {
+            ::flock(fd_, LOCK_UN);
+            ::close(fd_);
+        }
+#endif
+    }
+
+private:
+    int fd_ {-1};
+};
 
 /* --- truss.lock: tiny key=value pin file in the project root -------------- */
 
@@ -59,7 +112,7 @@ Result<void> run_tool(std::span<const std::string> argv, std::string_view what) 
 
 Result<void> git_fetch(const std::string& url, const std::string& ref,
                        const std::filesystem::path& dest) {
-    const std::filesystem::path tmp = dest.string() + ".tmp";
+    const std::filesystem::path tmp = staging_path(dest);
     std::error_code ec;
     std::filesystem::remove_all(tmp, ec); /* best effort */
     if (!looks_like_commit(ref)) {
@@ -87,9 +140,15 @@ Result<void> git_fetch(const std::string& url, const std::string& ref,
 Result<void> tarball_fetch(const std::string& url, const std::string& sha256,
                            const std::filesystem::path& cache_file) {
     std::error_code ec;
-    if (std::filesystem::exists(cache_file, ec))
-        return {};
-    const std::filesystem::path tmp = cache_file.string() + ".tmp";
+    if (std::filesystem::exists(cache_file, ec)) {
+        /* verify the cached bytes too: an entry written by an interrupted or
+         * raced earlier run must not be reused unchecked forever */
+        auto actual = fs::sha256_file(cache_file);
+        if (actual && *actual == sha256)
+            return {};
+        std::filesystem::remove(cache_file, ec); /* corrupt or unreadable: refetch */
+    }
+    const std::filesystem::path tmp = staging_path(cache_file);
     const std::vector<std::string> curl {"curl", "-fsSL", "--retry", "2", "-o", tmp.generic_string(), url};
     if (auto r = run_tool(curl, "curl"); !r) {
         std::filesystem::remove(tmp, ec);
@@ -144,10 +203,19 @@ Result<void> verify_no_escaping_links(const std::filesystem::path& dest) {
                                      /* absolute link target: escapes unless it stays inside */
                                      !std::filesystem::weakly_canonical(target, ec).generic_string()
                                           .starts_with(dest_str + "/") :
-                                     !std::filesystem::path(
-                                          (it->path().parent_path() / target).lexically_normal())
-                                          .generic_string()
-                                          .starts_with(dest_str + "/");
+                                     [&] {
+                                         /* compare like with like: canonicalize the link's
+                                          * parent too, or a symlinked project path (macOS
+                                          * /tmp) would flag every package-internal link */
+                                         std::error_code pc;
+                                         const auto parent = std::filesystem::weakly_canonical(
+                                             it->path().parent_path(), pc);
+                                         if (pc)
+                                             return true; /* cannot resolve: refuse the package */
+                                         return !std::filesystem::path((parent / target).lexically_normal())
+                                                       .generic_string()
+                                                       .starts_with(dest_str + "/");
+                                     }();
             if (ec)
                 return std::unexpected(Error {Error::Kind::Io, "cannot read symlink in package", it->path()});
             if (escapes)
@@ -176,8 +244,9 @@ Result<void> extract_tarball(const std::filesystem::path& tarball, const std::fi
         mode = "xf";
     const std::vector<std::string> argv {"tar", std::string(mode), tarball.generic_string(),
                                          "-C", dest.generic_string(), "--strip-components=1",
-                                         /* never restore ownership from the tarball (running as root) */
-                                         "--no-same-owner"};
+                                         /* never restore ownership or permission bits from the
+                                          * tarball (a hostile archive must not land setuid) */
+                                         "--no-same-owner", "--no-same-permissions"};
     if (auto r = run_tool(argv, "tar"); !r)
         return r;
     return verify_no_escaping_links(dest);
@@ -351,6 +420,10 @@ Result<Package> Project::fetch(std::string_view name, const FetchOptions& opts) 
     const std::filesystem::path dest = build_dir() / "packages" / pkg_name;
     const std::filesystem::path lock_file = cwd_ / "truss.lock";
 
+    /* the guard serializes the read-modify-write below against concurrent
+     * truss processes; it is held across the fetch (rare, and correctness
+     * beats concurrency here) */
+    const lockfile_guard lock_guard(lock_file);
     auto lock = detail::read_lockfile(lock_file);
     const auto pin_it = lock.find(lock_key(pkg_name));
     const bool pinned = pin_it != lock.end() && pin_it->second == pin;
@@ -373,12 +446,13 @@ Result<std::vector<Package>> Project::fetch_all(std::vector<std::pair<std::strin
     for (const auto& [name, opts] : requests)
         if (auto r = validate_fetch(name, opts); !r)
             return std::unexpected(r.error());
-    for (size_t i = 0; i < requests.size(); ++i)
-        for (size_t j = i + 1; j < requests.size(); ++j)
-            if (requests[i].first == requests[j].first)
-                return std::unexpected(Error {
-                    Error::Kind::Config, "fetch_all: duplicate package name '" + requests[i].first + "'",
-                });
+    /* duplicate names: linear via sort + adjacent_find */
+    auto names = requests | std::views::keys | std::ranges::to<std::vector>();
+    std::ranges::sort(names);
+    if (auto dup = std::ranges::adjacent_find(names); dup != names.end())
+        return std::unexpected(Error {
+            Error::Kind::Config, "fetch_all: duplicate package name '" + *dup + "'",
+        });
 
     struct Job {
         std::string name;
@@ -389,6 +463,9 @@ Result<std::vector<Package>> Project::fetch_all(std::vector<std::pair<std::strin
         Result<void> outcome {};
     };
     const std::filesystem::path lock_file = cwd_ / "truss.lock";
+    /* held across the pool: the final read-modify-write below must be atomic
+     * against concurrent truss processes (see lockfile_guard) */
+    const lockfile_guard lock_guard(lock_file);
     auto lock = detail::read_lockfile(lock_file);
     std::vector<Job> jobs;
     jobs.reserve(requests.size());
@@ -518,6 +595,31 @@ std::vector<std::string> json_str_array(const nlohmann::json& obj, const char* k
     return out;
 }
 
+/* Spec values become -I/-L/-l/-D flags inside rule commands that samurai runs
+ * through /bin/sh -c, and package specs come from remote package managers:
+ * treat them as untrusted and refuse anything a shell or the flag grammar
+ * would interpret (a hostile recipe must not reach command execution). */
+bool spec_value_is_safe(std::string_view v) {
+    if (v.empty())
+        return false;
+    for (const char c : v)
+        if (!(std::isalnum(static_cast<unsigned char>(c)) || c == '/' || c == '.'
+              || c == '_' || c == '-' || c == '+' || c == '='))
+            return false;
+    return true;
+}
+
+Result<void> check_spec_values(const std::vector<std::string>& values, std::string_view what) {
+    for (const auto& v : values)
+        if (!spec_value_is_safe(v))
+            return std::unexpected(Error {
+                Error::Kind::Fetch,
+                std::string("package spec has an unsupported ") + std::string(what) +
+                    " entry '" + v + "' (only letters, digits and ./_+-= are accepted)",
+            });
+    return {};
+}
+
 /* --- Project::conan ---------------------------------------------------------
  * Runs conan 2, parses the --format=json dependency graph, and returns one
  * Interface target ("conan") carrying the whole graph's usage requirements. */
@@ -547,15 +649,27 @@ Result<TargetRef> Project::conan(std::string_view conanfile) {
             fingerprint = *fp;
 
     std::vector<std::string> includes, link_paths, libs, defines;
-    const auto apply_spec = [&](const nlohmann::json& spec) {
+    const auto apply_spec = [&](const nlohmann::json& spec) -> Result<TargetRef> {
+        includes = json_str_array(spec, "includes");
+        link_paths = json_str_array(spec, "link_paths");
+        libs = json_str_array(spec, "libs");
+        defines = json_str_array(spec, "defines");
+        if (auto r = check_spec_values(includes, "include dir"); !r)
+            return std::unexpected(r.error());
+        if (auto r = check_spec_values(link_paths, "library path"); !r)
+            return std::unexpected(r.error());
+        if (auto r = check_spec_values(libs, "library"); !r)
+            return std::unexpected(r.error());
+        if (auto r = check_spec_values(defines, "define"); !r)
+            return std::unexpected(r.error());
         auto& iface = add_interface_library("conan");
-        for (const auto& d : json_str_array(spec, "includes"))
+        for (const auto& d : includes)
             iface.system_include_dirs(d);
-        for (const auto& d : json_str_array(spec, "link_paths"))
+        for (const auto& d : link_paths)
             iface.link_paths(d);
-        for (const auto& l : json_str_array(spec, "libs"))
+        for (const auto& l : libs)
             iface.link_libs(l);
-        for (const auto& d : json_str_array(spec, "defines"))
+        for (const auto& d : defines)
             iface.defines(d);
         return TargetRef {iface};
     };
@@ -597,17 +711,14 @@ Result<TargetRef> Project::conan(std::string_view conanfile) {
 
     auto dir_array = [](const nlohmann::json& obj, const char* key,
                         const std::filesystem::path& pkg_folder) {
-        std::vector<std::string> out;
-        if (obj.contains(key) && obj[key].is_array())
-            for (const auto& v : obj[key]) {
-                if (!v.is_string())
-                    continue;
-                std::filesystem::path p(v.get<std::string>());
-                if (p.is_relative() && !pkg_folder.empty())
-                    p = pkg_folder / p;
-                out.push_back(p.generic_string());
-            }
-        return out;
+        return json_str_array(obj, key)
+             | std::views::transform([&](const std::string& v) {
+                   std::filesystem::path p(v);
+                   if (p.is_relative() && !pkg_folder.empty())
+                       p = pkg_folder / p;
+                   return p.generic_string();
+               })
+             | std::ranges::to<std::vector>();
     };
 
     for (const auto& [id, node] : j["graph"]["nodes"].items()) {
@@ -699,25 +810,28 @@ Result<TargetRef> Project::vcpkg(std::vector<std::string> packages) {
             return std::unexpected(Error {
                 Error::Kind::Config, "vcpkg: no vcpkg.json in the project root and no packages listed",
             });
-        std::string body = "{\n  \"name\": \"" + name_ + "\",\n  \"version\": \"1.0.0\",\n  \"dependencies\": [";
-        for (size_t i = 0; i < packages.size(); ++i) {
-            if (i)
-                body += ",";
-            body += "\n    \"" + packages[i] + "\"";
-        }
-        body += "\n  ]\n}\n";
-        if (auto r = detail::write_file(manifest, body); !r)
+        const nlohmann::json body {
+            {"name", name_}, {"version", "1.0.0"}, {"dependencies", packages},
+        };
+        if (auto r = detail::write_file(manifest, body.dump(2) + "\n"); !r)
             return std::unexpected(r.error());
     }
 
     const TargetTriple triple = host_triple();
     if (triple.os != Os::Linux)
         return std::unexpected(Error {Error::Kind::Toolchain, "the vcpkg integration currently supports Linux only"});
-    std::string arch = "x64";
-    if (triple.arch == Arch::X86)
-        arch = "x86";
-    else if (triple.arch == Arch::Arm64)
-        arch = "arm64";
+    /* an unmapped architecture must not silently install x64 packages */
+    std::string arch;
+    switch (triple.arch) {
+    case Arch::X64: arch = "x64"; break;
+    case Arch::X86: arch = "x86"; break;
+    case Arch::Arm64: arch = "arm64"; break;
+    default:
+        return std::unexpected(Error {
+            Error::Kind::Toolchain,
+            "the vcpkg integration has no triplet for this architecture",
+        });
+    }
     const std::string triplet = arch + "-linux";
 
     const std::filesystem::path install_root = build_dir() / "vcpkg_installed";
@@ -739,12 +853,12 @@ Result<TargetRef> Project::vcpkg(std::vector<std::string> packages) {
         log::info("vcpkg: up to date (skipped vcpkg install)");
     } else {
         log::info("vcpkg install (" + triplet + ")");
-        /* manifest mode is auto-detected from vcpkg.json in the current directory,
-         * which is the project root (truss runs from cwd_) */
+        /* manifest mode is auto-detected from vcpkg.json in the process cwd:
+         * pass the project root explicitly instead of assuming they match */
         const std::vector<std::string> argv {exe, "install", "--triplet", triplet,
                                              "--x-install-root", install_root.generic_string(),
                                              "--no-print-usage"};
-        auto outcome = detail::run_process(argv, false);
+        auto outcome = detail::run_process(argv, false, cwd_);
         if (!outcome)
             return std::unexpected(outcome.error());
         if (outcome->exit_code != 0)
@@ -779,6 +893,8 @@ Result<TargetRef> Project::vcpkg(std::vector<std::string> packages) {
             if (!base.empty() && std::ranges::find(names, base) == names.end())
                 names.push_back(base);
         }
+        if (auto r = check_spec_values(names, "library"); !r)
+            return std::unexpected(r.error());
         for (const auto& n : names)
             iface.link_libs(n);
     }

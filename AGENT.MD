@@ -255,9 +255,13 @@ Read `PLAN.MD` first. This file is the rulebook for any agent/human modifying th
   overloads on all 7 paired builder methods (sources/include_dirs/defines/link_libs/
   link_paths/link_frameworks/framework_paths); guarded by a unit test.
 - **Transitive static-lib linking**: `dep_outputs` now walks `depends_on` transitively
-  (pre-order, deduped via a seen-set) so exe -> libA -> libB links in GNU ld order
-  (direct deps first, their deps to the right). Regression test:
-  `usage_test.cpp "link: transitive static-lib deps are linked in order"`.
+  (post-order, deduped via a seen-set, then reversed) so archives land
+  consumers-before-providers on the link line: every archive is ordered to the
+  right of everything that needs it, no matter which `depends_on()` edge reached
+  a shared provider first (a diamond exe -> runtime -> ir, exe -> compiler -> ir
+  puts libir.a after BOTH consumers). Regression tests:
+  `usage_test.cpp "link: transitive static-lib deps are linked in order"` and
+  `"link: a shared provider is ordered after every consumer (diamond)"`.
 - **samurai in-process re-entry bug**: the shim runs multiple builds per process, but
   upstream `logclose()`/`depsclose()` fclose their FILE* without NULLing it → the next
   `loginit`/`depsinit` double-frees. Vendored one-line patches (`/* truss patch */`),
@@ -852,3 +856,88 @@ merge_imports string round-trip, read_lines double-open).
 - Doxygen gotcha (found via docs-warning hunt): a backtick code span starting with
   `./` (e.g. `` `./truss` ``) emits unmatched <tt> warnings — write ./truss without
   backticks in doc comments. `./setup.sh docs` is now warning-free again (0 warnings).
+
+## 31. Review & hardening round (Nov 2026)
+
+All items below are covered by the unit suite (`./setup.sh unit`, 178 cases).
+
+- **Deducing-`this` builders (API)**: every `Target`/`CustomCommand` builder method is
+  now `template <class Self> Self& name(this Self& self, ...)` and returns the
+  *derived* type, so derived-only methods chain after base ones in any order
+  (`proj.add_custom_command("g").for_host().command({...})` compiles now; it used
+  to fail because `for_host()` returned `Target&`). Called through a `Target&`
+  the return is still `Target&` — source-compatible for existing scripts.
+  `sources_in`/`remove_source`/`depends_on(const Target&)` moved inline into
+  api.cppm (templates must live in the interface unit). AGENT.MD §2's "every
+  builder method returns Self&" is now literally true.
+- **`Warnings::Default` was silently no flags**: `kWarningFlags` was indexed by the
+  raw enum (Default = 0 → ""), while every other `Default` option resolves first.
+  Now `resolve_warnings(Default → All)`: the documented `-Wall -Wextra` is applied.
+  Every default build gained warnings — expect new diagnostics in older projects.
+- **PCH on GCC actually engages now**: the `-I<pch_dir>` went in *after* the
+  target's own include dirs, so GCC found the plain header (no adjacent .gch)
+  and silently skipped the PCH. The PCH dir is now the first include; `pch()`
+  paths are validated path-safe at configure (new Config error case).
+- **Archive link order**: `dep_outputs` walks post-order then reverses —
+  consumers-before-providers on the link line, fixing diamonds
+  (exe -> A -> X, exe -> B -> X used to emit `A X B`, leaving B's refs to X
+  unresolved) and the forge runtime/compiler/ir case.
+- **Module scanner skips non-code**: comments, plain strings, char literals and
+  raw strings (any encoding prefix, delimiters respected, `abcR"x"` still a
+  plain string) are blanked before the module/import regexes; newlines are
+  preserved so the line-anchored regexes keep working. Embedded-TS/HTML test
+  files no longer produce phantom imports.
+- **Transitive module imports are checked**: an unresolved module anywhere in a
+  unit's import closure is a Config error naming it and its importer (was:
+  silently dropped, opaque clang error later). `std`/`std.compat` exempt (wired
+  from the toolchain manifest, not target BMIs).
+- **Duplicate module names are a Config error** (two .cppm units declaring the
+  same module, within or across targets) — was: samurai "multiple rules" abort
+  or silent first-wins BMI wiring.
+- **Dry run (`-n`) has no side effects**: pre/post_build hooks don't fire and
+  `test`/`run` don't execute binaries (they report what would run).
+- **`clean` cannot be combined with other tasks** (it deleted the manifest the
+  rest of the run needed) — clear Config error instead.
+- **Fetch hardening**: staging names are unique per invocation (pid+seq) — two
+  concurrent fetches of the same package can no longer rename each other's
+  *unverified* bytes into the permanent cache; cached tarballs are re-verified
+  against the sha256 on every run (corrupt cache → refetch); lockfile
+  read-modify-write is serialized with an advisory `flock` (POSIX, best-effort
+  elsewhere); tarballs extract with `--no-same-permissions` (no setuid bits from
+  hostile archives); package-spec values (conan/vcpkg JSON → -I/-L/-l/-D) are
+  whitelist-validated — a hostile recipe cannot reach command execution; lockfile
+  comments are line-leading/whitespace-preceded `#` only (git tags may contain `#`).
+- **proc/fs hardening**: `write_file`'s temp is pid+counter and pre-unlinked (no
+  symlink-following on a predictable name); `reload`'s staging copy likewise and
+  keeps the binary's original mode (was: predictable name + 0700 downgrade);
+  `posix_spawn` file actions are RAII-guarded; a failed `file_actions_init` is
+  fatal (was: silently dropped the requested capture when cwd was empty);
+  `addchdir` failures report `Io` + `strerror` (was: `Config`); captured output
+  is capped at 16 MiB (drain-to-EOF past the cap so the child never blocks).
+- **Glob semantics**: a full `**` component matches whole components only
+  (`**/x.cpp` no longer matches `fox.cpp`, `a/**/b` no longer matches `a/xb`);
+  non-directory scan roots match nothing instead of erroring; mid-walk
+  increment errors degrade to the matches collected (like `fs::walk`).
+- **vcpkg/conan**: the vcpkg manifest is built with nlohmann (names with quotes
+  can't corrupt/inject JSON); unmapped host architectures are a Toolchain error
+  (was: silent x64 fallback); vcpkg install runs in the project cwd explicitly;
+  MSVC `/LIBPATH:` is quoted (spaces); `-fPIC` is not emitted for non-MSVC
+  Windows targets (MinGW ignores it); `flags: Warnings::Default` and the quoted
+  `/LIBPATH` are pinned by tests.
+- **Path safety**: `path_is_safe` also rejects quotes, backticks, shell
+  metacharacters (`; | & < > ( ) \ # ~ * ?`) and control characters — these
+  strings end up in ninja statements run via `/bin/sh -c` and in `ar -M` MRI
+  scripts. `sources_in("")` no longer globs `/**.cpp` (contributes nothing →
+  'has no sources' validation fires); a bare `import_archive("libfoo.so")` no
+  longer emits a dangling `-Wl,-rpath,`.
+- **Modernization notes**: `std::function` is gone from src (deducing-this
+  recursive lambdas everywhere; `TaskFn` stays `std::function` because this
+  libc++ does not ship `std::move_only_function` yet — revisit when it does);
+  `split_words`/partition-list splitting via `std::views::split`; duplicate
+  checks (`fetch_all`, target names, task names, custom-command outputs) via
+  sort + `adjacent_find`; `ranges::contains`/`views::keys`/`ranges::to` where
+  they read better; one shared `detail::split_env_list` for the PATH-style
+  walks (os.cpp + fs.cpp); `os::spawn` unwraps via `expected::transform`.
+  NOT done on purpose: wholesale `and_then`-chaining of the error checks
+  (churn without behavioral gain), `views::join_with` for `join_spaced`
+  (libc++ support uncertain).

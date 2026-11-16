@@ -49,25 +49,40 @@ std::optional<std::filesystem::path> find_program_uncached(std::string_view name
     const std::string_view paths = (path_var != nullptr && *path_var != '\0')
                                        ? std::string_view {path_var}
                                        : std::string_view {"/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"};
-    size_t start = 0;
-    while (start <= paths.size()) {
-        const size_t sep = paths.find(':', start);
-        std::string_view dir = paths.substr(start, sep == std::string_view::npos ? std::string_view::npos : sep - start);
-        if (dir.empty())
-            dir = ".";
+    for (const std::string_view entry : detail::split_env_list(paths)) {
+        const std::string_view dir = entry.empty() ? std::string_view {"."} : entry;
         std::filesystem::path candidate {std::string(dir) + "/" + std::string(name)};
         if (usable(candidate)) {
             std::filesystem::path abs = std::filesystem::absolute(candidate, ec);
             return ec ? candidate : abs;
         }
-        if (sep == std::string_view::npos)
-            break;
-        start = sep + 1;
     }
     return std::nullopt;
 }
 
 } // namespace
+
+} // namespace truss::os
+
+namespace truss::detail {
+
+std::vector<std::string_view> split_env_list(std::string_view value) {
+    std::vector<std::string_view> out;
+    size_t start = 0;
+    while (start <= value.size()) {
+        const size_t sep = value.find(':', start);
+        out.push_back(value.substr(start, sep == std::string_view::npos ? std::string_view::npos
+                                                                        : sep - start));
+        if (sep == std::string_view::npos)
+            break;
+        start = sep + 1;
+    }
+    return out;
+}
+
+} // namespace truss::detail
+
+namespace truss::os {
 
 std::optional<std::filesystem::path> find_program(std::string_view name) {
     /* memoized (incl. misses): every build probes the same handful of
@@ -175,10 +190,8 @@ std::filesystem::path temp_dir() {
 
 namespace {
 Result<ProcessResult> spawn(std::span<const std::string> argv, bool capture, const RunOptions& opts) {
-    auto outcome = detail::run_process(argv, capture, opts.cwd);
-    if (!outcome)
-        return std::unexpected(outcome.error());
-    return ProcessResult {outcome->exit_code, std::move(outcome->output)};
+    return detail::run_process(argv, capture, opts.cwd)
+        .transform([](auto outcome) { return ProcessResult {outcome.exit_code, std::move(outcome.output)}; });
 }
 } // namespace
 

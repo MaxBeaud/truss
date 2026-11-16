@@ -202,7 +202,9 @@ truss, run `./bootstrap.sh` yourself.
 | `add_custom_command(name)` | generated files under `build/<mode>/gen/<name>/` | same |
 
 Target names must be bare names (no path separators, no platform extensions —
-truss adds them). Every builder method returns `Target&`, so you can chain:
+truss adds them). Every builder method is a deducing-`this` template returning
+the target's own type (`StaticLib&`, `Executable&`, `CustomCommand&`, ...), so
+you can chain — including derived-only methods after base ones, in any order:
 
 ```cpp
 auto& net = proj.add_static_library("net")
@@ -331,11 +333,14 @@ proj.add_static_library("core").sources_in("src").pch("include/stdinc.hpp");
 ```
 
 clang uses `-include-pch`; GCC generates a `.gch` and finds it through
-`-I`/`-include`. The PCH output lives under `build/<mode>/pch/<target>/` and
+`-I`/`-include`, with the PCH directory searched **ahead of every other
+include dir** so the `.gch` is picked up even when the header's own directory
+is also an include dir. The PCH output lives under `build/<mode>/pch/<target>/` and
 is dependency-tracked like any other edge (editing the PCH header rebuilds
 the target's objects; editing one source rebuilds only that object). Module
 BMI rules and C sources never use the PCH, and MSVC targets are a clear
-`Config` error in v0.
+`Config` error in v0. The header path must be path-safe (no spaces, shell or
+ninja metacharacters — a `Config` error otherwise).
 
 ### Unity builds
 
@@ -598,9 +603,12 @@ auto pkgs = proj.fetch_all({
 
 Exactly one of `git+tag` (shallow clone pinned to a tag/branch/commit) or
 `url+sha256` (`.tar.gz`/`.tar.xz` verified against the hash) must be set.
-Downloads are cached in `~/.cache/truss`, materialized into
-`build/<mode>/packages/<name>`, and pinned in a `truss.lock` file next to your
-build script — so CI gets the same tree without a network round trip.
+Downloads are cached in `~/.cache/truss` (the cached tarball's hash is
+re-verified on every run — a corrupted cache entry is re-downloaded, never
+reused), materialized into `build/<mode>/packages/<name>`, and pinned in a
+`truss.lock` file next to your build script — so CI gets the same tree without
+a network round trip. Lockfile updates are serialized with an advisory file
+lock, so concurrent truss processes cannot lose each other's pins.
 
 Git trees are materialized with hardlinks (instant, no extra disk; real copies
 across filesystems). Caveat: a hardlinked fetched file shares its inode with

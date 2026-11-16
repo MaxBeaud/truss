@@ -54,15 +54,19 @@ std::string_view mode_dir_name(BuildMode m) {
 
 bool path_is_safe(const std::filesystem::path& p) {
     const std::string s = p.generic_string();
-    return s.find_first_of(" \t:$") == std::string::npos;
+    /* these strings end up in ninja build statements (executed by samurai
+     * through /bin/sh -c) and in `ar -M` MRI scripts, so anything the shell,
+     * ninja or the MRI lexer would interpret is refused up front */
+    return s.find_first_of(" \t:$\"'`;|&<>()\\#~*?") == std::string::npos
+        && std::ranges::none_of(s, [](unsigned char c) { return c < 0x20 || c == 0x7f; });
 }
 
-/* Split a command prefix on spaces ("qemu-aarch64 -L /sysroot" -> 3 words). */
+/* Split a command prefix on spaces ("qemu-aarch64 -L /sysroot" -> 3 words);
+ * runs of whitespace collapse, like stream extraction. */
 std::vector<std::string> split_words(std::string_view s) {
     std::vector<std::string> words;
-    std::istringstream in {std::string(s)};
-    for (std::string w; in >> w;)
-        words.push_back(std::move(w));
+    for (auto word : std::views::split(s, ' ') | std::views::filter([](auto w) { return !w.empty(); }))
+        words.emplace_back(word.begin(), word.end());
     return words;
 }
 
@@ -357,7 +361,7 @@ Result<void> validate(const std::vector<std::unique_ptr<Target>>& targets) {
                 "target name '" + name + "' must not carry a platform extension; truss adds it automatically",
             });
         if (!path_is_safe(std::filesystem::path(name)))
-            return std::unexpected(Error {Error::Kind::Config, "target name '" + name + "' contains unsupported characters (spaces, ':', '$')"});
+            return std::unexpected(Error {Error::Kind::Config, "target name '" + name + "' contains unsupported characters"});
 
         if (t->kind() == TargetKind::CustomCommand) {
             const auto& cc = static_cast<const CustomCommand&>(*t);
@@ -423,19 +427,26 @@ Result<void> validate(const std::vector<std::unique_ptr<Target>>& targets) {
                         p,
                     });
             }
-            for (size_t i = 0; i < cc.outputs().size(); ++i)
-                for (size_t j = i + 1; j < cc.outputs().size(); ++j)
-                    if (cc.outputs()[i] == cc.outputs()[j])
-                        return std::unexpected(Error {
-                            Error::Kind::Config,
-                            "custom command '" + name + "': duplicate output '" + cc.outputs()[i] + "'",
-                        });
+            /* duplicate outputs: linear via sort + adjacent_find */
+            auto outs = cc.outputs();
+            std::ranges::sort(outs);
+            if (auto dup = std::ranges::adjacent_find(outs); dup != outs.end())
+                return std::unexpected(Error {
+                    Error::Kind::Config,
+                    "custom command '" + name + "': duplicate output '" + *dup + "'",
+                });
         }
     }
-    for (size_t i = 0; i < targets.size(); ++i)
-        for (size_t j = i + 1; j < targets.size(); ++j)
-            if (targets[i]->name() == targets[j]->name())
-                return std::unexpected(Error {Error::Kind::Config, "duplicate target name '" + targets[i]->name() + "'"});
+    /* duplicate target names: linear via sort + adjacent_find */
+    {
+        std::vector<std::string_view> names;
+        names.reserve(targets.size());
+        for (const auto& t : targets)
+            names.push_back(t->name());
+        std::ranges::sort(names);
+        if (auto dup = std::ranges::adjacent_find(names); dup != names.end())
+            return std::unexpected(Error {Error::Kind::Config, "duplicate target name '" + std::string(*dup) + "'"});
+    }
     return {};
 }
 
@@ -563,9 +574,11 @@ Result<void> emit_manifest(const Project& proj, std::vector<ResolvedTarget>& res
      * when any target compiles with zig (rules are shared by all targets) */
     if (std::ranges::any_of(resolved, [](const ResolvedTarget& r) { return detail::is_zig(r.triple); }))
         launcher->clear();
+    /* double quotes work in both /bin/sh and cmd.exe (ninja's shell on
+     * Windows); single quotes would break a spaced ccache path there */
     const std::string launch = launcher->empty()
         ? std::string {}
-        : (launcher->find(' ') == std::string::npos ? *launcher : "'" + *launcher + "'") + " ";
+        : (launcher->find(' ') == std::string::npos ? *launcher : "\"" + *launcher + "\"") + " ";
 
     w.rule("compile_cxx", {
         {"command", launch + "$cxx $flags -MMD -MF $depfile -c $in -o $out"},
@@ -760,6 +773,15 @@ Result<void> emit_manifest(const Project& proj, std::vector<ResolvedTarget>& res
         std::vector<std::string> defines = t.defines();
         defines.insert(defines.end(), usage.defines.begin(), usage.defines.end());
 
+        /* GCC finds a PCH only through the include search: the .gch must sit in
+         * the FIRST -I directory containing the header. The target's own -I
+         * dirs (inside usage.includes) usually contain the header too — without
+         * a .gch next to it — so the PCH dir goes ahead of all of them (clang's
+         * -include-pch names the file and is immune to the order). */
+        std::vector<std::string> includes = usage.includes;
+        if (r.triple.family == CompilerFamily::Gcc && !t.pch().empty())
+            includes.insert(includes.begin(), (build_dir / "pch" / t.name()).generic_string());
+
         /* public flags (self + deps) first, so the target's private flags() win */
         std::string user_flags;
         for (const auto& f : usage.flags)
@@ -768,7 +790,7 @@ Result<void> emit_manifest(const Project& proj, std::vector<ResolvedTarget>& res
 
         auto cflags = detail::build_flags(r.triple, proj.mode(), t.cpp_standard(), t.warnings(),
                                           t.debug_info(), t.optimization(), t.sanitizer(), t.lto(),
-                                          t.hardening(), pic, defines, usage.includes, user_flags,
+                                          t.hardening(), pic, defines, includes, user_flags,
                                           usage.system_includes);
         if (!cflags)
             return std::unexpected(cflags.error());
@@ -829,7 +851,9 @@ Result<void> emit_manifest(const Project& proj, std::vector<ResolvedTarget>& res
             const std::string pch_dir = (build_dir / "pch" / t.name()).generic_string();
             if (r.triple.family == CompilerFamily::Gcc) {
                 pch_out = pch_dir + "/" + base + ".gch";
-                pch_flag = "-I" + pch_dir + " -include " + base;
+                /* the -I<pch_dir> is emitted ahead of every other -I (see the
+                 * includes assembly above); here only the forced inclusion */
+                pch_flag = "-include " + base;
             } else {
                 pch_out = pch_dir + "/" + base + ".pch";
                 pch_flag = "-include-pch " + pch_out;
@@ -1032,16 +1056,17 @@ Result<void> emit_manifest(const Project& proj, std::vector<ResolvedTarget>& res
         }
 
         /* dependency outputs (static archives / shared libs), transitive via
-         * depends_on. Pre-order with dedupe gives GNU ld the right order:
-         * direct deps first, their deps to the right of the archives that
-         * need them. */
+         * depends_on. Post-order walk, then reversed: every archive lands to
+         * the right of everything that consumes it and to the left of
+         * everything that provides it (GNU ld resolves left to right), no
+         * matter which depends_on() edge reached a shared provider first. */
         std::vector<std::string> dep_outputs;
         std::set<std::string> import_rpath_dirs; /* imported .so/.dylib directories */
         bool has_shared_dep = false;
         const bool static_consumer = t.static_deps_enabled();
         std::set<const Target*> dep_seen {&t};
-        std::function<Result<void>(const Target&)> add_dep_outputs =
-            [&](const Target& d) -> Result<void> {
+        std::vector<const ResolvedTarget*> dep_order; /* post-order: providers before consumers */
+        auto collect_dep_order = [&](this auto&& self, const Target& d) -> Result<void> {
             for (const Target* dep : d.deps()) {
                 if (!dep_seen.insert(dep).second)
                     continue;
@@ -1056,34 +1081,40 @@ Result<void> emit_manifest(const Project& proj, std::vector<ResolvedTarget>& res
                         Error::Kind::Config,
                         "target '" + d.name() + "' depends on unknown target '" + dep->name() + "'",
                     });
-                if (dep->kind() == TargetKind::ImportedLibrary) {
-                    /* prebuilt files land on the link line verbatim, ordered
-                     * with the dep walk like built artifacts; an imported
-                     * shared object needs an rpath to its directory */
-                    for (const auto& a : dep->import_archives()) {
-                        dep_outputs.push_back(a);
-                        const std::string fname = std::filesystem::path(a).filename().generic_string();
-                        if (fname.ends_with(".so") || fname.contains(".so.") || fname.ends_with(".dylib"))
-                            import_rpath_dirs.insert(std::filesystem::path(a).parent_path().generic_string());
-                    }
-                } else if (dep->kind() != TargetKind::SharedLibrary)
-                    dep_outputs.push_back(it->second->output);
-                /* MSVC links against a dll's import lib, never the dll;
-                 * static_deps() consumers link a shared lib's static twin */
-                else if (static_consumer)
-                    dep_outputs.push_back(it->second->static_twin);
-                else {
-                    dep_outputs.push_back(it->second->implib.empty() ? it->second->output
-                                                                      : it->second->implib);
-                    has_shared_dep = true;
-                }
-                if (auto sub = add_dep_outputs(*dep); !sub)
+                if (auto sub = self(*dep); !sub)
                     return std::unexpected(sub.error());
+                dep_order.push_back(it->second);
             }
             return {};
         };
-        if (auto sub = add_dep_outputs(t); !sub)
+        if (auto sub = collect_dep_order(t); !sub)
             return std::unexpected(sub.error());
+        /* consumers before providers on the link line; each dep's own archive
+         * list keeps its given order */
+        for (const ResolvedTarget* dep : std::views::reverse(dep_order)) {
+            if (dep->target->kind() == TargetKind::ImportedLibrary) {
+                /* prebuilt files land on the link line verbatim, ordered
+                 * with the dep walk like built artifacts; an imported
+                 * shared object needs an rpath to its directory */
+                for (const auto& a : dep->target->import_archives()) {
+                    dep_outputs.push_back(a);
+                    const std::string fname = std::filesystem::path(a).filename().generic_string();
+                    const std::string dir = std::filesystem::path(a).parent_path().generic_string();
+                    if ((fname.ends_with(".so") || fname.contains(".so.") || fname.ends_with(".dylib"))
+                        && !dir.empty()) /* a bare filename sits in the cwd: no rpath */
+                        import_rpath_dirs.insert(dir);
+                }
+            } else if (dep->target->kind() != TargetKind::SharedLibrary)
+                dep_outputs.push_back(dep->output);
+            /* MSVC links against a dll's import lib, never the dll;
+             * static_deps() consumers link a shared lib's static twin */
+            else if (static_consumer)
+                dep_outputs.push_back(dep->static_twin);
+            else {
+                dep_outputs.push_back(dep->implib.empty() ? dep->output : dep->implib);
+                has_shared_dep = true;
+            }
+        }
 
         /* std.o defines the module initializer: link it exactly once per
          * artifact, never inside an archive (a second copy is a duplicate
@@ -1093,7 +1124,7 @@ Result<void> emit_manifest(const Project& proj, std::vector<ResolvedTarget>& res
         if (t.kind() != TargetKind::StaticLibrary) {
             bool want_std = r.needs_std || r.needs_std_compat, want_compat = r.needs_std_compat;
             std::set<const Target*> std_seen {&t};
-            std::function<void(const Target&)> walk = [&](const Target& d) {
+            auto walk = [&](this auto&& self, const Target& d) -> void {
                 for (const Target* dep : d.deps()) {
                     if (!std_seen.insert(dep).second)
                         continue;
@@ -1104,7 +1135,7 @@ Result<void> emit_manifest(const Project& proj, std::vector<ResolvedTarget>& res
                         continue;
                     want_std |= it->second->needs_std || it->second->needs_std_compat;
                     want_compat |= it->second->needs_std_compat;
-                    walk(*dep);
+                    self(*dep);
                 }
             };
             walk(t);
@@ -1267,30 +1298,6 @@ Result<void> emit_manifest(const Project& proj, std::vector<ResolvedTarget>& res
 }
 
 } // namespace
-
-/* --- Target ------------------------------------------------------------- */
-
-Target& Target::sources_in(std::string_view dir) {
-    std::string d(dir);
-    while (!d.empty() && (d.back() == '/' || d.back() == '\\'))
-        d.pop_back();
-    source_patterns_.push_back(d + "/**.cpp");
-    source_patterns_.push_back(d + "/**.cc");
-    source_patterns_.push_back(d + "/**.cxx");
-    source_patterns_.push_back(d + "/**.c");
-    source_patterns_.push_back(d + "/**.cppm");
-    return *this;
-}
-
-Target& Target::remove_source(std::string_view path) {
-    removed_sources_.emplace_back(path);
-    return *this;
-}
-
-Target& Target::depends_on(const Target& dep) {
-    deps_.push_back(&dep);
-    return *this;
-}
 
 /* --- Project ------------------------------------------------------------ */
 
@@ -1547,14 +1554,24 @@ Result<void> Project::build() {
         });
 
     /* user task registry: checked first so `task list` reports it too */
-    for (std::size_t i = 0; i < user_tasks_.size(); ++i) {
-        const auto& name = user_tasks_[i].name;
-        Error bad {Error::Kind::Config, ""};
-        if (name.empty() || name == "list" || name.starts_with('-'))
-            bad.message = "invalid task name '" + name + "' (empty, 'list' and '-'-prefixed names are reserved)";
-        else if (std::ranges::any_of(user_tasks_ | std::views::take(i), [&](const UserTask& u) { return u.name == name; }))
-            bad.message = "task '" + name + "' is registered twice";
-        if (!bad.message.empty()) {
+    for (const auto& t : user_tasks_) {
+        const auto& name = t.name;
+        if (name.empty() || name == "list" || name.starts_with('-')) {
+            Error bad {Error::Kind::Config,
+                       "invalid task name '" + name + "' (empty, 'list' and '-'-prefixed names are reserved)"};
+            log::error(bad);
+            return std::unexpected(bad);
+        }
+    }
+    /* duplicate registration: linear via sort + adjacent_find */
+    {
+        std::vector<std::string_view> task_names;
+        task_names.reserve(user_tasks_.size());
+        for (const auto& t : user_tasks_)
+            task_names.push_back(t.name);
+        std::ranges::sort(task_names);
+        if (auto dup = std::ranges::adjacent_find(task_names); dup != task_names.end()) {
+            Error bad {Error::Kind::Config, "task '" + std::string(*dup) + "' is registered twice"};
             log::error(bad);
             return std::unexpected(bad);
         }
@@ -1581,7 +1598,13 @@ Result<void> Project::build() {
 
     /* clean-only: never resolve sources or emit a manifest just to delete it;
      * clean also works on a project whose sources are broken */
-    if (std::ranges::all_of(tasks, [](const std::string& t) { return t == "clean"; })) {
+    if (std::ranges::any_of(tasks, [](const std::string& t) { return t == "clean"; })) {
+        if (tasks.size() > 1)
+            return std::unexpected(Error {
+                Error::Kind::Config,
+                "'clean' deletes the whole build directory and cannot be combined with other "
+                "tasks (./truss clean, then rerun the rest)",
+            });
         if (auto r = detail::remove_tree(bld); !r) {
             log::error(r.error());
             return std::unexpected(r.error());
@@ -1736,6 +1759,14 @@ Result<void> Project::build() {
                 r.cmd_outputs.push_back((bld / "gen" / t->name() / "output").generic_string());
         }
 
+        /* pch(): the path lands in -include/-include-pch flags and a ninja
+         * edge input — refuse anything the flag grammar or shell would break */
+        if (!t->pch().empty() && !path_is_safe(std::filesystem::path(t->pch())))
+            return std::unexpected(Error {
+                Error::Kind::Config,
+                "target '" + t->name() + "': pch('" + t->pch() + "') contains unsupported characters",
+            });
+
         /* import_archive() is an ImportedLibrary-only builder: on anything
          * buildable the intent is ambiguous (sources or prebuilt?) */
         if (!t->import_archives().empty() && t->kind() != TargetKind::ImportedLibrary)
@@ -1756,7 +1787,7 @@ Result<void> Project::build() {
                 return std::unexpected(Error {
                     Error::Kind::Config,
                     "target '" + t->name() + "': import_archive('" + a +
-                        "') contains unsupported characters (spaces, ':', '$')",
+                        "') contains unsupported characters",
                     std::filesystem::path(a),
                 });
             if (a.starts_with('-'))
@@ -1927,6 +1958,27 @@ Result<void> Project::build() {
         resolved.push_back(std::move(r));
     }
 
+    /* a module name must have exactly one source: two .cppm files declaring
+     * the same module would emit two compile_bmi edges for one BMI (samurai
+     * refuses the manifest), and across targets the BMI wiring would silently
+     * pick whichever target the dep walk reached first */
+    {
+        std::map<std::string, std::string, std::less<>> module_owner;
+        for (const auto& r : resolved)
+            for (const auto& u : r.units)
+                if (u.is_bmi_source && !u.module_name.empty()) {
+                    const auto [it, inserted] =
+                        module_owner.try_emplace(u.module_name, r.target->name());
+                    if (!inserted)
+                        return std::unexpected(Error {
+                            Error::Kind::Config,
+                            "module '" + u.module_name + "' is exported by both target '" +
+                                it->second + "' and target '" + r.target->name() +
+                                "': a module must have exactly one interface unit",
+                        });
+                }
+    }
+
     /* generate the manifest */
     NinjaWriter w;
     if (auto r = emit_manifest(*this, resolved, bld, w); !r) {
@@ -1944,10 +1996,11 @@ Result<void> Project::build() {
     const TaskContext ctx {name_, mode_, bld, cwd_, jobs_, verbose_};
 
     /* build hooks: pre_build once before the first compile step, post_build
-     * once after the first successful one; a failing hook aborts */
+     * once after the first successful one; a failing hook aborts. A dry run
+     * reports the graph without side effects, so hooks never fire. */
     bool hooks_pre_done = false, hooks_post_done = false;
     auto run_samu = [&](std::span<const std::string> targets) -> Result<void> {
-        if (!hooks_pre_done) {
+        if (!hooks_pre_done && !dry_run_) {
             for (auto& fn : pre_build_)
                 if (auto r = fn(ctx); !r)
                     return r;
@@ -1955,7 +2008,7 @@ Result<void> Project::build() {
         }
         if (auto r = detail::samu_build(manifest.generic_string(), jobs_, verbose_, dry_run_, explain_, targets); !r)
             return r;
-        if (!hooks_post_done) {
+        if (!hooks_post_done && !dry_run_) {
             for (auto& fn : post_build_)
                 if (auto r = fn(ctx); !r)
                     return r;
@@ -2032,9 +2085,12 @@ Result<void> Project::build() {
                     });
                 }
 
-                // Create a temporary file next to the current executable
+                // Create a temporary file next to the current executable:
+                // pid-suffixed staging name (like fs::write_file's temp), so
+                // two concurrent truss runs never clobber each other's copy
+                // and a pre-placed symlink at a predictable name is not followed
                 auto temp_path = current_exe;
-                temp_path += ".tmp_reload";
+                temp_path += ".tmp_reload." + std::to_string(::getpid());
                 
                 // Copy the new binary to temp location
                 std::filesystem::copy_file(truss_rt->output, temp_path,
@@ -2047,8 +2103,10 @@ Result<void> Project::build() {
                     });
                 }
 
-                // Make executable
-                std::filesystem::permissions(temp_path, std::filesystem::perms::owner_all, ec);
+                // Make executable: keep the running binary's mode rather than
+                // downgrading the reloaded binary to owner-only
+                std::filesystem::permissions(
+                    temp_path, std::filesystem::status(current_exe).permissions(), ec);
                 if (ec) {
                     const std::string why = ec.message();
                     std::filesystem::remove(temp_path, ec);
@@ -2086,11 +2144,13 @@ Result<void> Project::build() {
                     log::warn("no targets marked is_test(); nothing to run");
                     return {};
                 }
-                std::vector<std::string> to_build;
-                for (const auto& [exe, cross] : tests)
-                    to_build.push_back(exe);
+                std::vector<std::string> to_build = tests | std::views::keys | std::ranges::to<std::vector>();
                 if (auto r = run_samu(to_build); !r)
                     return r;
+                if (dry_run_) { /* a dry run must not execute the test binaries */
+                    log::info("dry run: would run " + std::to_string(tests.size()) + " test(s)");
+                    return {};
+                }
                 const bool has_runner = config_.runner_set() && !config_.runner().empty();
                 int failures = 0, skipped = 0;
                 for (const auto& [exe, cross] : tests) {
@@ -2148,6 +2208,10 @@ Result<void> Project::build() {
                               + " executables; pick one with --target NAME)");
                 if (auto r = run_samu(std::span(exe_outputs).first(1)); !r)
                     return r;
+                if (dry_run_) { /* a dry run must not execute the binary */
+                    log::info("dry run: would run " + exe_outputs.front());
+                    return {};
+                }
                 auto argv = exec_argv(config_, exe_cross.front(), exe_outputs.front());
                 argv.insert(argv.end(), run_args_.begin(), run_args_.end());
                 auto outcome = detail::run_process(argv, false);

@@ -49,6 +49,18 @@ TEST_CASE("flags: defaults per mode") {
     CHECK(contains(rel->compile, "-DNDEBUG"));
 }
 
+TEST_CASE("flags: Warnings::Default is -Wall -Wextra (as documented)") {
+    const auto t = clang_triple();
+    const std::array<std::string, 0> none {};
+    auto r = detail::build_flags(t, BuildMode::Debug, CppStandard::Default, Warnings::Default,
+                                 DebugInfo::Default, Optimization::Default, Sanitizer::Default,
+                                 Lto::Default, Hardening::None, false, none, none, "");
+    REQUIRE(r.has_value());
+    CHECK(contains(r->compile, "-Wall -Wextra"));
+    CHECK_FALSE(contains(r->compile, "-Wpedantic"));
+    CHECK_FALSE(contains(r->compile, "-w"));
+}
+
 TEST_CASE("flags: explicit options win over mode defaults") {
     const auto t = clang_triple();
     const std::array<std::string, 0> none {};
@@ -175,7 +187,7 @@ TEST_CASE("flags: MSVC link flags split driver-side vs after /link") {
     CHECK(contains(r->linker, "/INCREMENTAL:NO"));
     CHECK(contains(r->linker, "/LTCG"));
     CHECK(contains(r->linker, "/DEBUG"));
-    CHECK(contains(r->linker, "/LIBPATH:build/lib"));
+    CHECK(contains(r->linker, "/LIBPATH:\"build/lib\""));
     CHECK(contains(r->linker, "foo.lib"));
     CHECK_FALSE(contains(r->linker, "-lfoo"));
     CHECK(contains(r->linker, "/SUBSYSTEM:CONSOLE"));

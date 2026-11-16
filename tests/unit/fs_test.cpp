@@ -41,6 +41,24 @@ TEST_CASE("fs: make_dirs and remove_tree") {
     CHECK_FALSE(std::filesystem::exists(p));
 }
 
+TEST_CASE("fs: lockfile comments are line-leading only (pins may contain #)") {
+    const auto p = std::filesystem::temp_directory_path() / "truss-test-lock/truss.lock";
+    std::filesystem::remove_all(p.parent_path());
+    REQUIRE(detail::write_file(p,
+                               "# comment line\n"
+                               "pkg.zlib = v1.2#not-a-comment\n"
+                               "   # indented comment\n"
+                               "pkg.fmt = 11.0.2\n"
+                               "\n"
+                               "no-key-line\n")
+                .has_value());
+    const auto lock = detail::read_lockfile(p);
+    CHECK(lock.size() == 2);
+    CHECK(lock.at("pkg.zlib") == "v1.2#not-a-comment");
+    CHECK(lock.at("pkg.fmt") == "11.0.2");
+    std::filesystem::remove_all(p.parent_path());
+}
+
 TEST_CASE("proc: run_process captures stdout+stderr and exit code") {
     const std::array<std::string, 3> argv {"sh", "-c", "echo out; echo err >&2; exit 3"};
     auto r = detail::run_process(argv, true);

@@ -80,6 +80,58 @@ TEST_CASE("link: transitive static-lib deps are linked in order") {
     REQUIRE(r.has_value());
 }
 
+TEST_CASE("link: a shared provider is ordered after every consumer (diamond)") {
+    /* exe -> runtime -> ir and exe -> compiler -> ir, with the ir symbol
+     * referenced only by compiler. Archives must go consumers-before-
+     * providers: libir.a has to land to the right of BOTH consumers, or the
+     * single left-to-right ld pass extracts nothing for a symbol nobody
+     * referenced yet (the pre-order dedupe kept the first occurrence, so
+     * depends_on(runtime) before depends_on(compiler) put libir.a before
+     * libcompiler.a and broke the link). */
+    ScratchDir scratch {"diamond"};
+    char prog[] = "truss-tests";
+    char* argv[] = {prog};
+    Project proj("diamond", 1, argv);
+
+    REQUIRE(detail::write_file("ir/sym.cpp", "int ir_sym() { return 5; }\n").has_value());
+    auto& ir = proj.add_static_library("ir").sources("ir/sym.cpp");
+
+    /* runtime depends on ir (header-only usage: no symbol reference) */
+    REQUIRE(detail::write_file("runtime/use.cpp", "int runtime_fn() { return 3; }\n").has_value());
+    auto& runtime = proj.add_static_library("runtime").sources("runtime/use.cpp").depends_on(ir);
+
+    /* compiler references the out-of-line ir symbol */
+    REQUIRE(detail::write_file("compiler/use.cpp",
+                               "int ir_sym();\nint compiler_fn() { return ir_sym() + 1; }\n")
+                  .has_value());
+    auto& compiler = proj.add_static_library("compiler").sources("compiler/use.cpp").depends_on(ir);
+
+    REQUIRE(detail::write_file("app/main.cpp",
+                               "int runtime_fn();\nint compiler_fn();\n"
+                               "int main() { return runtime_fn() + compiler_fn() == 9 ? 0 : 1; }\n")
+                  .has_value());
+    proj.add_executable("app").sources("app/main.cpp").depends_on(runtime).depends_on(compiler);
+
+    auto r = proj.build();
+    INFO((r ? "build ok" : r.error().message));
+    REQUIRE(r.has_value());
+
+    /* and the manifest orders them consumers-first on the app's link edge */
+    auto m = detail::read_file("build/debug/ninja/build.ninja");
+    REQUIRE(m.has_value());
+    const auto edge = m->find(": link_exe");
+    REQUIRE(edge != std::string::npos);
+    const auto eol = m->find('\n', edge);
+    const std::string_view line(m->data() + edge, static_cast<std::size_t>(eol - edge));
+    const auto c = line.find("libcompiler.a"), rr = line.find("libruntime.a"),
+                i = line.find("libir.a");
+    REQUIRE(c != std::string_view::npos);
+    REQUIRE(rr != std::string_view::npos);
+    REQUIRE(i != std::string_view::npos);
+    CHECK(c < rr);
+    CHECK(rr < i);
+}
+
 TEST_CASE("usage: Interface defines/includes propagate; user lib defines do not") {
     ScratchDir scratch {"propagate"};
     char prog[] = "truss-tests";

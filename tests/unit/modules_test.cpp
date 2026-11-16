@@ -75,6 +75,26 @@ TEST_CASE("scan: header imports and comments are ignored") {
     CHECK(r->imports == std::vector<std::string>{"real"});
 }
 
+TEST_CASE("scan: raw strings, strings, char literals and comments are not code") {
+    /* the embedded-TS pattern from real test files: `import ... from "..."` and
+     * other module-looking lines inside literals must not be scanned */
+    const auto p = scratch_write("embed.cpp", R"SRC(export module emb;
+static const char* kTs = R"(import { Signal } from "@forge";
+import { View } from "@forge/view";)";
+static const char* kDelim = u8R"x(import u8raw; module u8raw;)x";
+static const char* kPlain = "import plain; module plain;";
+static const char* kEsc = "a\"; import escaped;";
+static constexpr char kCh = 'i';
+static constexpr int kNum = 1'000'000;
+/* import blocked; */
+// import linecomment;
+import real;)SRC");
+    auto r = detail::scan_module_unit(p);
+    REQUIRE(r.has_value());
+    CHECK(r->module_name == "emb");
+    CHECK(r->imports == std::vector<std::string>{"real"});
+}
+
 TEST_CASE("resolve: importing a primary pulls its partitions") {
     const std::map<std::string, std::string, std::less<>> bmis {
         {"math", "/b/math.pcm"},
@@ -143,6 +163,36 @@ TEST_CASE("resolve: partition import without module declaration is an error") {
     auto r = detail::resolve_module_imports(u, bmis, {});
     REQUIRE_FALSE(r.has_value());
     CHECK(r.error().kind == Error::Kind::Config);
+}
+
+TEST_CASE("resolve: an unresolved transitive import is a Config error naming it") {
+    const std::map<std::string, std::string, std::less<>> bmis {
+        {"A", "/b/a.pcm"}, {"B", "/b/b.pcm"},
+    };
+    const std::map<std::string, std::vector<std::string>, std::less<>> mi {
+        {"A", {"B"}}, {"B", {"missing"}},
+    };
+    detail::ModuleUnitInfo u;
+    u.path = "app.cpp";
+    u.imports = {"A"};
+    auto r = detail::resolve_module_imports(u, bmis, mi);
+    REQUIRE_FALSE(r.has_value());
+    CHECK(r.error().kind == Error::Kind::Config);
+    /* the error names the module that actually has no BMI, and who imports it */
+    CHECK(r.error().message.find("'missing'") != std::string::npos);
+    CHECK(r.error().message.find("imported by 'B'") != std::string::npos);
+}
+
+TEST_CASE("resolve: a transitive std import does not fail the closure") {
+    /* std is wired from the toolchain's std manifest, never from target BMIs */
+    const std::map<std::string, std::string, std::less<>> bmis {{"A", "/b/a.pcm"}};
+    const std::map<std::string, std::vector<std::string>, std::less<>> mi {{"A", {"std"}}};
+    detail::ModuleUnitInfo u;
+    u.path = "app.cpp";
+    u.imports = {"A"};
+    auto r = detail::resolve_module_imports(u, bmis, mi);
+    REQUIRE(r.has_value());
+    CHECK(r->first == "-fmodule-file=A=/b/a.pcm");
 }
 
 TEST_CASE("scan-deps: authoritative closures replace the regex heuristic") {
@@ -260,6 +310,23 @@ TEST_CASE("modules: dry-run threads the full transitive BMI closure to a consume
     const std::string_view edge(m->data() + pos, eol - pos);
     for (const char* mod : {"-fmodule-file=A=", "-fmodule-file=B=", "-fmodule-file=C="})
         CHECK_MESSAGE(edge.find(mod) != std::string_view::npos, mod);
+}
+
+TEST_CASE("modules: two targets exporting the same module name are a Config error") {
+    ChainDir dir {"dup"};
+    REQUIRE(detail::write_file("a.cppm", "export module dup;\nexport int a() { return 1; }\n").has_value());
+    REQUIRE(detail::write_file("b.cppm", "export module dup;\nexport int b() { return 2; }\n").has_value());
+    REQUIRE(detail::write_file("main.cpp", "int main() { return 0; }\n").has_value());
+    char prog[] = "truss-tests";
+    char* argv[] = {prog};
+    Project proj("dup", 1, argv);
+    proj.add_static_library("liba").sources("a.cppm");
+    proj.add_static_library("libb").sources("b.cppm");
+    auto r = proj.build();
+    REQUIRE_FALSE(r.has_value());
+    CHECK(r.error().kind == Error::Kind::Config);
+    CHECK(r.error().message.find("module 'dup'") != std::string::npos);
+    CHECK(r.error().message.find("exactly one interface unit") != std::string::npos);
 }
 
 TEST_CASE("modules: real build and run through a three-library module chain") {
