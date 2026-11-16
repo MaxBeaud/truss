@@ -11,13 +11,13 @@
  *
  * @section main_intro What truss is
  *
- * A truss project has no build system files — its build script is a C++26
+ * A truss project has no build-system files. Its build script is a C++26
  * program (`truss.cpp`) that describes targets with a fluent, type-safe API
- * and calls `Project::build()`. That program is compiled once into a `./truss`
- * binary which then builds, tests and runs the project. The script re-runs
- * (cheaply) on every invocation, regenerating a ninja manifest that the
- * vendored samurai executes incrementally; when the script itself changes,
- * truss recompiles and re-execs itself (see @ref main_selfhost).
+ * and calls `Project::build()`. That program is compiled once into a
+ * `./truss` binary which then builds, tests and runs the project. The script
+ * re-runs (cheaply) on every invocation, regenerating a ninja manifest that
+ * the vendored samurai executes incrementally; when the script itself
+ * changes, truss recompiles and re-execs itself (see @ref main_selfhost).
  *
  * Highlights:
  *
@@ -29,7 +29,7 @@
  *   sysroots (see @ref main_cross).
  * - **Static & portable binaries** — per-dependency `static_link()`,
  *   `static_deps()` and `static_stdlib()` (fully-static musl, or drop just
- *   the C++ runtime).
+ *   the C++ runtime) (see @ref main_static).
  * - **Packages** — `fetch` (git/tarball), `conan` and `vcpkg`, consumed as
  *   targets (see @ref main_deps).
  * - **Fast & incremental** — compiler-cache launcher, unity builds, PCH,
@@ -82,9 +82,9 @@
  * ./setup.sh test               # unit + examples + installed + amalgam
  * @endcode
  *
- * A new project then contains just `truss.cpp` (+ a `bootstrap.sh` linking the
- * script against the staged module); `truss init <name>` scaffolds one. The
- * unit tests run through `./setup.sh unit` (doctest, ASan/UBSan).
+ * A new project then contains just `truss.cpp` (+ a `bootstrap.sh` linking
+ * the script against the staged module); `truss init <name>` scaffolds one.
+ * The unit tests run through `./setup.sh unit` (doctest, ASan/UBSan).
  *
  * @section main_targets Targets
  *
@@ -137,8 +137,8 @@
  * through `-Wl,-Bstatic` (shared libs from a static twin archive of the same
  * PIC objects); `static_stdlib()` drops the C++ runtime dependency (Gcc/Llvm/
  * Musl flavors, validated against the toolchain). Archives are ordered
- * consumers-before-providers on every link line, so diamond dependency graphs
- * resolve with a single left-to-right ld pass.
+ * consumers-before-providers on every link line, so diamond dependency
+ * graphs resolve with a single left-to-right ld pass.
  *
  * @section main_deps Dependencies
  *
