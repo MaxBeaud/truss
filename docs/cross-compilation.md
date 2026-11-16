@@ -1,4 +1,4 @@
-# Cross-compilation strategy
+# Cross-compilation strategy {#cross_compilation_page}
 
 Status: **phase 1 landed** (project-wide target triple, zig toolchain, target-aware
 naming/link conventions). Phases 2–5 below are the proposed roadmap.

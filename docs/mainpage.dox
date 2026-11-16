@@ -1,0 +1,209 @@
+/**
+ * @mainpage truss — build your C++ using C++
+ *
+ * <center><b>Build your C++ using C++.</b> A small, fast build system whose
+ * build scripts are ordinary C++26 programs: a mate.h-style fluent API,
+ * xmake-class features, first-class C++20/26 modules, zig-powered
+ * cross-compilation, and a samurai (ninja) backend — no configure step, no
+ * DSL, no config file.</center>
+ *
+ * @tableofcontents
+ *
+ * @section main_intro What truss is
+ *
+ * A truss project has no build system files — its build script is a C++26
+ * program (`truss.cpp`) that describes targets with a fluent, type-safe API
+ * and calls `Project::build()`. That program is compiled once into a `./truss`
+ * binary which then builds, tests and runs the project. The script re-runs
+ * (cheaply) on every invocation, regenerating a ninja manifest that the
+ * vendored samurai executes incrementally; when the script itself changes,
+ * truss recompiles and re-execs itself (see @ref main_selfhost).
+ *
+ * Highlights:
+ *
+ * - **C++ modules that just work** — automatic BMI wiring with the full
+ *   transitive closure across `depends_on`, plus real `import std;` on
+ *   clang + libc++ (see @ref main_modules).
+ * - **Cross-compile with one line** — `Toolchain::Zig` + `target("...")`
+ *   reaches musl, glibc-pinned, aarch64 and Windows-gnu targets with bundled
+ *   sysroots (see @ref main_cross).
+ * - **Static & portable binaries** — per-dependency `static_link()`,
+ *   `static_deps()` and `static_stdlib()` (fully-static musl, or drop just
+ *   the C++ runtime).
+ * - **Packages** — `fetch` (git/tarball), `conan` and `vcpkg`, consumed as
+ *   targets (see @ref main_deps).
+ * - **Fast & incremental** — compiler-cache launcher, unity builds, PCH,
+ *   precise module wiring.
+ * - **Hardened by default** — stack protector, RELRO, non-exec stack and
+ *   libc++ hardening tiers, per target (see @ref main_options).
+ *
+ * @section main_quickstart Quick start
+ *
+ * @code
+ * // truss.cpp
+ * import truss;
+ *
+ * int main(int argc, char** argv) {
+ *     truss::Project proj("Engine", argc, argv);
+ *
+ *     auto& core = proj.add_static_library("core")
+ *                      .include_dirs("include")
+ *                      .sources_in("src/core");
+ *
+ *     proj.add_executable("app")
+ *         .sources_in("src/app")
+ *         .depends_on(core);
+ *
+ *     proj.add_executable("test_core")
+ *         .sources_in("tests")
+ *         .depends_on(core)
+ *         .is_test();
+ *
+ *     return proj.build() ? 0 : 1;
+ * }
+ * @endcode
+ *
+ * @code
+ * ./truss debug          # build into build/debug/
+ * ./truss test           # build + run every is_test() target
+ * ./truss run            # build + run the first executable
+ * ./truss release test   # release mode + tests
+ * ./truss -n             # dry run: emit the graph, run nothing
+ * ./truss --target app   # build one target only
+ * @endcode
+ *
+ * @section main_get Getting truss
+ *
+ * truss is a source library. Clone it and bootstrap once:
+ *
+ * @code
+ * ./setup.sh build              # libtruss.a + BMIs + the self-host ./truss
+ * ./setup.sh install <prefix>   # optional: stage libtruss.a + BMIs + truss CLI
+ * ./setup.sh test               # unit + examples + installed + amalgam
+ * @endcode
+ *
+ * A new project then contains just `truss.cpp` (+ a `bootstrap.sh` linking the
+ * script against the staged module); `truss init <name>` scaffolds one. The
+ * unit tests run through `./setup.sh unit` (doctest, ASan/UBSan).
+ *
+ * @section main_targets Targets
+ *
+ * Five target kinds cover the build graph:
+ *
+ * | Creator | Artifact | Notes |
+ * |---|---|---|
+ * | \ref truss::Project::add_executable "add_executable" | linked binary | also the `run` default |
+ * | \ref truss::Project::add_static_library "add_static_library" | `lib<name>.a` | the common case |
+ * | \ref truss::Project::add_shared_library "add_shared_library" | `lib<name>.so`/`.dll` | soname + rpath wiring |
+ * | \ref truss::Project::add_interface_library "add_interface_library" | none | usage requirements only (CMake INTERFACE) |
+ * | \ref truss::Project::import_library "import_library" | none — prebuilt | files linked verbatim + rpath |
+ * | \ref truss::Project::add_custom_command "add_custom_command" | generated files | the codegen pattern |
+ *
+ * Every builder method is a deducing-`this` template returning the target's
+ * own type (`StaticLib&`, `Executable&`, ...), so chains keep the derived
+ * type and derived-only methods can follow base ones in any order.
+ *
+ * Sources are glob patterns (`src/**.cpp`, `?`, `{a,b}` alternation; hidden
+ * entries skipped, results sorted) or literal paths. Usage requirements
+ * propagate to dependents CMake-INTERFACE-style: include dirs always,
+ * defines/link flags from `Interface` targets only — user libraries never
+ * leak private defines into consumers.
+ *
+ * @section main_options Options, hardening, PCH, unity
+ *
+ * Per target: `cpp_standard()`, `warnings()`, `debug_info()`,
+ * `optimization()`, `sanitizer()`, `lto()`, `harden()` (Light by default:
+ * stack protector + RELRO + non-exec stack; Medium/Max add pattern-filled
+ * locals, CFI, stack-clash probing, libc++ hardening modes), `pch()`
+ * (clang `-include-pch`, GCC `.gch` with the PCH dir searched first),
+ * `unity()` (batch TUs of 16 sources, module units never batched) and the
+ * raw `flags()` / `linker_flags()` escape hatches. Full details in the
+ * \ref grp_api "API reference" and the README's "Compiler options" section.
+ *
+ * @section main_modules C++20/26 modules
+ *
+ * `.cppm` sources are first-class: truss scans them (regex heuristic by
+ * default; clang-scan-deps in `ModulesMode::Manual`), emits one BMI edge per
+ * interface and wires every consumer with the full transitive
+ * `-fmodule-file=` closure across `depends_on` — including partitions and
+ * `import std;` / `import std.compat;` on clang + libc++. Module units are
+ * never unity-batched; zig targets and MSVC refuse module builds with clear
+ * Config errors. See the README's "C++ modules" section.
+ *
+ * @section main_static Static linking
+ *
+ * `static_link()` builds a shared library as an archive instead;
+ * `static_deps()` routes every dependency of an executable/shared library
+ * through `-Wl,-Bstatic` (shared libs from a static twin archive of the same
+ * PIC objects); `static_stdlib()` drops the C++ runtime dependency (Gcc/Llvm/
+ * Musl flavors, validated against the toolchain). Archives are ordered
+ * consumers-before-providers on every link line, so diamond dependency graphs
+ * resolve with a single left-to-right ld pass.
+ *
+ * @section main_deps Dependencies
+ *
+ * - \ref truss::Project::add_subdirectory "add_subdirectory" — in-tree static
+ *   library by convention (its `src/` + `include/`).
+ * - \ref truss::Project::fetch "fetch" — git (tag/branch/commit) or tarball
+ *   (sha256-verified, cached in `~/.cache/truss`, pinned in `truss.lock`
+ *   under an advisory file lock).
+ * - \ref truss::Project::conan "conan" / \ref truss::Project::vcpkg "vcpkg" —
+ *   package-manager graphs consumed as one `Interface` target.
+ * - \ref truss::Project::import_library "import_library" — prebuilt archives
+ *   you already have.
+ * - \ref truss::Project::add_custom_command "add_custom_command" — the
+ *   codegen pattern: a `for_host()` tool feeds generated sources into the
+ *   build, with `$tool`/`$out`/`$in` placeholders and dependency tracking.
+ * - `task()` / `pre_build()` / `post_build()` — custom tasks and hooks.
+ *
+ * @section main_cross Cross-compiling
+ *
+ * `proj.configure(truss::Config{}.toolchain(truss::Toolchain::Zig).target("aarch64-linux-musl"))`
+ * cross-compiles the whole project; host-side tools are pinned with
+ * `for_host()`, and a `depends_on()` edge may not cross the host/target
+ * boundary (different ABI/C library — a Config error). Per-target
+ * `cross_target()` overrides the project setting. See the
+ * \ref cross_compilation_page "cross-compilation strategy" page for the
+ * triple conventions, runners and known gaps.
+ *
+ * @section main_scripting Scripting helpers
+ *
+ * Build scripts also get \ref truss::os "os" (run/capture, env, memoized
+ * `find_program`, `temp_scope`, machine specs), \ref truss::fs "fs"
+ * (globbing, the generator-based walk/read_lines, text I/O, `find_library`)
+ * and \ref truss::log "log" (leveled, colored output) — everything a build
+ * script otherwise shells out for, all `Result`-based.
+ *
+ * @section main_errors Errors
+ *
+ * Everything fallible returns `truss::Result<T>` (`std::expected<T, Error>`);
+ * no exceptions cross the API. `Error` carries a kind, a rich message (with
+ * correct/incorrect examples where that helps) and an optional path. A failed
+ * `Result<TargetRef>` handed to `depends_on()`/`uses()`/`merge()` is kept and
+ * reported by `Project::build()` — never dropped.
+ *
+ * @section main_selfhost Building truss itself
+ *
+ * truss builds itself: `./truss.cpp` (repo root) is a truss build script —
+ * `./setup.sh build` bootstraps `libtruss.a` + BMIs and compiles `./truss`,
+ * which then rebuilds truss with truss (`./truss debug`), including a
+ * self-rebuild + re-exec when the script or the module sources change.
+ *
+ * @section main_docs Where to read next
+ *
+ * - \ref grp_api "Public API reference" — Project, Target, Config,
+ *   Error/Result, the os/fs/log namespaces: every builder, every flag, every
+ *   task.
+ * - \ref internals_page "Internals" — the module structure, the build flow
+ *   (validate → resolve → emit → execute), the subsystem file map and the
+ *   invariants.
+ * - \ref grp_internals "Internals group" — the internal declarations of the
+ *   `truss:impl` partition (invisible to `import truss;`).
+ * - \ref cross_compilation_page "Cross-compilation strategy" — triple
+ *   conventions, runners, the host/target boundary rules, known gaps.
+ * - \ref roadmap_page "1.0 roadmap" — where the project is heading.
+ * - In the repository: README.MD (user guide), PLAN.MD (the original plan),
+ *   AGENT.MD (constraints & verified toolchain facts), examples/ (working
+ *   scripts for every feature: modules, cross-host, fetch, conan, vcpkg,
+ *   imported, shared, amalgam, installed, hello).
+ */

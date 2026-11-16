@@ -43,7 +43,7 @@ page explains the architecture around them.
 | `src/core/proc.cpp` | `posix_spawn` process runner (optional cwd via `addchdir_np`), output capture |
 | `src/core/os.cpp` | `truss::os`: consteval host predicates, memoized fork-free `find_program` `$PATH` walk, lenient `env` parsing, machine specs, `temp_scope`, `find_truss_modules` auto-discovery |
 | `src/core/pkg.cpp` | fetch (git/tarball + sha256), `~/.cache/truss` cache, hardlink materialization, conan/vcpkg fingerprint + configure-skip |
-| `src/core/target.cpp` | host triple detection, `Target::depends_on` bookkeeping |
+| `src/core/target.cpp` | host triple detection, `Config` → `TargetTriple` resolution (`apply_config`), triple parsing, compiler-family/`c_driver` detection, launcher resolution |
 | `src/core/build.cpp` | the emitter: rules, edges, unity batching, PCH edges, scan-deps wiring, `Project::build()` orchestration, `compile_commands` generation, `reload` task |
 | `src/core/log.cpp` | colored stdout logging, the public `truss::log` channel |
 
@@ -52,8 +52,12 @@ page explains the architecture around them.
 - **No exceptions across the API**: everything internal returns
   `Result<T>` = `std::expected<T, Error>`; `std::filesystem` calls use the
   `error_code` overloads.
-- **Path safety**: ninja paths escape `:` and spaces; truss additionally
-  rejects `$` in project paths at startup.
+- **Path safety**: ninja paths escape `$`, `:` and spaces; every author-supplied
+  path/name that reaches a build statement (target names, archives, custom-command
+  outputs, the project/build dirs, `pch()`) goes through `path_is_safe`, which
+  rejects shell metacharacters, quotes and control characters outright — those
+  strings end up in commands samurai runs via `/bin/sh -c` and in `ar -M` MRI
+  scripts. Package-spec values (conan/vcpkg) are whitelist-validated separately.
 - **Determinism**: identical inputs produce a byte-identical `build.ninja`
   (sorted edges, memoized probes), so `write_file_if_changed` skips writes.
 - **Module wiring**: BMI edges are separate rules; consumers get
@@ -65,6 +69,6 @@ page explains the architecture around them.
 ## Vendored samurai
 
 `vendor/samurai` is samurai (ninja-compatible backend) compiled into truss
-as a static shim. Patches are minimal and listed in `vendor/samurai/README.truss.md`;
+as a static shim. Patches are minimal and listed in `vendor/samurai/TRUSS-VENDOR.txt`;
 `AGENT.MD` records the verified behavioral quirks (e.g. clang-scan-deps
 p1689 output shape on LLVM 23).

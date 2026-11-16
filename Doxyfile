@@ -8,11 +8,23 @@ PROJECT_NUMBER         = 0.1.0
 OUTPUT_DIRECTORY       = build/docs
 OUTPUT_LANGUAGE        = English
 
-# inputs: the public API partition is the reference, truss:impl + the
-# internals page document the implementation (README.MD stays the GitHub
-# user guide — its markdown anchors don't map to doxygen sections)
-INPUT                  = src/api.cppm src/impl.cppm docs/internals.md docs/cross-compilation.md
-FILE_PATTERNS          = *.cppm *.md
+# truss — Doxygen reference (./setup.sh docs -> build/docs/html).
+# The README is the user guide; the main page mirrors it with links into the
+# generated reference. This is the in-depth API + internals documentation.
+# Doxygen 1.18 parses the C++20 module files (module;/export module/import :) natively.
+
+PROJECT_NAME           = "truss"
+PROJECT_BRIEF          = "Build your C++ using C++ — mate.h API, xmake-class features, samurai backend"
+PROJECT_NUMBER         = 0.1.0
+OUTPUT_DIRECTORY       = build/docs
+OUTPUT_LANGUAGE        = English
+
+# inputs: main page -> public API partition -> truss:impl + the internals
+# pages (README.MD stays the GitHub user guide — its markdown anchors don't
+# map to doxygen sections; the main page mirrors it with \ref links)
+INPUT                  = docs/mainpage.dox src/api.cppm src/impl.cppm \
+                         docs/internals.md docs/cross-compilation.md docs/1.0-roadmap.md
+FILE_PATTERNS          = *.cppm *.md *.dox
 RECURSIVE              = NO
 
 EXTRACT_ALL            = YES

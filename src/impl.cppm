@@ -50,7 +50,8 @@ Result<void> make_dirs(const std::filesystem::path& p);
 /// Split a PATH-style environment value on ':' — all entries, empty ones
 /// included (POSIX gives them site-specific meaning: empty PATH entry = cwd).
 /// \ingroup grp_internals
-std::vector<std::string_view> split_env_list(std::string_view value);/// Remove a file or directory tree (the `clean` task).
+std::vector<std::string_view> split_env_list(std::string_view value);
+/// Remove a file or directory tree (the `clean` task).
 /// \ingroup grp_internals
 Result<void> remove_tree(const std::filesystem::path& p);
 

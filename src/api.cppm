@@ -30,6 +30,18 @@ export module truss:api;
 
 export namespace truss {
 
+/**
+ * \defgroup grp_api Public API
+ * \brief Everything `import truss;` sees: the Project/Target builder model,
+ *        Config, Error/Result, the enums, and the os/fs/log helper namespaces.
+ *
+ * Start at \ref truss::Project "Project" (the build script's entry point) and
+ * \ref truss::Target "Target" (the options holder); the os/fs/log namespaces
+ * cover what build scripts otherwise shell out for. The implementation lives
+ * in the \ref grp_internals "Internals" group, invisible to `import truss;`.
+ * \{
+ */
+
 inline constexpr std::string_view kVersion = "0.1.0";
 
 /// Target operating system.
@@ -761,8 +773,8 @@ public:
         std::string d(dir);
         while (!d.empty() && (d.back() == '/' || d.back() == '\\'))
             d.pop_back();
-        if (d.empty()) /* "" or "/": contributing nothing beats globbing
-                        * "/**.cpp"; the target then fails validation with
+        if (d.empty()) /* "" or "/": contributing nothing beats globbing the
+                        * whole tree; the target then fails validation with
                         * 'has no sources' */
             return self;
         self.source_patterns_.push_back(d + "/**.cpp");
@@ -1277,14 +1289,14 @@ public:
         self.command_tokens_.emplace_back(token);
         return self;
     }
-    /// \copydoc command(std::string_view)
+    /// \brief Add several command tokens (braced list).
     template <class Self>
     Self& command(this Self& self, std::initializer_list<std::string_view> tokens) {
         for (const auto& t : tokens)
             self.command_tokens_.emplace_back(t);
         return self;
     }
-    /// \copydoc command(std::string_view)
+    /// \brief Add command tokens from any range of strings.
     template <class Self, StringRange R>
     Self& command(this Self& self, R&& tokens) {
         for (const auto& t : tokens)
@@ -1303,10 +1315,11 @@ public:
         self.used_tool_ = &tool;
         return self;
     }
-    /// \copydoc uses(const Target&)
+    /// \brief uses() with a TargetRef handle — no deref at the call site.
     template <class Self>
     Self& uses(this Self& self, TargetRef tool);
-    /// \copydoc uses(const Target&)
+    /// \brief uses() with a Result — an error Result is kept and reported by
+    /// Project::build() (never dropped).
     template <class Self>
     Self& uses(this Self& self, Result<TargetRef> tool_result);
     /**
@@ -1319,14 +1332,14 @@ public:
         self.outputs_.emplace_back(path);
         return self;
     }
-    /// \copydoc outputs(std::string_view)
+    /// \brief Name several output files (braced list).
     template <class Self>
     Self& outputs(this Self& self, std::initializer_list<std::string_view> paths) {
         for (const auto& p : paths)
             self.outputs_.emplace_back(p);
         return self;
     }
-    /// \copydoc outputs(std::string_view)
+    /// \brief Name output files from any range of strings.
     template <class Self, StringRange R>
     Self& outputs(this Self& self, R&& paths) {
         for (const auto& p : paths)
@@ -1614,12 +1627,19 @@ public:
      */
     Result<void> compile_commands(const std::filesystem::path& path = ".");
 
+    /// Project name (as given to the constructor; used in messages).
     const std::string& name() const { return name_; }
+    /// The mode this run builds in (debug by default; `./truss release`).
     BuildMode mode() const { return mode_; }
+    /// Project root (the script's cwd at construction).
     const std::filesystem::path& cwd() const { return cwd_; }
+    /// Build root for the current mode: `<root>/build/<mode>` (or --build-dir override).
     std::filesystem::path build_dir() const; /* build root + mode subdir */
+    /// Parallelism (-j; 0 = auto).
     int jobs() const { return jobs_; }
+    /// Whether -v was passed (verbose command lines).
     bool verbose() const { return verbose_; }
+    /// Targets selected with --target (empty = all).
     const std::vector<std::string>& only_targets() const { return only_targets_; }
     /// The `--cross TRIPLE` CLI override of Config::target (unset = use the script's Config).
     const std::optional<std::string>& cross_override() const { return cross_override_; }
@@ -1662,5 +1682,7 @@ private:
     std::vector<std::string> subdir_target_names_; /* created by add_subdirectory */
     std::vector<std::filesystem::path> truss_module_paths_; /* auto-discovered truss module paths */
 };
+
+/** \} */ // grp_api
 
 } // namespace truss
