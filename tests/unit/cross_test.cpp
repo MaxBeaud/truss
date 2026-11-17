@@ -1,5 +1,6 @@
-// Cross-compilation phase 3: the --cross CLI override and Config::runner
-// (execute cross-compiled test/run exes through a command prefix).
+// Cross-compilation: Config::target + Config::runner (execute cross-compiled
+// test/run exes through a command prefix). Per-triple subgraphs live in
+// subgraph_test.cpp.
 module;
 #include <doctest/doctest.h>
 
@@ -48,41 +49,18 @@ void write_runner_script() {
 
 } // namespace
 
-TEST_CASE("--cross: parsed in the Project ctor; a missing value is a Config error from build()") {
-    char prog[] = "truss-tests";
-    char rel[] = "release";
-    char cross[] = "--cross";
-    char triple[] = "aarch64-linux-musl";
-    char* argv[] = {prog, rel, cross, triple};
-    Project proj("cross-parse", 4, argv);
-    REQUIRE(proj.cross_override().has_value());
-    CHECK(*proj.cross_override() == "aarch64-linux-musl");
-    CHECK(proj.mode() == BuildMode::Release);
-
-    char* argv_missing[] = {prog, cross};
-    Project proj2("cross-missing", 2, argv_missing);
-    CHECK_FALSE(proj2.cross_override().has_value());
-    auto r = proj2.build(); /* cli_error_ is reported first by build() */
-    REQUIRE_FALSE(r.has_value());
-    CHECK(r.error().kind == Error::Kind::Config);
-    CHECK(contains(r.error().message, "--cross requires a target triple"));
-}
-
-TEST_CASE("--cross: a malformed triple is a Config error reported by build()") {
+TEST_CASE("target: a malformed triple in the script's Config is a Config error from build()") {
     ScratchDir scratch {"cross-bad"};
     REQUIRE(detail::write_file("app/main.cpp", "int main() { return 0; }\n").has_value());
     char prog[] = "truss-tests";
-    char cross[] = "--cross";
-    char bad[] = "linux-x64";
-    char* argv[] = {prog, cross, bad};
-    Project proj("cross-bad", 3, argv);
-    proj.configure(Config().toolchain(Toolchain::Zig)); /* no target() in the script */
+    char* argv[] = {prog};
+    Project proj("cross-bad", 1, argv);
+    proj.configure(Config().toolchain(Toolchain::Zig).target("linux-x64"));
     proj.add_executable("app").sources("app/main.cpp");
     auto r = proj.build(); /* fails in apply_config, before anything is compiled */
     INFO((r ? "unexpectedly ok" : r.error().message));
     REQUIRE_FALSE(r.has_value());
     CHECK(r.error().kind == Error::Kind::Config);
-    CHECK(contains(r.error().message, "--cross 'linux-x64'"));
     CHECK(contains(r.error().message, "unrecognized arch or OS"));
 }
 
@@ -135,16 +113,14 @@ TEST_CASE("runner: `run` on a cross exe without a runner stays a Config error") 
 
 /* --- real zig end-to-end (x86_64-linux-musl exes run natively on an x64 host) --- */
 
-TEST_CASE("zig e2e: --cross lands outputs in the per-triple dir without editing the script") {
+TEST_CASE("zig e2e: a cross subgraph lands outputs in the per-triple dir") {
     if (!os::program_exists("zig")) { MESSAGE("zig not installed, skipping"); return; }
     ScratchDir scratch {"cross-flag-e2e"};
     REQUIRE(detail::write_file("app/main.cpp", "int main() { return 0; }\n").has_value());
     char prog[] = "truss-tests";
-    char cross[] = "--cross";
-    char triple[] = "x86_64-linux-musl";
-    char* argv[] = {prog, cross, triple};
-    Project proj("cross-flag-e2e", 3, argv);
-    proj.configure(Config().toolchain(Toolchain::Zig)); /* no target() in the script */
+    char* argv[] = {prog};
+    Project proj("cross-flag-e2e", 1, argv);
+    proj.targets({{"musl", Config().toolchain(Toolchain::Zig).target("x86_64-linux-musl")}});
     proj.add_executable("app").sources("app/main.cpp");
     auto r = proj.build();
     INFO((r ? "ok" : r.error().message));

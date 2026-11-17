@@ -1646,10 +1646,6 @@ constexpr std::string_view kHelp =
     "                      (proj.targets()): NAME:target picks one subgraph, a\n"
     "                      bare name applies to every subgraph that has it\n"
     "      --for NAME      with subgraphs: run tasks (test/run) for one subgraph only\n"
-    "      --cross TRIPLE  override the script's Config::target for this invocation,\n"
-    "                      e.g. --cross aarch64-linux-musl (outputs land in their\n"
-    "                      own build/<mode>/bin/<triple> dir; not usable with\n"
-    "                      proj.targets() subgraphs)\n"
     "      --build-dir PATH  build root (default: build)\n"
     "  -V, --version    print the truss version\n"
     "  -h, --help       show this help\n"
@@ -1693,12 +1689,6 @@ Project::Project(std::string name, std::span<char* const> argv) : name_(std::mov
             /* subgraph selector for tasks (test/run); validated in build() */
             if (++i >= argv.size()) { cli_error_ = Error {Error::Kind::Config, "--for requires a subgraph name"}; continue; }
             for_selector_ = argv[i];
-        }
-        else if (a == "--cross") {
-            /* overrides Config::target for this invocation only; validated by
-             * apply_config in build() (malformed triples are Config errors) */
-            if (++i >= argv.size()) { cli_error_ = Error {Error::Kind::Config, "--cross requires a target triple"}; continue; }
-            cross_override_ = argv[i];
         }
         else if (a == "--build-dir") {
             if (++i >= argv.size()) { cli_error_ = Error {Error::Kind::Config, "--build-dir requires a path"}; continue; }
@@ -1869,7 +1859,7 @@ Result<void> Project::build() {
     }
 
     /* per-triple subgraphs: without targets() this is one unnamed subgraph
-     * carrying the project Config (+ the --cross CLI override) */
+     * carrying the project Config */
     struct SubCtx {
         std::string name;
         Config config;
@@ -1884,22 +1874,9 @@ Result<void> Project::build() {
                     "configure() and targets() are mutually exclusive:\n"
                     "  correct:   proj.targets({{\"linux\", Config{}.toolchain(...)}, ...})\n"
                     "  incorrect: proj.configure(conf) followed by proj.targets(...)");
-            if (cross_override_)
-                return config_error(
-                    "--cross overrides a single project triple and cannot be combined with "
-                    "proj.targets() subgraphs (build the subgraphs you want instead)");
             subs = subgraphs_;
         } else {
-            Config eff = config_;
-            if (cross_override_) {
-                if (cross_override_->empty())
-                    return config_error(
-                        "--cross requires a non-empty target triple, e.g.:\n"
-                        "  correct:   --cross aarch64-linux-musl\n"
-                        "  incorrect: --cross \"\"");
-                eff.target(*cross_override_);
-            }
-            subs = {{"", std::move(eff)}};
+            subs = {{"", config_}};
         }
         /* subgraph names: target-name rules, unique, 'all' reserved (it is the
          * union phony) */
@@ -1923,16 +1900,14 @@ Result<void> Project::build() {
                 if (conf.runner().starts_with('-'))
                     return config_error(
                         (sg.empty() ? "" : "subgraph '" + sg + "': ") +
-                        "runner('" + conf.runner() + "'): the runner must be a command, not a flag; "
-                        "did you mean runner(\"qemu-aarch64\") or a flag like --cross?");
+                        "runner('" + conf.runner() + "'): the runner must be a command, not a flag "
+                        "(e.g. runner(\"qemu-aarch64\"))");
             }
             auto base = detail::apply_config(conf, host_triple());
             if (!base) {
                 Error e = std::move(base.error());
                 if (!sg.empty())
                     e.message = "subgraph '" + sg + "': " + e.message;
-                else if (cross_override_)
-                    e.message = "--cross '" + *cross_override_ + "': " + e.message;
                 return config_error(e.message);
             }
             Config host_conf = conf;

@@ -14,12 +14,14 @@ outward-facing surfaces, and freezes the public API behind semver.
 
 ### Added
 
+- **Removed `--cross`** — superseded by per-triple subgraphs
+  (`proj.targets({...})` + `--for` / compound `--target name:subgraph`).
 - **Per-triple subgraphs** — `proj.targets({{"linux", Config{}}, {"win", ...}})`
   builds the whole graph once per named configuration in one manifest:
   per-triple output dirs, per-subgraph `name:all` phony targets, per-subgraph
   runners, `--for NAME` task selection, `--target name:subgraph` compound
   build selection (a bare name applies to every subgraph that has it).
-  Mutually exclusive with `configure()` and `--cross` (Config errors).
+  Mutually exclusive with `configure()` (a Config error).
 - **GCC named modules + `import std`** (GCC 15+): GCC targets compile modules
   through a per-target module-mapper file; the authoritative scan runs the
   compiler itself (`-fdeps-format=p1689r5`); the std CMIs build once per

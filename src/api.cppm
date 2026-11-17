@@ -1475,7 +1475,7 @@ public:
      * \param name project name (used in messages and generated vcpkg.json)
      * \param argv full process argv; truss parses `debug|release`, built-in
      *             tasks, `task NAME` / `task list`,
-     *             `-j`, `-v`, `-n`, `--explain`, `--target`, `--cross`,
+     *             `-j`, `-v`, `-n`, `--explain`, `--target`, `--for`,
      *             `--build-dir`, `-h`/`--help`, and `--` (rest forwarded to `run`)
      *             (see README "Tasks & flags"); unknown options become a
      *             Config error reported by build().
@@ -1684,8 +1684,6 @@ public:
     bool verbose() const { return verbose_; }
     /// Targets selected with --target (empty = all).
     const std::vector<std::string>& only_targets() const { return only_targets_; }
-    /// The `--cross TRIPLE` CLI override of Config::target (unset = use the script's Config).
-    const std::optional<std::string>& cross_override() const { return cross_override_; }
     /// Get the auto-discovered truss module paths.
     const std::vector<std::filesystem::path>& truss_module_paths() const { return truss_module_paths_; }
 
@@ -1722,7 +1720,6 @@ private:
     bool list_tasks_ {false};                   /* `task list` / bare `task` */
     std::vector<std::string> requested_tasks_;  /* user tasks as "task:<name>" */
     std::vector<std::string> only_targets_;
-    std::optional<std::string> cross_override_; /* --cross TRIPLE: overrides Config::target */
     std::vector<std::string> run_args_; /* after `--`, forwarded by run */
     std::optional<std::filesystem::path> build_root_;
     std::optional<Error> cli_error_;

@@ -1,69 +1,74 @@
 # truss
 
 **Build your C++ using C++.** A small, fast build system whose build scripts
-are ordinary C++26 programs: a [mate.h](https://github.com/ander000/mate)-style
-fluent API, xmake-class features, first-class C++20/26 modules, zig-powered
-cross-compilation, and a [samurai](https://github.com/michaelforney/samurai)
-(ninja) backend — no configure step, no DSL, no config file.
+are ordinary C++26 programs: a fluent builder API (inspired by
+[mate.h](https://github.com/ander000/mate)), first-class C++20/26 modules,
+cross-compilation to other platforms from your Linux host, and a
+[samurai](https://github.com/michaelforney/samurai) (ninja) backend — no DSL,
+no config files, no separate configure stage.
 
 **Highlights**
 
-- **C++ modules that just work** — automatic BMI wiring with a full transitive
-  closure across `depends_on`, plus real `import std;` on clang + libc++.
-- **Cross-compile with one line** — `Toolchain::Zig` + `target("…")` reaches
-  musl, glibc-pinned, aarch64 and Windows-gnu targets with bundled sysroots.
-- **Static & portable binaries** — per-dependency `static_link()`, `static_deps()`
-  and `static_stdlib()` (fully-static musl, or drop just the C++ runtime).
-- **Packages** — `fetch` (git/tarball), `conan` and `vcpkg`, consumed as targets.
-- **Fast & incremental** — compiler-cache launcher, unity builds, PCH, precise
-  module wiring; a self-rebuilding `./truss` that tracks its own headers.
+- **C++ modules that just work** — automatic BMI/CMI wiring with the full
+  transitive closure across `depends_on`, discovered by the compiler itself
+  where possible; real `import std;` on clang + libc++ **and** GCC 15+
+  (libstdc++).
+- **Cross-compilation, first-class** — zig (bundled sysroots), mingw-w64 and
+  llvm-mingw for Windows targets (llvm-mingw: modules + `import std` cross),
+  or any target-prefixed GCC driver. Per-triple subgraphs build them all in
+  one invocation; wine/qemu runners execute the outputs.
+- **Static & portable binaries** — per-dependency `static_link()`,
+  `static_deps()` and `static_stdlib()` (fully-static musl, or drop just the
+  C++ runtime).
+- **Packages** — `fetch` (git/tarball, sha256-pinned), `conan` and `vcpkg`,
+  consumed as targets.
+- **Fast & incremental** — compiler-cache launcher, unity builds, PCH,
+  precise module wiring.
+- **Hardened by default** — stack protector, RELRO, non-exec stack and
+  libc++ hardening tiers, per target.
 
 This README is the user guide; the in-depth API reference is generated with
-`./setup.sh docs` (Doxygen → `build/docs/html/`). `docs/1.0-roadmap.md` tracks
-the path to 1.0.
+`./setup.sh docs` (Doxygen → `build/docs/html/`). `CHANGELOG.md` tracks
+changes; the public API is semver-stable as of 1.0.0.
 
-Write your build script in C++ with truss's module API, compile it once to
-`./truss`, and run your builds from there:
+## How truss works
 
-```cpp
-// truss.cpp
-import truss;
+A truss project has no build-system files. Its build script (`truss.cpp`) is
+a C++26 program that declares targets and calls `proj.build()`; it is
+compiled once into a `./truss` binary. From then on, every invocation:
 
-int main(int argc, char** argv) {
-    truss::Project proj("Engine", argc, argv);
-
-    auto& core = proj.add_static_library("core")
-                     .include_dirs("include")
-                     .sources_in("src/core");
-
-    proj.add_executable("app")
-        .sources_in("src/app")
-        .depends_on(core);
-
-    proj.add_executable("test_core")
-        .sources_in("tests")
-        .depends_on(core)
-        .is_test();
-
-    return proj.build() ? 0 : 1;
-}
+```text
+./truss [debug|release] [command...] [flags]
+   │
+   ├─ the script runs          it IS the configuration: targets are declared
+   │                           by executing ordinary C++ code
+   ├─ resolve                  sources globbed, module imports scanned
+   │                           (by the compiler itself where possible)
+   ├─ manifest written         build/<mode>/ninja/build.ninja — derived data,
+   │                           regenerated every run, but written only when
+   │                           its content changed (mtime-stable)
+   ├─ samurai build            the incremental compile + link (depfiles,
+   │                           build-log reuse, correct rebuild sets)
+   └─ commands                 test / run / clean / compdb / reload / tasks
 ```
 
-```sh
-./truss debug          # build into build/debug/
-./truss test           # build + run every is_test() target
-./truss run            # build + run the first executable
-./truss release test   # release mode + tests
-```
+The regeneration is cheap because the script is cheap to run and the
+manifest is derived from its declarations; samurai then does the incremental
+work. The one cost that scales with tree size is module-import scanning
+(~10 ms per TU through the compiler) — it runs on every invocation today.
 
-There is no configure step and no config file: the build script *is* the
-configuration, and it re-runs (cheaply) on every invocation, regenerating a
-ninja manifest that samurai then executes incrementally.
-
----
+**The script rebuilds itself.** On startup, truss compares `truss.cpp` (next
+to the executable) *and every header it includes, plus the truss library and
+BMIs it was built against* (a depfile written at bootstrap) with the
+executable. When any of them is newer, truss runs `bootstrap.sh` from the
+same directory and re-executes with the same arguments — an edited script or
+a changed header never builds a stale graph. Without a `bootstrap.sh` it
+stops with an error asking for a rebuild instead. `TRUSS_NO_REBUILD=1` turns
+the check off.
 
 ## Table of contents
 
+- [How truss works](#how-truss-works)
 - [Getting truss](#getting-truss)
 - [Command line](#command-line)
 - [The build script](#the-build-script)
@@ -76,7 +81,7 @@ ninja manifest that samurai then executes incrementally.
   - [Unity builds](#unity-builds)
   - [Static linking](#static-linking)
   - [Merged archives](#merged-archives)
-  - [Custom tasks](#custom-tasks)
+  - [User tasks](#user-tasks)
   - [Build hooks](#build-hooks)
 - [Scripting helpers (os / fs / log)](#scripting-helpers-os--fs--log)
 - [C++ modules](#c-modules)
@@ -88,6 +93,7 @@ ninja manifest that samurai then executes incrementally.
   - [Imported prebuilt libraries](#imported-prebuilt-libraries)
   - [Custom commands (codegen)](#custom-commands-codegen)
 - [Toolchain selection (Config)](#toolchain-selection-config)
+- [Subgraphs: several triples, one invocation](#subgraphs-several-triples-one-invocation)
 - [Cross-compiling & MSVC](#cross-compiling--msvc)
 - [Output layout](#output-layout)
 - [Errors](#errors)
@@ -128,67 +134,61 @@ cd my-app && ./bootstrap.sh && ./truss test
 binaries (`-DTRUSS_INSTALLED_BIN`): the templates are `#embed`ded from
 `cli/templates/init/`, so vendored and single-header users never carry them.
 
-**3. Single header (mate.h-style drop-in).** No modules, no link step:
+**3. Single header (drop-in).** No modules, no link step:
 
 ```sh
 ./setup.sh amalgam               # generates build/dist/truss_all.hpp
 clang++ -std=c++26 -Ibuild/dist truss.cpp -o truss   # #include "truss_all.hpp"
 ```
 
-Requirements: a C++26 compiler (clang 19+ or GCC 15+; clang is the reference)
-and a POSIX-ish OS. truss currently builds and runs its test suite on Linux;
-Windows hosts are on the roadmap (see [Status](#status--support-matrix)).
+Requirements: **clang 19+ with libc++** to build truss itself (the bootstrap
+and the module BMIs are clang+libc++; it is the reference compiler), and for
+your *project's targets*: clang, or GCC 15+ (named modules, `import std`),
+or the cross toolchains below. POSIX hosts only (Linux is the tested one).
 
 ## Command line
 
 ```
-./truss [debug|release] [task...] [-j N] [-v] [-n] [--explain] [--target NAME] [--build-dir PATH] [--cross TRIPLE]
+./truss [debug|release] [command...] [-j N] [-v] [-n] [--explain] [--target NAME[:SUBGRAPH]] [--for SUBGRAPH] [--build-dir PATH]
 ```
+
+truss has **built-in commands** and your **user tasks** — they are different
+things: commands are truss's own verbs; tasks are yours, registered with
+`proj.task(...)` and always invoked through `task`.
+
+| Command | What it does |
+|---|---|
+| `test` | Builds, then runs every target marked `.is_test()` (per subgraph, each with its own runner). |
+| `run` | Builds, then runs the first non-test executable (or the one named by `--target`), forwarding the arguments after `--`. |
+| `clean` | Deletes the mode's build dir (cannot be combined with other commands). |
+| `compdb` | Writes `compile_commands.json` (via samurai's compdb tool). |
+| `reload` | Rebuilds the `truss` executable from source and replaces the current binary. Only works from the truss repository root. |
+| `task NAME` | Builds, then runs a task registered with `proj.task(...)` (see [User tasks](#user-tasks)). |
+| `task list` | Lists the registered tasks with their descriptions; builds nothing. |
 
 | Flag | Meaning |
 |---|---|
 | `debug` / `release` | Build mode (default `debug`). One build dir per mode. |
-| `task...` | Any number of tasks, built-in or yours (see below). |
 | `-j N` | Parallel jobs (default: samurai's auto, ≈ nproc+2). |
 | `-v` | Echo every command samurai runs. |
-| `-n` | Dry run: print what *would* run, change nothing. |
+| `-n` | Dry run: print what *would* run, change nothing (no hooks fire, no test/run binary executes). |
 | `--explain` | Print *why* each edge is (re)built — samurai's explain mode. |
-| `--target NAME` | Build only this target (repeatable). |
+| `--target NAME` | Build only this target (repeatable). With subgraphs: `NAME:SUBGRAPH` picks one subgraph's target; a bare name applies to every subgraph that has it. |
+| `--for SUBGRAPH` | With subgraphs: run `test`/`run` for one subgraph only. |
 | `--build-dir PATH` | Relocate the build root (default `./build`). |
-| `--cross TRIPLE` | Cross-compile everything for TRIPLE without editing the script (overrides `Config::target`; `for_host()` tools stay on the host). |
 | `--version` / `-V` | Print truss version and exit. |
 | `--help` / `-h` / `help` | Print the full usage and exit. |
 | `-- ARGS...` | Everything after `--` is passed to the program started by `run`. |
 
-Built-in tasks:
-
-| Task | What it does |
-|---|---|
-| `test` | Builds, then runs every target marked `.is_test()`. |
-| `run` | Builds, then runs the first non-test executable (or the one named by `--target`), forwarding the arguments after `--`. |
-| `clean` | Deletes the mode's build dir. |
-| `compdb` | Writes `compile_commands.json` (via samurai's compdb tool). |
-| `reload` | Rebuilds the `truss` executable from source and replaces the current binary. Only works from the truss repository root. |
-| `task NAME` | Builds, then runs a task registered with `proj.task(...)` (see [Custom tasks](#custom-tasks)). |
-| `task list` | Lists the registered tasks with their descriptions; builds nothing. |
-
-Tasks are composable with modes and flags: `./truss release test -j8 -v`,
-`./truss run release --target server -- --port 8080`.
+Commands compose with modes and flags: `./truss release test -j8 -v`,
+`./truss run --target server -- --port 8080`.
 
 ## The build script
 
-A truss program is an ordinary C++ `main()`. `Project` parses the command line,
-you declare targets, and `proj.build()` generates the manifest and runs the
-build. Everything returns `truss::Result<T>` (a `std::expected<T, Error>`) —
-no exceptions.
-
-**The script rebuilds itself.** On startup, when `truss.cpp` (next to the
-executable) is newer than the executable, truss runs `bootstrap.sh` from the
-same directory and re-executes with the same arguments, so an edited script
-never builds a stale graph. Without a `bootstrap.sh` it stops with an error
-asking for a rebuild instead. `TRUSS_NO_REBUILD=1` turns the check off.
-Only `truss.cpp` is compared: after editing a header it includes, or upgrading
-truss, run `./bootstrap.sh` yourself.
+A truss program is an ordinary C++ `main()`. `Project` parses the command
+line, you declare targets, and `proj.build()` runs the flow described in
+[How truss works](#how-truss-works). Everything returns `truss::Result<T>`
+(a `std::expected<T, Error>`) — no exceptions.
 
 ### Targets
 
@@ -218,8 +218,10 @@ proj.add_executable("server").sources_in("src/server").depends_on(net);
 ```
 
 `depends_on()` links the dependency (static/shared) or merges its usage
-requirements (interface/imported/custom), and orders the build correctly.
-Handles from `add_subdirectory()`/`conan()`/`vcpkg()` pass straight in — no
+requirements (interface/imported/custom), and orders the build correctly —
+archives land consumers-before-providers on every link line, so diamond
+dependency graphs resolve in a single ld pass. Handles from
+`add_subdirectory()`/`conan()`/`vcpkg()` pass straight in — no
 dereferencing:
 
 ```cpp
@@ -235,14 +237,15 @@ proj.add_executable("app").sources_in("src").depends_on(proj.conan({"zlib/1.3.1"
 | Syntax | Meaning |
 |---|---|
 | `*` | anything within one path component |
-| `**` | anything across components (`src/**.cpp` = all C++ under `src/`) |
+| `**` | anything across components (`src/**.cpp` = all C++ under `src/`); as a full component (`**/x.cpp`) it matches whole components only |
 | `?` | exactly one character |
 | `{a,b}` | alternation (`src/*.{cpp,c}`) |
 
-Hidden files (any component starting with `.`) are skipped. A pattern that
-matches nothing is fine; a *literal* source that doesn't exist is a config
-error. `remove_source("path")` excludes one resolved file (truss itself uses
-this to drop samurai's `samu.c`).
+Hidden files (any wildcard-matched component starting with `.`) are skipped.
+A pattern that matches nothing is fine; a *literal* source that doesn't exist
+is a config error. Source paths must be path-safe (no spaces, shell or ninja
+metacharacters — they land in shell-run command lines). `remove_source("path")`
+excludes one resolved file (truss itself uses this to drop samurai's `samu.c`).
 
 ### Usage requirements & propagation
 
@@ -291,11 +294,11 @@ This is what makes package managers ergonomic: `conan()`/`vcpkg()` return an
 | `lto(...)` | `None, Full, Thin` | off |
 | `harden(...)` | `None, Light, Medium, Max` | **Light** (see below) |
 | `pic(bool)` | position-independent code | on for libs |
-| `modules_mode(...)` | `Off, Auto, Manual` | `Auto` |
+| `modules_mode(...)` | `Off, Auto, Manual` | `Auto` (see [C++ modules](#c-modules)) |
 | `pch("hdr.hpp")` | precompiled header for this target | off (see below) |
 | `unity(bool)` | batch sources into 16-source TUs | off (see below) |
 | `cross_target(triple)` | see [Cross-compiling](#cross-compiling--msvc) | host |
-| `is_test(bool)` | mark as a test for the `test` task | false |
+| `is_test(bool)` | mark as a test for the `test` command | false |
 | `flags("...")` | raw compiler flags, verbatim (repeat calls accumulate) | — |
 | `linker_flags("...")` | raw linker flags, verbatim (repeat calls accumulate) | — |
 
@@ -339,7 +342,7 @@ is also an include dir. The PCH output lives under `build/<mode>/pch/<target>/` 
 is dependency-tracked like any other edge (editing the PCH header rebuilds
 the target's objects; editing one source rebuilds only that object). Module
 BMI rules and C sources never use the PCH, and MSVC targets are a clear
-`Config` error in v0. The header path must be path-safe (no spaces, shell or
+`Config` error. The header path must be path-safe (no spaces, shell or
 ninja metacharacters — a `Config` error otherwise).
 
 ### Unity builds
@@ -410,10 +413,11 @@ in — `depends_on()` those separately). A merged library needs no sources of it
 own; each member must itself be a static library. MSVC targets are a Config
 error.
 
-### Custom tasks
+### User tasks
 
-`proj.task(name, description, fn)` registers `./truss task <name>`; the
-description is optional and shown by `./truss task list`:
+`proj.task(name, description, fn)` registers a **user task**, run with
+`./truss task <name>`; the description is optional and shown by
+`./truss task list`:
 
 ```cpp
 proj.task("hello", "print the task context", [](const truss::TaskContext& ctx) -> truss::Result<void> {
@@ -431,10 +435,10 @@ tasks (run with ./truss task <name>):
 $ ./truss release task hello -j8   # builds first, then runs the task
 ```
 
-User tasks have their own namespace, so a task may be called `test` or `run`
-without clashing with the built-ins. Typing a task name without `task`
-(`./truss hello`) is an error that points to the right command; `list` is a
-reserved name and registering a name twice is a Config error.
+User tasks live in their own namespace, so a task may be called `test` or
+`run` without clashing with the built-in commands. Typing a task name without
+`task` (`./truss hello`) is an error that points to the right command; `list`
+is a reserved name and registering a name twice is a Config error.
 
 `TaskContext` carries the project name, mode, build dir, cwd, and job count.
 
@@ -457,16 +461,19 @@ proj.post_build([](const truss::TaskContext& ctx) -> truss::Result<void> {
 When things run, in order:
 
 ```text
-./truss [debug|release] [--target X] <task>
+./truss [debug|release] [--target X] <command>
    │
-   ├─ configure: targets resolved, Config applied, manifest written
+   ├─ resolve: targets resolved, Config applied, manifest written
    ├─ pre_build hooks   (registration order; a failure aborts)
    ├─ samurai build     (the actual compile + link)
    ├─ post_build hooks  (once, after the first successful build)
-   └─ task execution    (test binaries, run, named tasks)
+   └─ command execution (test binaries, run, named tasks)
 ```
 
-Hooks fire once per invocation; `clean` and `compdb` never trigger them.
+Hooks fire once per invocation — including partial builds (`--target`,
+`test`): a hook that reads artifacts outside the requested graph must
+tolerate them being absent. `clean` and `compdb` never trigger them, and a
+dry run (`-n`) has no side effects at all.
 
 ### Compilation Database
 
@@ -477,9 +484,9 @@ proj.compile_commands();  // writes to project root
 proj.compile_commands("build/compile_commands.json");  // custom path
 ```
 
-This is also available as the built-in `compdb` task: `./truss compdb`.
-Named tasks (`./truss <name>`) stay manual commands — hooks are for what must
-always run around the build itself.
+This is also available as the built-in `compdb` command: `./truss compdb`.
+Named tasks (`./truss task <name>`) stay manual commands — hooks are for what
+must always run around the build itself.
 
 ## Scripting helpers (os / fs / log)
 
@@ -519,7 +526,7 @@ At a glance:
 | `os::find_program` / `program_exists` / `all_programs` / `any_program` | fork-free `$PATH` walk, memoized |
 | `os::env(name)` / `os::env(name, def)` | `optional<string>`; typed lenient parse with default |
 | `os::cpu_count` / `memory_bytes` / `os_version` / `hostname` / `temp_dir` | runtime machine facts |
-| `os::run` / `os::capture` (+ `RunOptions{.cwd}`) | spawn; non-zero exit is a result, spawn failure an `Error` |
+| `os::run` / `os::capture` (+ `RunOptions{.cwd, .timeout}`) | spawn; non-zero exit is a result, spawn failure an `Error`; the timeout (default 600 s) kills the child's whole process group |
 | `fs::glob` / `glob({...})` | `*` `**` `?` `{a,b}`, sorted, forgiving |
 | `fs::walk(dir, {.depth, .skip_hidden})` | lazy `truss::generator`, composes with ranges |
 | `fs::find_upward` / `first_existing` / `find_library` | workspace-root discovery, library file lookup |
@@ -528,42 +535,57 @@ At a glance:
 | `fs::current_dir` / `copy_tree` / `generic_str` | misc path work |
 | `log::info/warn/success/error` | truss's own colored output channel |
 
-POSIX is fully implemented; Windows-specific probes currently return
-`nullopt`/`0` (v0.2 item).
+Windows-specific probes currently return `nullopt`/`0` — truss is a
+POSIX-host tool (Linux is the tested host).
 
 ## C++ modules
 
-Your project's `.cppm` files are handled automatically (`modules_mode(Auto)`,
-the default): each interface unit gets a BMI compile edge (`-fmodule-output`),
-and every other unit in the target — and in targets that `depends_on()` it —
-receives the matching `-fmodule-file=NAME=path` flags. The wiring is a **full
-transitive closure**: if you `import A;` and `A` imports `B` (whether
-`export import` or a plain `import`), `B`'s BMI is threaded through too, because
-clang needs every BMI a consumed BMI refers to. Import scanning is a
-conservative v0.1 regex pass over each unit (module/import declarations only).
+Your project's `.cppm` files are handled automatically. Each interface unit
+gets a BMI/CMI compile edge, and every other unit in the target — and in
+targets that `depends_on()` it — is wired with the **full transitive
+closure**: if you `import A;` and `A` imports `B` (whether `export import`
+or a plain `import`), `B`'s BMI is threaded through too, because the
+compiler needs every BMI a consumed BMI refers to.
 
-**`import std;`** is built for real on clang + libc++ (C++23 or later): truss
-discovers libc++'s module manifest, compiles the `std` (and `std.compat`) BMI
-and object, wires `-fmodule-file=std=` into consumers and links the std object
-once per binary — no manual setup. It is deduped to one std build per toolchain
-and `-std` version. zig, GCC, MSVC and clang + libstdc++ cannot build the std
-module and give a clear Config error.
+**How imports are discovered** (`modules_mode`, default `Auto`):
+
+1. **The compiler's own scan (authoritative, the default when available)** —
+   clang via `clang-scan-deps`, GCC via `-fdeps-format=p1689r5`, run at
+   configure time in parallel (~10 ms per TU). The import lists are the
+   compiler's own: exact partition names, imports the text scan cannot see
+   (line-spliced `import \` continuations, macro-gated imports). A TU that
+   includes a not-yet-generated header (the codegen pattern) cannot be
+   preprocessed — truss falls back to the text scan for that unit with a
+   warning.
+2. **The text scan (fallback, and the GCC<14/clang-without-scan-deps path)** —
+   a hand-rolled line scanner over each file, after comments, strings, char
+   literals and raw strings have been blanked: `import`/`module`
+   declarations only count when they are real code. Documented limitation:
+   line-spliced imports are missed (the compiler scan finds them).
+
+`modules_mode(Manual)` demands the compiler scan (clang or GCC; a clear
+error otherwise). `modules_mode(Off)` disables the wiring (`.cppm` then
+errors rather than being silently miscompiled). Header-unit imports
+(`import <vector>;` / `import "x.h";`) are **not supported** — truss fails
+with an explicit Config error telling you to `#include` the header instead
+(the compilers' scanners cannot report header units reliably yet).
+
+**GCC specifics**: CMIs (`.gcm`) are routed through a per-target
+module-mapper file (`build/<mode>/modmap/<triple>/<target>.map`) — no
+`gcm.cache` in your source tree.
+
+**`import std;`** is built for real on clang + libc++ **and GCC 15+**
+(libstdc++), C++23 or later: truss discovers the standard library's module
+manifest, compiles the `std` (and `std.compat`) BMI/CMI + object once per
+(triple, `-std`, hardening/sanitizer/LTO config) and caches it, wires the
+consumers and links the std object once per binary — no manual setup. zig,
+MSVC and clang + libstdc++ give a clear Config error today.
 
 ```cpp
 proj.add_static_library("math").sources_in("src/math"); // src/math/math.cppm inside
 proj.add_executable("calc").sources("src/calc.cpp").depends_on(math);
 // calc.cpp's `import math;` just works
 ```
-
-`modules_mode(Off)` disables the wiring (`.cppm` then errors rather than being
-silently miscompiled). Module BMI wiring is GCC/Clang-only for now; MSVC
-targets with `.cppm` sources get a clear config error.
-
-`modules_mode(Manual)` replaces the regex import scan with `clang-scan-deps`
-(p1689 JSON, run at configure time, ~10 ms per TU, parallel): the import
-lists become the compiler's own — exact partition names, and imports the
-regex cannot see (e.g. line-spliced `import \` continuations). Clang-family
-only. Use it when Auto mis-scans your sources.
 
 ## Dependencies
 
@@ -608,13 +630,18 @@ re-verified on every run — a corrupted cache entry is re-downloaded, never
 reused), materialized into `build/<mode>/packages/<name>`, and pinned in a
 `truss.lock` file next to your build script — so CI gets the same tree without
 a network round trip. Lockfile updates are serialized with an advisory file
-lock, so concurrent truss processes cannot lose each other's pins.
+lock (a stuck holder errors after 120 s instead of blocking forever).
+
+Downloads are bounded by `FetchOptions::timeout` (default 900 s, `0` =
+unlimited) with stall detection: a transfer crawling under 1 KiB/s for 30 s
+is aborted, so a stalled mirror cannot hang the build.
 
 Git trees are materialized with hardlinks (instant, no extra disk; real copies
 across filesystems). Caveat: a hardlinked fetched file shares its inode with
 the cache, so editing it *in place* inside `build/` also edits the cached copy
 — compilers replace files rather than write in place, so normal builds never
-hit this.
+hit this. Fetched trees (git and tarball alike) are scanned for symlinks
+escaping the package directory and refused.
 
 ### conan
 
@@ -655,9 +682,9 @@ unchanged `vcpkg.json` (sha256 fingerprint) + surviving install tree skips
 
 Link a library you already have as a file — a vendor drop, an SDK — instead
 of raw `-L`/`-l`. `import_library()` names the prebuilt `.a`/`.so`/`.dylib`/
-`.lib` file(s); dependents get them on their link line (in dependency order,
-after their objects) plus the usage requirements you set, and an imported
-`.so`/`.dylib` adds an rpath to its directory:
+`.lib` file(s); dependents get them on their link line (consumers before
+providers, after their objects) plus the usage requirements you set, and an
+imported `.so`/`.dylib` adds an rpath to its directory:
 
 ```cpp
 auto& greet = proj.import_library("greet")
@@ -711,7 +738,7 @@ skipped since ccache does not recognize zig). Explicit calls after
 `g++` + `libc++` and any `stdlib()` on MSVC targets are clear Config errors.
 `-stdlib=` is emitted on both compile and link lines. Per-target
 `cross_target(triple)` still overrides the project default completely, and
-`TargetTriple` gained a `stdlib` field for per-target selection too.
+`TargetTriple` has a `stdlib` field for per-target selection too.
 
 ### Compiler cache
 
@@ -728,56 +755,65 @@ The launcher applies to GCC/Clang-family compile rules only: MSVC rules and
 module BMI rules stay raw (ccache's C++20 module support is unreliable). A
 named launcher that isn't on `PATH` is a Config error.
 
-## Cross-compiling & MSVC
+## Subgraphs: several triples, one invocation
 
-The project-wide route is `Config::target`: the triple is passed to the
-driver (`--target=` for clang/clang-cl, `-target` for zig), and arch/OS are
-derived from it so outputs land in their own directory
-(`bin/arm64-linux-musl-zig/…`) and get the target's naming (`app.exe`,
-`libx.dll`, `libx.dylib`) and link conventions (no `-z relro`/`-soname`/
-`$ORIGIN` off ELF):
-
-```cpp
-// zig bundles libc headers + libc++ for every target: no sysroot to install
-proj.configure(truss::Config{}.toolchain(truss::Toolchain::Zig).target("aarch64-linux-musl"));
-```
-
-Plain clang works too with a sysroot (`.flags("--sysroot=...")`); GCC
-cross-compiles through a prefixed driver (`compiler("x86_64-w64-mingw32-g++")
-.target("x86_64-w64-mingw32")` for Windows via mingw-w64 — the prefixed
-driver IS the target selection) and rejects a bare `target()` with the
-non-prefixed driver. llvm-mingw's cross clang (`x86_64-w64-mingw32-clang++`)
-is a clang-family compiler: modules and `import std` cross to Windows out of
-the box, and the outputs run under wine (`runner("wine")`, with llvm-mingw's
-runtime dlls on `WINEPATH`). The CLI equivalent is `./truss release --cross
-aarch64-linux-musl` — no script edit needed. The design and roadmap are in
-[docs/cross-compilation.md](docs/cross-compilation.md).
-
-**Several triples at once (subgraphs).** `proj.targets({{name, Config}, ...})`
-builds the whole graph once per named configuration in a single invocation:
+`proj.targets({{name, Config}, ...})` builds the whole graph once per named
+configuration — one manifest, one `./truss` invocation, outputs in their
+per-triple directories:
 
 ```cpp
 proj.targets({
     {"linux", Config{}.toolchain(Toolchain::LLVM)},
     {"win",   Config{}.toolchain(Toolchain::Zig).target("x86_64-w64-mingw32")},
+    {"arm",   Config{}.toolchain(Toolchain::Zig).target("aarch64-linux-musl")},
 });
 ```
 
-Outputs land in their per-triple directories; `./truss test` runs every
-subgraph's tests with each subgraph's own runner; `--for win` narrows tasks
-to one subgraph; `--target win:app` builds one subgraph's target (a bare
-name applies to every subgraph that has it). Mutually exclusive with
-`configure()` and `--cross`.
+- Every target is built for every subgraph; each subgraph's artifacts land in
+  their own `bin/<triple>/`, `lib/<triple>/` dirs.
+- `./truss test` runs every subgraph's tests, each through that subgraph's
+  runner (`Config::runner`): the Linux tests run natively, the Windows ones
+  through wine, the musl ones through qemu — and a cross test without a
+  runner is built but skipped with a warning (never silently "passed").
+- `./truss --for win test` narrows the commands to one subgraph.
+- `--target win:app` builds one subgraph's target; a bare `--target app`
+  applies to every subgraph that has it.
+- The first declared subgraph is the default for `run`.
+
+Subgraph names follow target-name rules (no `:`, `all` reserved) and must be
+unique; two subgraphs may not share a triple (their outputs would collide —
+a Config error). `targets()` is mutually exclusive with `configure()`: the
+per-subgraph Configs *are* the project configuration. `for_host()` tools are
+pinned to the host in every subgraph.
+
+## Cross-compiling & MSVC
+
+Cross-compilation is first-class with four routes, all selected through
+`Config` (or per-target `cross_target()`):
+
+1. **zig** — `Toolchain::Zig` + `target("aarch64-linux-musl")`: bundled
+   sysroots for musl, glibc and Windows-gnu targets; no toolchain to install.
+2. **mingw-w64** — `compiler("x86_64-w64-mingw32-g++")
+   .target("x86_64-w64-mingw32")`: the target-prefixed GCC driver *is* the
+   target selection.
+3. **llvm-mingw** — `compiler("x86_64-w64-mingw32-clang++")`: clang-family,
+   so **modules and `import std` cross to Windows**; its libc++ runtime dlls
+   go on `WINEPATH` for wine.
+4. **plain clang / GCC + sysroot** — `.flags("--sysroot=...")`, or any
+   prefixed driver (`aarch64-linux-gnu-g++`).
+
+Outputs get the target's naming (`app.exe`, `libx.dll` + import `.dll.a`,
+`libx.dylib`) and link conventions (no `-z relro`/`-soname`/`$ORIGIN` off
+ELF).
 
 **Host tools in a cross build.** Mark build-time tools with `for_host()` —
-they always compile for the host triple, even when the project cross-compiles
-(`Config::target` or `--cross`), so generators and embedders run on the build
-machine. A `depends_on()` edge may not cross the host/target boundary (or join
-two different cross triples): different ABI, and truss fails with a Config
-error naming both sides. Run cross-compiled tests through a runner —
-`Config().runner("qemu-aarch64 -L /sysroot")` (or `"wine"`) — otherwise
-`./truss test` builds them but skips them with a warning (never silently
-"passed"):
+they always compile for the host triple, even when the project cross-compiles,
+so generators and embedders run on the build machine. A `depends_on()` edge
+may not cross the host/target boundary (or join two different cross triples):
+different ABI, and truss fails with a Config error naming both sides. Run
+cross-compiled tests through a runner — `Config().runner("qemu-aarch64 -L
+/sysroot")` or `runner("wine")` — otherwise `./truss test` builds them but
+skips them with a warning (never silently "passed"):
 
 ```cpp
 proj.configure(truss::Config{}.toolchain(truss::Toolchain::Zig).target("aarch64-linux-musl")
@@ -825,17 +861,14 @@ Notes:
 build/
   debug/                      # one dir per mode
     ninja/build.ninja         # generated manifest
-    obj/<triple>/<target>/…   # .o/.obj (+ .d depfiles, bmi/*.pcm)
+    obj/<triple>/<target>/…   # .o/.obj (+ .d depfiles, bmi/*.pcm | *.gcm)
+    modmap/<triple>/          # GCC module-mapper files (per target)
     bin/<triple>/<exe>        # executables
-    lib/<triple>/…            # archives, shared libs (+ MSVC import libs)
+    lib/<triple>/…            # archives, shared libs (+ import libs)
+    std/<triple>-<std>-<cfg>/ # the std module's BMI/CMI + object, cached
     packages/<name>           # fetch() checkouts (packages/conan for conan)
     vcpkg_installed/          # package-manager installs
 ```
-
-The manifest is regenerated on every run (cheap, ~ms) and samurai does the
-incremental work: depfiles (or `.ninja_deps` records), build-log reuse, and
-correct rebuild sets — verified by tests that touch a file and assert exactly
-which edges rerun.
 
 ## Errors
 
@@ -895,7 +928,7 @@ end-to-end:
 | `examples/fetch` | `fetch()` git/tarball packages, pinned in `truss.lock` |
 | `examples/conan` / `examples/vcpkg` | package-manager graphs as one `depends_on()` |
 | `examples/imported` | `import_library("name").import_archive(...)`: linking a prebuilt `.a` with `system_include_dirs()` + deref-free `depends_on()` |
-| `examples/cross-host` | `Config().toolchain(Toolchain::Zig).target("aarch64-linux-musl")` with a `for_host()` codegen tool; host↔cross `depends_on()` is a Config error, cross tests build then skip with a warning |
+| `examples/cross-host` | a zig cross build with a `for_host()` codegen tool; host↔cross `depends_on()` is a Config error, cross tests build then skip with a warning |
 | `examples/installed` / `examples/amalgam` | consuming an installed truss / the single-header drop-in |
 
 ## Status & support matrix
@@ -907,9 +940,9 @@ Windows from Linux is first-class.
 | Feature | GCC (15+) | Clang | MSVC (cl.exe / clang-cl) |
 |---|---|---|---|
 | Executable / static / shared / interface | ✅ | ✅ | ✅ (built via clang-cl cross-build; not yet run on Windows) |
-| Globbing, tasks, compdb, incremental | ✅ | ✅ | ✅ |
+| Globbing, commands, compdb, incremental | ✅ | ✅ | ✅ |
 | Sanitizers, LTO, per-target options | ✅ | ✅ | ✅ (no ThinLTO — maps to `/GL`) |
-| C++ modules for your project | ✅ (module mapper, p1689 scan) | ✅ (clang-scan-deps) | ❌ (clear error) |
+| C++ modules for your project | ✅ (module mapper, compiler p1689 scan) | ✅ (clang-scan-deps) | ❌ (clear error) |
 | `import std;` / `import std.compat;` | ✅ (GCC 15+) | ✅ (libc++, C++23+) | ❌ (clear error) |
 | `merge()` combined archives | ✅ | ✅ | ❌ (clear error) |
 | self-rebuild tracks truss.cpp + its headers + truss BMIs | ✅ | ✅ | — |
@@ -919,12 +952,8 @@ Windows from Linux is first-class.
 | zig cross (`Toolchain::Zig` + `target`) | — | ✅ verified: musl / aarch64-musl / windows-gnu / gnu.2.17 (modules: ❌, Config error) | — |
 | mingw cross (Linux → Windows) | ✅ `x86_64-w64-mingw32-g++` + target | ✅ llvm-mingw: modules + `import std`; runs under wine | — |
 
-Known limitations: paths containing spaces or `:` are rejected (ninja
-escaping, conservative); truss runs on POSIX hosts only; zig cannot build
-C++20 modules or PCH (Config error); header-unit imports (`import <x>`)
-resolve as headers, not BMIs (the compilers' scanners are not ready for them
-either).
-
-`docs/1.0-roadmap.md` tracks the road to 1.0; `PLAN.MD` the original phase plan;
-`AGENT.MD` records verified toolchain facts; vendored samurai patches are in
-`vendor/samurai/TRUSS-VENDOR.txt`.
+Known limitations: paths containing spaces or `:` are rejected for sources,
+target names and other manifest paths (include dirs are quoted and may
+contain spaces); truss runs on POSIX hosts only; zig cannot build C++20
+modules or PCH (Config error); header-unit imports are refused with a clear
+error (the compilers' scanners cannot report them yet).

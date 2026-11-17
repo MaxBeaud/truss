@@ -81,17 +81,15 @@ linked) but must be runnable on the host — in a cross project it has to be
 
 ## Phase 3 — CLI selection and target matrices
 
-**Status: CLI + runner shipped; target matrices deferred** (one subgraph per
-triple would require resolving every target per triple — the emitter is
-single-triple today; revisit as its own phase).
+**Status: shipped** (per-triple subgraphs: `proj.targets({{"name", Config{}}, ...})`
+resolves and emits one subgraph per triple into the same manifest, with
+per-subgraph runners and `--for` / compound `--target` selection).
 
-- `./truss release --cross aarch64-linux-musl` overrides `Config::target` without
-  editing the script (outputs already land in their own `triple_dir`). Parsed in
-  the `Project` ctor; malformed triples are Config errors reported by `build()`.
-- `proj.targets({"x86_64-linux-gnu.2.17", "aarch64-linux-musl", "x86_64-windows-gnu"})`
+- `proj.targets({{"gnu217", Config{}.toolchain(Toolchain::Zig).target("x86_64-linux-gnu.2.17")},
+                 {"musl",  Config{}.toolchain(Toolchain::Zig).target("aarch64-linux-musl")},
+                 {"win",   Config{}.toolchain(Toolchain::Zig).target("x86_64-w64-mingw32")}})`
   emits one subgraph per triple into the same manifest, so samurai builds the
   whole matrix in parallel with a single invocation (`all` = every triple).
-  **Not yet implemented.**
 - Cross tests: `Config::runner("qemu-aarch64 -L <sysroot>")` / `"wine"`
   prefixes `test`/`run` execution (split on spaces); without a runner, cross
   test executables are built but skipped with a warning (never silently
