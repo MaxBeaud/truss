@@ -843,18 +843,29 @@ Result<void> emit_manifest(const Project& proj, std::vector<ResolvedTarget>& res
         if (!cflags)
             return std::unexpected(cflags.error());
 
-        /* Manual mode: replace the regex import lists with clang-scan-deps'
-         * authoritative closures (parallel; ~10 ms per TU). */
-        if (t.modules_mode() == ModulesMode::Manual) {
-            if (r.triple.family != CompilerFamily::Clang)
-                return std::unexpected(Error {
-                    Error::Kind::Config,
-                    "modules_mode(Manual) requires a clang-family compiler (clang-scan-deps)",
-                });
-            if (!os::program_exists("clang-scan-deps"))
-                return std::unexpected(Error {
-                    Error::Kind::Toolchain, "modules_mode(Manual): clang-scan-deps not found on PATH",
-                });
+        /* Authoritative import lists via clang-scan-deps (parallel; ~10 ms per
+         * TU). Manual demands it; Auto (the default — Default resolves to
+         * Auto here) uses it whenever the toolchain can run it — clang
+         * family, not zig (whose two-token driver clang-scan-deps cannot
+         * parse) — and falls back to the hand-rolled lexer scan otherwise. */
+        const bool scan_deps_usable = r.triple.family == CompilerFamily::Clang
+                                      && !detail::is_zig(r.triple)
+                                      && os::program_exists("clang-scan-deps");
+        const ModulesMode mm = t.modules_mode() == ModulesMode::Default
+                                   ? ModulesMode::Auto
+                                   : t.modules_mode();
+        if (mm == ModulesMode::Manual || (mm == ModulesMode::Auto && scan_deps_usable)) {
+            if (t.modules_mode() == ModulesMode::Manual) {
+                if (r.triple.family != CompilerFamily::Clang)
+                    return std::unexpected(Error {
+                        Error::Kind::Config,
+                        "modules_mode(Manual) requires a clang-family compiler (clang-scan-deps)",
+                    });
+                if (!os::program_exists("clang-scan-deps"))
+                    return std::unexpected(Error {
+                        Error::Kind::Toolchain, "modules_mode(Manual): clang-scan-deps not found on PATH",
+                    });
+            }
             /* scratch in a temp_scope: unique per run, removed at scope end
              * (declared before the pool so it outlives the workers) */
             const os::temp_scope scratch;
@@ -876,8 +887,17 @@ Result<void> emit_manifest(const Project& proj, std::vector<ResolvedTarget>& res
                 /* jthread destructors join at scope end */
             }
             for (size_t i = 0; i < r.units.size(); ++i) {
-                if (!scanned[i])
-                    return std::unexpected(scanned[i].error());
+                if (!scanned[i]) {
+                    if (t.modules_mode() == ModulesMode::Manual)
+                        return std::unexpected(scanned[i].error());
+                    /* Auto: scan-deps preprocesses, so a TU that includes a
+                     * not-yet-generated header (the codegen pattern) cannot be
+                     * scanned — fall back to this unit's heuristic import list */
+                    log::warn("clang-scan-deps failed for '" + r.units[i].path + "' ("
+                              + scanned[i].error().message
+                              + "); falling back to the heuristic module scan");
+                    continue;
+                }
                 r.units[i].imports = std::move(*scanned[i]);
             }
         }

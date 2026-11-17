@@ -658,7 +658,7 @@ TEST_CASE("modules: Manual mode wires via clang-scan-deps and builds") {
     CHECK(manifest->find("-fmodule-file=math:part=") != std::string::npos);
 }
 
-TEST_CASE("modules: regex scan misses line-spliced imports, Manual finds them") {
+TEST_CASE("modules: the lexer misses line-spliced imports; clang-scan-deps (the Auto default) finds them") {
     if (!os::program_exists("clang-scan-deps")) {
         MESSAGE("clang-scan-deps not installed, skipping");
         return;
@@ -667,18 +667,24 @@ TEST_CASE("modules: regex scan misses line-spliced imports, Manual finds them") 
     char prog[] = "truss-tests";
     char* argv[] = {prog};
     REQUIRE(detail::write_file("mg/math.cppm", "export module math;\nexport int f() { return 3; }\n").has_value());
-    /* the import is line-spliced: the line-anchored regex scan cannot see it */
+    /* the import is line-spliced: the heuristic (lexer) scan cannot see it */
     REQUIRE(detail::write_file("mg/app.cpp",
                                "import \\\n  math;\nint main() { return f() - 3; }\n").has_value());
 
-    { /* Auto: no -fmodule-file is wired, clang cannot find the BMI */
+    /* the lexer's documented limitation, tested directly */
+    auto scanned = detail::scan_module_unit("mg/app.cpp");
+    REQUIRE(scanned.has_value());
+    CHECK(scanned->imports.empty());
+
+    { /* Auto: clang-scan-deps preprocesses and reports the requirement */
         Project proj("modules-macro", 1, argv);
         auto& lib = proj.add_static_library("mathmod").sources("mg/math.cppm");
         proj.add_executable("app").sources("mg/app.cpp").depends_on(lib);
         auto r = proj.build();
-        REQUIRE_FALSE(r.has_value());
+        INFO((r ? "ok" : r.error().message));
+        CHECK(r.has_value());
     }
-    { /* Manual: scan-deps preprocesses and reports the requirement */
+    { /* Manual: the same, pinned explicitly */
         Project proj("modules-macro", 1, argv);
         auto& lib = proj.add_static_library("mathmod").sources("mg/math.cppm").modules_mode(ModulesMode::Manual);
         proj.add_executable("app").sources("mg/app.cpp").modules_mode(ModulesMode::Manual).depends_on(lib);

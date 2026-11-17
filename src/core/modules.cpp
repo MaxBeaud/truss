@@ -112,40 +112,86 @@ Result<ModuleUnitInfo> scan_module_unit(const std::string& path) {
     if (!text)
         return std::unexpected(text.error());
 
-    static const std::regex module_re(
-        R"(^[ \t]*(export[ \t]+)?module[ \t]+([A-Za-z_][A-Za-z0-9_:.]*)[ \t]*;)", std::regex::multiline);
-    static const std::regex import_re(
-        R"(^[ \t]*(export[ \t]+)?import[ \t]+([^;" \t][^;]*);)", std::regex::multiline);
-
     ModuleUnitInfo info;
     info.path = path;
     std::string s = std::move(*text);
     /* cheap pre-filter on the RAW text first: a file that never mentions
-     * module/import anywhere (the majority of TUs) skips the strip+regex
+     * module/import anywhere (the majority of TUs) skips the strip+scan
      * work entirely (the strip can only remove matches, never add them) */
     if (s.find("module") == std::string::npos && s.find("import") == std::string::npos)
         return info;
     /* comments and string/char/raw literals are blanked: module and import
      * statements only count when they are real code */
     s = strip_non_code(s);
-    std::smatch m;
-    if (std::regex_search(s, m, module_re))
-        info.module_name = m[2];
-    for (auto it = std::sregex_iterator(s.begin(), s.end(), import_re);
-         it != std::sregex_iterator(); ++it) {
-        const std::string name = (*it)[2];
-        if (name.starts_with('<'))
-            continue; /* header-unit import (import <vector>;): no BMI wiring */
-        /* split partition lists like `import :a, :b;` */
-        for (auto part_rng : std::views::split(name, ',')) {
-            if (part_rng.empty())
-                continue; /* `import a,;` — an empty part between separators */
-            const std::string_view part(&*part_rng.begin(), static_cast<std::size_t>(std::ranges::distance(part_rng)));
-            const auto b = part.find_first_not_of(" \t");
-            const auto e = part.find_last_not_of(" \t");
-            if (b != std::string_view::npos)
-                info.imports.emplace_back(part.substr(b, e - b + 1));
+
+    /* Hand-rolled line scan (replaced two std::regex passes — the ECMAScript
+     * engine cost microseconds per attempted line on the configure hot path).
+     * Semantics preserved: a statement starts at a line whose only leading
+     * whitespace may be followed by `export`, then the keyword; the statement
+     * runs to the first `;` (import lists may wrap lines). Line-spliced
+     * imports (`import \<newline> math;`) are still missed — the authoritative
+     * scan for those is clang-scan-deps (ModulesMode::Manual / Auto below). */
+    const auto is_kw_at = [&](std::size_t i, std::string_view kw) {
+        return i + kw.size() < s.size() && s.compare(i, kw.size(), kw) == 0
+            && (s[i + kw.size()] == ' ' || s[i + kw.size()] == '\t');
+    };
+    std::size_t pos = 0;
+    while (pos < s.size()) {
+        std::size_t i = pos;
+        while (i < s.size() && (s[i] == ' ' || s[i] == '\t'))
+            ++i;
+        if (is_kw_at(i, "export")) {
+            i += 7;
+            while (i < s.size() && (s[i] == ' ' || s[i] == '\t'))
+                ++i;
         }
+        if (is_kw_at(i, "module")) {
+            i += 7;
+            while (i < s.size() && (s[i] == ' ' || s[i] == '\t'))
+                ++i;
+            std::size_t j = i;
+            if (j < s.size() && (std::isalpha(static_cast<unsigned char>(s[j])) || s[j] == '_'))
+                while (j < s.size() && (std::isalnum(static_cast<unsigned char>(s[j])) || s[j] == '_'
+                                        || s[j] == ':' || s[j] == '.'))
+                    ++j;
+            std::size_t k = j;
+            while (k < s.size() && (s[k] == ' ' || s[k] == '\t'))
+                ++k;
+            if (j > i && k < s.size() && s[k] == ';')
+                info.module_name = s.substr(i, j - i); /* bare `module;` (GMF) leaves it empty */
+        } else if (is_kw_at(i, "import")) {
+            i += 7;
+            while (i < s.size() && (s[i] == ' ' || s[i] == '\t'))
+                ++i;
+            const auto semi = s.find(';', i);
+            if (semi != std::string::npos) {
+                const std::string_view cap(s.data() + i, semi - i);
+                /* header units (`import <x>;` / `import "x";`) take no BMI wiring */
+                if (!cap.empty() && cap.front() != '<' && cap.front() != '"'
+                    && cap.front() != ';' && cap.front() != ' ' && cap.front() != '\t') {
+                    /* split partition lists like `import :a, :b;` */
+                    for (auto part_rng : std::views::split(cap, ',')) {
+                        if (part_rng.empty())
+                            continue; /* `import a,;` — an empty part between separators */
+                        const std::string_view part(&*part_rng.begin(),
+                                                    static_cast<std::size_t>(std::ranges::distance(part_rng)));
+                        const auto b = part.find_first_not_of(" \t\r\n");
+                        const auto e = part.find_last_not_of(" \t\r\n");
+                        if (b == std::string_view::npos)
+                            continue;
+                        const std::string_view name = part.substr(b, e - b + 1);
+                        /* a backslash means the import was line-spliced: the
+                         * heuristic scan misses it by design (clang-scan-deps
+                         * preprocesses and finds it) */
+                        if (!name.contains('\\'))
+                            info.imports.emplace_back(name);
+                    }
+                }
+                pos = semi; /* keep scanning after the statement */
+            }
+        }
+        const auto eol = s.find('\n', pos);
+        pos = eol == std::string::npos ? s.size() : eol + 1;
     }
     return info;
 }
