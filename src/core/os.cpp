@@ -191,7 +191,7 @@ std::filesystem::path temp_dir() {
 
 namespace {
 Result<ProcessResult> spawn(std::span<const std::string> argv, bool capture, const RunOptions& opts) {
-    return detail::run_process(argv, capture, opts.cwd)
+    return detail::run_process(argv, capture, opts.cwd, opts.timeout)
         .transform([](auto outcome) { return ProcessResult {outcome.exit_code, std::move(outcome.output)}; });
 }
 } // namespace

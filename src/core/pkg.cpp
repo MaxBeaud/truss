@@ -2,6 +2,7 @@ module;
 #include <algorithm>
 #include <atomic>
 #include <cctype>
+#include <chrono>
 #include <expected>
 #include <filesystem>
 #include <initializer_list>
@@ -49,7 +50,7 @@ std::filesystem::path staging_path(const std::filesystem::path& p) {
  * elsewhere (single-user machines). */
 class lockfile_guard {
 public:
-    explicit lockfile_guard(const std::filesystem::path& file) {
+    explicit lockfile_guard(const std::filesystem::path& file, int wait_seconds = 120) {
 #if !defined(_WIN32)
         /* O_CLOEXEC: the guard is held across materialize_fetch, which spawns
          * git/curl/tar — an inherited fd would carry the flock into children
@@ -57,13 +58,19 @@ public:
         fd_ = ::open(file.c_str(), O_CREAT | O_RDWR | O_CLOEXEC, 0666);
         if (fd_ == -1)
             return;
-        while (::flock(fd_, LOCK_EX) != 0)
-            if (errno != EINTR) {
-                ::close(fd_);
-                fd_ = -1;
+        /* non-blocking retry loop with a deadline: a wedged holder must
+         * produce a clear error, not a silently blocked build */
+        const auto deadline =
+            std::chrono::steady_clock::now() + std::chrono::seconds(wait_seconds);
+        for (;;) {
+            if (::flock(fd_, LOCK_EX | LOCK_NB) == 0) {
+                locked_ = true;
                 return;
             }
-        locked_ = true;
+            if (errno != EWOULDBLOCK || std::chrono::steady_clock::now() >= deadline)
+                return; /* real error or a stuck holder: locked() stays false */
+            ::usleep(100 * 1000);
+        }
 #endif
     }
     lockfile_guard(const lockfile_guard&) = delete;
@@ -106,8 +113,8 @@ bool looks_like_commit(std::string_view ref) {
     return true;
 }
 
-Result<void> run_tool(std::span<const std::string> argv, std::string_view what) {
-    auto outcome = detail::run_process(argv, true);
+Result<void> run_tool(std::span<const std::string> argv, std::string_view what, int timeout_seconds = 600) {
+    auto outcome = detail::run_process(argv, true, timeout_seconds);
     if (!outcome)
         return std::unexpected(outcome.error());
     if (outcome->exit_code != 0) {
@@ -120,26 +127,35 @@ Result<void> run_tool(std::span<const std::string> argv, std::string_view what) 
 }
 
 Result<void> git_fetch(const std::string& url, const std::string& ref,
-                       const std::filesystem::path& dest) {
+                       const std::filesystem::path& dest, int timeout_seconds) {
     const std::filesystem::path tmp = staging_path(dest);
     std::error_code ec;
     std::filesystem::remove_all(tmp, ec); /* best effort */
     const auto cleanup = [&] { std::filesystem::remove_all(tmp, ec); };
+    /* a stalled mirror must not hold the fetch (and the lockfile) forever:
+     * abort transfers crawling under 1 KiB/s for 30 s */
+    const std::vector<std::string> git_slow {"git", "-c", "http.lowSpeedLimit=1024",
+                                             "-c", "http.lowSpeedTime=30"};
     if (!looks_like_commit(ref)) {
-        const std::vector<std::string> argv {"git", "clone", "--depth", "1", "--branch", ref, url,
-                                            tmp.generic_string()};
-        if (auto r = run_tool(argv, "git clone"); !r) {
+        std::vector<std::string> argv = git_slow;
+        argv.insert(argv.end(), {"clone", "--depth", "1", "--branch", ref, url,
+                                 tmp.generic_string()});
+        if (auto r = run_tool(argv, "git clone", timeout_seconds); !r) {
             cleanup(); /* a failed clone must not leave staging garbage */
             return r;
         }
     } else {
         const std::string d = tmp.generic_string();
-        for (const std::vector<std::string>& argv :
-             {std::vector<std::string> {"git", "init", d},
-              std::vector<std::string> {"git", "-C", d, "remote", "add", "origin", url},
-              std::vector<std::string> {"git", "-C", d, "fetch", "--depth", "1", "origin", ref},
-              std::vector<std::string> {"git", "-C", d, "checkout", "--detach", "FETCH_HEAD"}}) {
-            if (auto r = run_tool(argv, "git"); !r) {
+        const auto step = [&](std::vector<std::string> tail) {
+            std::vector<std::string> argv = git_slow;
+            argv.insert(argv.end(), tail.begin(), tail.end());
+            return argv;
+        };
+        for (const auto& argv : {step({"init", d}),
+                                 step({"-C", d, "remote", "add", "origin", url}),
+                                 step({"-C", d, "fetch", "--depth", "1", "origin", ref}),
+                                 step({"-C", d, "checkout", "--detach", "FETCH_HEAD"})}) {
+            if (auto r = run_tool(argv, "git", timeout_seconds); !r) {
                 cleanup();
                 return r;
             }
@@ -160,7 +176,7 @@ Result<void> git_fetch(const std::string& url, const std::string& ref,
 }
 
 Result<void> tarball_fetch(const std::string& url, const std::string& sha256,
-                           const std::filesystem::path& cache_file) {
+                           const std::filesystem::path& cache_file, int timeout_seconds) {
     std::error_code ec;
     if (std::filesystem::exists(cache_file, ec)) {
         /* verify the cached bytes too: an entry written by an interrupted or
@@ -171,8 +187,15 @@ Result<void> tarball_fetch(const std::string& url, const std::string& sha256,
         std::filesystem::remove(cache_file, ec); /* corrupt or unreadable: refetch */
     }
     const std::filesystem::path tmp = staging_path(cache_file);
-    const std::vector<std::string> curl {"curl", "-fsSL", "--retry", "2", "-o", tmp.generic_string(), url};
-    if (auto r = run_tool(curl, "curl"); !r) {
+    std::vector<std::string> curl {"curl", "-fsSL", "--retry", "2",
+                                   "--connect-timeout", "15",
+                                   /* a stalled mirror must not hang the build:
+                                    * abort transfers under 1 KiB/s for 30 s */
+                                   "--speed-limit", "1024", "--speed-time", "30"};
+    if (timeout_seconds > 0)
+        curl.insert(curl.end(), {"--max-time", std::to_string(timeout_seconds)});
+    curl.insert(curl.end(), {"-o", tmp.generic_string(), url});
+    if (auto r = run_tool(curl, "curl", timeout_seconds); !r) {
         std::filesystem::remove(tmp, ec);
         return r;
     }
@@ -424,6 +447,10 @@ Result<void> validate_fetch(const std::string& pkg_name, const FetchOptions& opt
             Error::Kind::Config,
             "fetch('" + pkg_name + "'): sha256 must be 64 hex characters",
         });
+    if (opts.timeout < 0)
+        return std::unexpected(Error {
+            Error::Kind::Config, "fetch('" + pkg_name + "'): timeout must not be negative",
+        });
     return {};
 }
 
@@ -446,7 +473,7 @@ Result<void> materialize_fetch(const std::string& pkg_name, const FetchOptions& 
             log::info("fetching " + pkg_name + " (" + opts.git + " @ " + opts.tag + ")");
             if (auto r = detail::make_dirs(git_cache.parent_path()); !r)
                 return std::unexpected(r.error());
-            if (auto r = git_fetch(opts.git, opts.tag, git_cache); !r)
+            if (auto r = git_fetch(opts.git, opts.tag, git_cache, opts.timeout); !r)
                 return std::unexpected(r.error());
             /* a git repo can ship symlinks exactly like a tarball: the same
              * escape check runs here before anything hardlinks the tree */
@@ -467,7 +494,7 @@ Result<void> materialize_fetch(const std::string& pkg_name, const FetchOptions& 
         return std::unexpected(r.error());
     if (!std::filesystem::exists(tar_cache, ec)) {
         log::info("fetching " + pkg_name + " (" + opts.url + ")");
-        if (auto r = tarball_fetch(opts.url, opts.sha256, tar_cache); !r)
+        if (auto r = tarball_fetch(opts.url, opts.sha256, tar_cache, opts.timeout); !r)
             return std::unexpected(r.error());
     }
     std::filesystem::remove_all(dest, ec);
@@ -521,7 +548,7 @@ Result<std::vector<Package>> Project::fetch_all(std::vector<std::pair<std::strin
         return std::unexpected(Error {
             Error::Kind::Io,
             "fetch_all: cannot lock " + lock_file.generic_string() +
-                " (concurrent fetches would corrupt the pin file)",
+                " within 120s — another truss process holds it (or it is not lockable)",
         });
     auto lock = detail::read_lockfile(lock_file);
     std::vector<Job> jobs;
@@ -765,7 +792,7 @@ Result<TargetRef> Project::conan(std::string_view conanfile) {
     const std::vector<std::string> argv {"conan", "install", cf.generic_string(),
                                          "--format=json", "--output-folder", out.generic_string(),
                                          "--build=missing"};
-    auto outcome = detail::run_process_stdout(argv);
+    auto outcome = detail::run_process_stdout(argv, 900);
     if (!outcome)
         return std::unexpected(outcome.error());
     if (outcome->exit_code != 0)
@@ -930,7 +957,7 @@ Result<TargetRef> Project::vcpkg(std::vector<std::string> packages) {
         const std::vector<std::string> argv {exe, "install", "--triplet", triplet,
                                              "--x-install-root", install_root.generic_string(),
                                              "--no-print-usage"};
-        auto outcome = detail::run_process(argv, false, cwd_);
+        auto outcome = detail::run_process(argv, false, cwd_, 900);
         if (!outcome)
             return std::unexpected(outcome.error());
         if (outcome->exit_code != 0)

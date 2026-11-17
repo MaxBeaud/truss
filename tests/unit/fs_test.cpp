@@ -3,9 +3,11 @@ module;
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <string_view>
 #include <vector>
 
 module truss;
@@ -13,6 +15,12 @@ import :api;
 import :impl;
 
 using namespace truss;
+
+namespace {
+bool contains(std::string_view hay, std::string_view needle) {
+    return hay.find(needle) != std::string_view::npos;
+}
+} // namespace
 
 TEST_CASE("fs: write_file creates parents and round-trips") {
     const auto p = std::filesystem::temp_directory_path() / "truss-test-fs/nested/out.txt";
@@ -78,6 +86,40 @@ TEST_CASE("proc: spawn failure is a Command error") {
 TEST_CASE("proc: program_exists") {
     CHECK(os::program_exists("sh"));
     CHECK_FALSE(os::program_exists("definitely-not-a-command-xyzzy"));
+}
+
+TEST_CASE("proc: capture timeout kills the process group") {
+    const auto t0 = std::chrono::steady_clock::now();
+    auto r = os::capture({"sh", "-c", "sleep 30; echo done"}, {.timeout = 1});
+    const auto elapsed = std::chrono::steady_clock::now() - t0;
+    REQUIRE_FALSE(r.has_value());
+    CHECK(r.error().kind == Error::Kind::Command);
+    CHECK(contains(r.error().message, "timed out"));
+    /* the kill must be prompt, not a 30 s wait for the child */
+    CHECK(elapsed < std::chrono::seconds(10));
+}
+
+TEST_CASE("proc: a daemonizing grandchild cannot wedge the capture") {
+    /* the backgrounded sleep inherits the capture pipe and outlives sh:
+     * without the process-group kill this capture would hang for 30 s */
+    const auto t0 = std::chrono::steady_clock::now();
+    auto r = os::capture({"sh", "-c", "sleep 30 & echo started"}, {.timeout = 2});
+    const auto elapsed = std::chrono::steady_clock::now() - t0;
+    REQUIRE_FALSE(r.has_value());
+    CHECK(contains(r.error().message, "timed out"));
+    CHECK(elapsed < std::chrono::seconds(10));
+}
+
+TEST_CASE("proc: a detached grandchild releases the pipe (no false timeout)") {
+    auto r = os::capture({"sh", "-c", "sleep 30 >/dev/null 2>&1 & echo hi"}, {.timeout = 5});
+    REQUIRE(r.has_value());
+    CHECK(contains(r->output, "hi"));
+}
+
+TEST_CASE("proc: run() without a timeout is unbounded (0 = none)") {
+    auto r = os::run({"sh", "-c", "sleep 1"}, {.timeout = 0});
+    REQUIRE(r.has_value());
+    CHECK(r->exit_code == 0);
 }
 
 TEST_CASE("triple: host detection is populated") {

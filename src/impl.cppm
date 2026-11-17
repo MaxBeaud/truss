@@ -95,16 +95,19 @@ struct ProcOutcome {
     std::string output;  ///< captured stdout (+stderr) when requested
 };
 /// Spawn argv via posix_spawnp (PATH search); optionally capture merged output.
+/// The child runs in its own process group; timeout_seconds (0 = none, default
+/// 600) SIGKILLs the whole group on expiry and returns a Command error.
 /// \ingroup grp_internals
-Result<ProcOutcome> run_process(std::span<const std::string> argv, bool capture);
+Result<ProcOutcome> run_process(std::span<const std::string> argv, bool capture,
+                                int timeout_seconds = 600);
 /// Spawn argv in cwd ("" = inherit).
 /// \ingroup grp_internals
 Result<ProcOutcome> run_process(std::span<const std::string> argv, bool capture,
-                                const std::filesystem::path& cwd);
+                                const std::filesystem::path& cwd, int timeout_seconds = 600);
 /// Spawn capturing stdout only; stderr passes through (machine-readable
 /// tool output, e.g. `conan install --format=json`).
 /// \ingroup grp_internals
-Result<ProcOutcome> run_process_stdout(std::span<const std::string> argv);
+Result<ProcOutcome> run_process_stdout(std::span<const std::string> argv, int timeout_seconds = 600);
 /* program probing lives in the public truss::os (os::program_exists). */
 
 /* --- C++ module scanning -------------------------------------------------- */

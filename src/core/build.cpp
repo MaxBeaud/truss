@@ -2216,7 +2216,7 @@ Result<void> Project::build() {
                     }
                     log::info("running " + exe + (cross ? " (via runner '" + config_.runner() + "')" : ""));
                     const auto argv = exec_argv(config_, cross, exe);
-                    auto outcome = detail::run_process(argv, false);
+                    auto outcome = detail::run_process(argv, false, {}, 0); /* tests: no timeout */
                     if (!outcome)
                         return std::unexpected(outcome.error());
                     if (outcome->exit_code != 0) {
@@ -2266,7 +2266,7 @@ Result<void> Project::build() {
                 }
                 auto argv = exec_argv(config_, exe_cross.front(), exe_outputs.front());
                 argv.insert(argv.end(), run_args_.begin(), run_args_.end());
-                auto outcome = detail::run_process(argv, false);
+                auto outcome = detail::run_process(argv, false, {}, 0); /* run: no timeout */
                 if (!outcome)
                     return std::unexpected(outcome.error());
                 if (outcome->exit_code != 0)

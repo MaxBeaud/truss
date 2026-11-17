@@ -169,6 +169,10 @@ struct FetchOptions {
     std::string tag;    ///< tag / branch / commit to pin
     std::string url;    ///< tarball URL
     std::string sha256; ///< expected tarball hash
+    /// Wall-clock budget for the download in seconds (0 = no limit); below it,
+    /// transfers are also aborted after 30 s at under 1 KiB/s (a stalled
+    /// mirror must hang the build, and the lockfile, forever). Default 900 s.
+    int timeout {900};
 };
 
 /// A fetched dependency materialized under `build/\<mode\>/packages/\<name\>`.
@@ -505,6 +509,11 @@ struct ProcessResult {
 /// Where run()/capture() execute; empty cwd = inherit.
 struct RunOptions {
     std::filesystem::path cwd {};
+    /// Wall-clock budget for the child in seconds (0 = no limit). On expiry
+    /// the child's whole process group is killed and a Command error is
+    /// returned. Default 600 s: a hung child (or a grandchild inheriting the
+    /// capture pipe) must not wedge the build forever.
+    int timeout {600};
 };
 /**
  * \brief Spawn argv (argv[0] searched on PATH); stdio passes through.

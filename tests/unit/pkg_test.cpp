@@ -92,6 +92,16 @@ TEST_CASE("fetch: option validation errors before any network access") {
     auto r4 = proj.fetch("x", tar);
     REQUIRE_FALSE(r4.has_value());
     CHECK(r4.error().kind == Error::Kind::Config);
+
+    /* negative timeout */
+    FetchOptions neg {};
+    neg.git = "https://example.invalid/x.git";
+    neg.tag = "v1";
+    neg.timeout = -5;
+    auto r5 = proj.fetch("x", neg);
+    REQUIRE_FALSE(r5.has_value());
+    CHECK(r5.error().kind == Error::Kind::Config);
+    CHECK(contains(r5.error().message, "timeout"));
 }
 
 TEST_CASE("fetch_all: validation and duplicate names before any network access") {
