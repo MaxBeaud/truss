@@ -56,8 +56,10 @@ public:
          * git/curl/tar — an inherited fd would carry the flock into children
          * that can outlive truss and hold the lock forever */
         fd_ = ::open(file.c_str(), O_CREAT | O_RDWR | O_CLOEXEC, 0666);
-        if (fd_ == -1)
+        if (fd_ == -1) {
+            why_ = "could not open it: " + std::string(std::strerror(errno));
             return;
+        }
         /* non-blocking retry loop with a deadline: a wedged holder must
          * produce a clear error, not a silently blocked build */
         const auto deadline =
@@ -67,8 +69,14 @@ public:
                 locked_ = true;
                 return;
             }
-            if (errno != EWOULDBLOCK || std::chrono::steady_clock::now() >= deadline)
-                return; /* real error or a stuck holder: locked() stays false */
+            if (errno != EWOULDBLOCK) { /* a real error, not a held lock */
+                why_ = "flock failed: " + std::string(std::strerror(errno));
+                return;
+            }
+            if (std::chrono::steady_clock::now() >= deadline) {
+                why_ = "another truss process held it for over " + std::to_string(wait_seconds) + "s";
+                return;
+            }
             ::usleep(100 * 1000);
         }
 #endif
@@ -86,10 +94,13 @@ public:
     /// False when the lockfile could not be opened/locked — callers must fail
     /// instead of silently racing on the read-modify-write.
     bool locked() const { return locked_; }
+    /// Why locked() is false ("could not open ..." / "timed out after Ns").
+    std::string why() const { return why_; }
 
 private:
     int fd_ {-1};
     bool locked_ {false};
+    std::string why_ {"locking unavailable on this platform"};
 };
 
 /* --- truss.lock: tiny key=value pin file in the project root -------------- */
@@ -126,6 +137,8 @@ Result<void> run_tool(std::span<const std::string> argv, std::string_view what, 
     return {};
 }
 
+Result<void> verify_no_escaping_links(const std::filesystem::path& dest);
+
 Result<void> git_fetch(const std::string& url, const std::string& ref,
                        const std::filesystem::path& dest, int timeout_seconds) {
     const std::filesystem::path tmp = staging_path(dest);
@@ -161,6 +174,13 @@ Result<void> git_fetch(const std::string& url, const std::string& ref,
             }
         }
     }
+    /* the escape check runs BEFORE the tree is published to the shared cache:
+     * a hostile repo must never land where another fetch (or a later run) can
+     * pick it up without re-verification */
+    if (auto r = verify_no_escaping_links(tmp); !r) {
+        cleanup();
+        return r;
+    }
     std::filesystem::rename(tmp, dest, ec);
     if (ec) {
         /* a concurrent truss process may have won the clone race: its
@@ -170,6 +190,7 @@ Result<void> git_fetch(const std::string& url, const std::string& ref,
             cleanup();
             return {};
         }
+        cleanup(); /* the rename failed outright: do not leak the staging tree */
         return std::unexpected(Error {Error::Kind::Io, "could not move git cache into place", tmp});
     }
     return {};
@@ -473,11 +494,9 @@ Result<void> materialize_fetch(const std::string& pkg_name, const FetchOptions& 
             log::info("fetching " + pkg_name + " (" + opts.git + " @ " + opts.tag + ")");
             if (auto r = detail::make_dirs(git_cache.parent_path()); !r)
                 return std::unexpected(r.error());
+            /* git_fetch verifies the symlink escape check before publishing
+             * the cache, so what lands here is already vetted */
             if (auto r = git_fetch(opts.git, opts.tag, git_cache, opts.timeout); !r)
-                return std::unexpected(r.error());
-            /* a git repo can ship symlinks exactly like a tarball: the same
-             * escape check runs here before anything hardlinks the tree */
-            if (auto r = verify_no_escaping_links(git_cache); !r)
                 return std::unexpected(r.error());
         }
         std::filesystem::remove_all(dest, ec);
@@ -504,6 +523,22 @@ Result<void> materialize_fetch(const std::string& pkg_name, const FetchOptions& 
         /* a refused tarball must not leave a (partly escaped) tree behind */
         std::filesystem::remove_all(dest, ec);
         return r;
+    }
+    /* --strip-components=1 silently drops root-level members: an archive
+     * without the expected single top-level directory extracts to nothing */
+    bool empty = true;
+    for (auto it = std::filesystem::directory_iterator(dest, ec);
+         empty && it != std::filesystem::directory_iterator {}; it.increment(ec)) {
+        if (ec) break;
+        empty = false;
+    }
+    if (empty) {
+        std::filesystem::remove_all(dest, ec);
+        return std::unexpected(Error {
+            Error::Kind::Fetch,
+            "tarball '" + opts.url + "' extracted nothing (truss strips one wrapper "
+            "directory; the archive's members must sit inside a single top-level directory)",
+        });
     }
     return {};
 }
@@ -547,8 +582,8 @@ Result<std::vector<Package>> Project::fetch_all(std::vector<std::pair<std::strin
     if (!lock_guard.locked())
         return std::unexpected(Error {
             Error::Kind::Io,
-            "fetch_all: cannot lock " + lock_file.generic_string() +
-                " within 120s — another truss process holds it (or it is not lockable)",
+            "fetch_all: cannot lock " + lock_file.generic_string() + " — "
+                + lock_guard.why() + " (concurrent fetches would corrupt the pin file)",
         });
     auto lock = detail::read_lockfile(lock_file);
     std::vector<Job> jobs;
@@ -561,10 +596,14 @@ Result<std::vector<Package>> Project::fetch_all(std::vector<std::pair<std::strin
         job.dest = build_dir() / "packages" / name;
         const auto pin_it = lock.find(lock_key(name));
         /* the completion marker (written after a full materialize) must be
-         * present too: a dest left partial by an interrupted run must not
-         * pass as fetched */
-        job.offline = pin_it != lock.end() && pin_it->second == job.pin &&
-                      std::filesystem::exists(job.dest / ".truss-ok", ec);
+         * present AND carry this run's pin: a dest materialized under an old
+         * pin must not pass as fetched */
+        const auto marker_ok = [&](const Job& j) {
+            auto marker = detail::read_file(j.dest / ".truss-ok");
+            return marker && *marker == j.pin;
+        };
+        job.offline = pin_it != lock.end() && pin_it->second == job.pin
+                      && marker_ok(job) && std::filesystem::exists(job.dest, ec);
         jobs.push_back(std::move(job));
     }
 
@@ -609,8 +648,8 @@ Result<std::vector<Package>> Project::fetch_all(std::vector<std::pair<std::strin
 
     std::vector<Package> out;
     out.reserve(jobs.size());
-    for (const auto& job : jobs)
-        out.push_back(Package {job.name, job.dest});
+    for (auto& job : jobs) /* jobs are dead here: move their fields out */
+        out.push_back(Package {std::move(job.name), std::move(job.dest)});
     return out;
 }
 
@@ -696,6 +735,9 @@ std::vector<std::string> json_str_array(const nlohmann::json& obj, const char* k
  * would interpret (a hostile recipe must not reach command execution). */
 bool spec_value_is_safe(std::string_view v) {
     if (v.empty())
+        return false;
+    /* a leading '-' would smuggle a compiler flag through -D/-I/-l prefixes */
+    if (v.front() == '-')
         return false;
     for (const char c : v)
         if (!(std::isalnum(static_cast<unsigned char>(c)) || c == '/' || c == '.'

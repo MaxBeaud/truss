@@ -5,9 +5,7 @@ module;
 #include <expected>
 #include <filesystem>
 #include <map>
-#include <regex>
 #include <set>
-#include <sstream>
 #include <string>
 #include <utility>
 #include <vector>
@@ -350,29 +348,40 @@ scan_deps_requires(const std::string& compiler, std::string_view compile_flags,
          * deps to a scratch file; the imported CMIs need not exist yet */
         const std::filesystem::path deps = scratch / ("deps_" + seq + "_" + flat + ".json");
         const std::filesystem::path hdrs = scratch / ("deps_" + seq + "_" + flat + ".d");
-        /* compile_flags is space-joined: split it into real argv elements
-         * (paths with spaces are rejected project-wide, so no flag embeds
-         * spaces) */
+        const auto scrub = [&] { /* both branches clean up their scratch files */
+            std::error_code rm_ec;
+            std::filesystem::remove(deps, rm_ec);
+            std::filesystem::remove(hdrs, rm_ec);
+        };
+        /* compile_flags is space-joined: split it into real argv elements.
+         * The flags normally reach a shell through ninja, so build_flags
+         * quotes paths (-I"dir"): in argv form the quotes are literal —
+         * strip them. */
         std::vector<std::string> argv {compiler};
         for (auto word : std::views::split(compile_flags, ' ') |
-                             std::views::filter([](auto w) { return !w.empty(); }))
-            argv.emplace_back(word.begin(), word.end());
+                             std::views::filter([](auto w) { return !w.empty(); })) {
+            std::string tok(word.begin(), word.end());
+            std::erase(tok, '"');
+            argv.push_back(std::move(tok));
+        }
         argv.insert(argv.end(), {"-fmodules", "-M", "-MP",
             "-fdeps-format=p1689r5", "-fdeps-file=" + deps.generic_string(),
             "-fdeps-target=" + source, "-MF", hdrs.generic_string(), source});
         auto outcome = run_process_stdout(argv);
-        if (!outcome)
+        if (!outcome) {
+            scrub();
             return std::unexpected(outcome.error());
-        if (outcome->exit_code != 0)
+        }
+        if (outcome->exit_code != 0) {
+            scrub();
             return std::unexpected(Error {
                 Error::Kind::Toolchain,
                 "module scan failed for '" + source + "' (GCC 14+ required for -fdeps-format)",
                 std::filesystem::path(source),
             });
+        }
         auto text = read_file(deps);
-        std::error_code rm_ec;
-        std::filesystem::remove(deps, rm_ec); /* best effort */
-        std::filesystem::remove(hdrs, rm_ec);
+        scrub();
         if (!text)
             return std::unexpected(Error {
                 Error::Kind::Toolchain, "the GCC module scan wrote no p1689 output for '" + source + "'",
@@ -416,10 +425,23 @@ scan_deps_requires(const std::string& compiler, std::string_view compile_flags,
     std::vector<std::string> names;
     const auto& rule = j["rules"][0];
     if (rule.contains("requires") && rule["requires"].is_array())
-        for (const auto& req : rule["requires"])
-            if (req.is_object() && req.contains("logical-name") && req["logical-name"].is_string()
-                && !req.value("isHeaderUnit", false))
-                names.push_back(req["logical-name"].get<std::string>());
+        for (const auto& req : rule["requires"]) {
+            if (!req.is_object() || !req.contains("logical-name") || !req["logical-name"].is_string())
+                continue;
+            if (req.value("isHeaderUnit", false))
+                continue;
+            /* no compiler emits header-unit metadata yet (GCC routes direct
+             * header imports into requires with the header's flat name, and
+             * clang's named-module scan skips them): drop anything that is
+             * not a named module — header paths carry '/' or a header
+             * extension, angle/quoted forms keep their delimiters */
+            const std::string name = req["logical-name"].get<std::string>();
+            if (name.contains('/') || name.starts_with('<') || name.starts_with('"')
+                || name.ends_with(".h") || name.ends_with(".hpp") || name.ends_with(".hh")
+                || name.ends_with(".hxx"))
+                continue;
+            names.push_back(std::move(name));
+        }
     return names;
 }
 

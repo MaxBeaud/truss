@@ -130,8 +130,10 @@ enum class Hardening {
 enum class ModulesMode {
     Default = 0, ///< resolves to Auto
     Off,         ///< no BMI wiring (.cppm sources become a Config error)
-    Auto,        ///< BMI edges + regex-scanned import wiring (heuristic, fast)
-    Manual,      ///< import lists from clang-scan-deps (authoritative, ~10 ms/TU, clang only)
+    Auto,        ///< BMI edges + authoritative compiler scan (clang-scan-deps / GCC
+                 ///< -fdeps-format) with the hand-rolled lexer as fallback
+    Manual,      ///< import lists from clang-scan-deps / GCC -fdeps-format
+                 ///< (authoritative, ~10 ms/TU; clang and GCC only — an error otherwise)
 };
 
 /// C++ standard library selection (emitted as -stdlib= on compile + link).
@@ -512,7 +514,8 @@ struct RunOptions {
     /// Wall-clock budget for the child in seconds (0 = no limit). On expiry
     /// the child's whole process group is killed and a Command error is
     /// returned. Default 600 s: a hung child (or a grandchild inheriting the
-    /// capture pipe) must not wedge the build forever.
+    /// capture pipe) must not wedge the build forever. Negative values are
+    /// rejected by run()/capture().
     int timeout {600};
 };
 /**

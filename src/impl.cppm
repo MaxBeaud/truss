@@ -121,9 +121,9 @@ struct ModuleUnitInfo {
     std::vector<std::string> imports; ///< raw names: "math", ":part", "std"...
 };
 
-/// Extract the module declaration + import list from a source file with a
-/// line-anchored regex pass (no preprocessor; see ModulesMode::Manual for
-/// the authoritative alternative).
+/// Extract the module declaration + import list from a source file with the
+/// hand-rolled line scan (comments/strings/literals blanked first; no
+/// preprocessor — see ModulesMode::Manual for the authoritative alternative).
 /// \ingroup grp_internals
 Result<ModuleUnitInfo> scan_module_unit(const std::string& path);
 
@@ -137,10 +137,10 @@ Result<std::pair<std::string, std::vector<std::string>>>
 resolve_module_imports(const ModuleUnitInfo& u, const std::map<std::string, std::string, std::less<>>& bmis,
                        const std::map<std::string, std::vector<std::string>, std::less<>>& module_imports);
 
-/// Authoritative import closure for one TU via clang-scan-deps (p1689 JSON):
-/// one TU per single-entry compilation database (this clang leaves
-/// "primary-output" empty in multi-TU scans), ~10 ms per invocation.
-/// \return fully-qualified module names (clang family only).
+/// Authoritative import closure for one TU via the compiler's p1689 output:
+/// clang through clang-scan-deps, GCC through -fdeps-format=p1689r5 — one TU
+/// per invocation, ~10 ms per TU.
+/// \return fully-qualified module names (clang and GCC 14+).
 /// \ingroup grp_internals
 Result<std::vector<std::string>>
 scan_deps_requires(const std::string& compiler, std::string_view compile_flags,
@@ -276,7 +276,7 @@ public:
     /// `name = value` top-level variable.
     void var(std::string_view name, std::string_view value);
     /// `rule name` with body pairs (bodies carry $placeholders verbatim).
-    void rule(std::string_view name, std::vector<std::pair<std::string, std::string>> body);
+    void rule(std::string_view name, const std::vector<std::pair<std::string, std::string>>& body);
     /// One build statement.
     struct Edge {
         std::vector<std::string> outputs;       ///< explicit outputs
@@ -287,11 +287,11 @@ public:
         std::vector<std::pair<std::string, std::string>> vars; ///< per-edge variables
     };
     /// Emit `build outs | implicit_outs: rule ins | implicit_ins` + vars.
-    void build(Edge e);
+    void build(const Edge& e);
     /// Phony target grouping inputs (the `all` target).
     void phony(std::string_view name, std::vector<std::string> ins);
     /// `default` statement (what plain `samu` builds).
-    void default_targets(std::vector<std::string> names);
+    void default_targets(const std::vector<std::string>& names);
     /// The complete manifest text.
     const std::string& str() const { return buf_; }
 

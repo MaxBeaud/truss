@@ -179,6 +179,17 @@ Result<void> require_supported(const TargetTriple& t) {
                 "  correct:   Config().compiler(\"x86_64-w64-mingw32-g++\").target(\"x86_64-w64-mingw32\")\n"
                 "  incorrect: Config().toolchain(truss::Toolchain::GCC).target(\"aarch64-linux-gnu\")",
             });
+        /* a lax prefix would let target("x86") match x86_64-... drivers: the
+         * remainder must start on a separator or a version digit */
+        if (base != t.target && base.size() > t.target.size()) {
+            const char next = base[t.target.size()];
+            if (std::isalnum(static_cast<unsigned char>(next)) && next != '-')
+                return std::unexpected(Error {
+                    Error::Kind::Config,
+                    "target('" + t.target + "'): the driver '" + t.compiler +
+                        "' names a different architecture",
+                });
+        }
         return {};
     }
     return {};
@@ -297,17 +308,12 @@ std::string bmi_config_flags(const TargetTriple& triple, Hardening hardening,
     const auto si = static_cast<std::size_t>(sanitizer);
     const auto li = static_cast<std::size_t>(lto);
     std::string out;
-    const auto add = [&](std::string_view f) {
-        if (f.empty()) return;
-        if (!out.empty()) out += ' ';
-        out += f;
-    };
-    add(kHardeningCompileFlags[hi]);
+    add(out, kHardeningCompileFlags[hi]);
     if (triple.arch == Arch::X64)
-        add(kHardeningArchCompileFlags[hi]);
-    add(kHardeningStdlibDefines[hi]);
-    add(kSanitizerCompileFlags[si]);
-    add(kLtoCompileFlags[li]);
+        add(out, kHardeningArchCompileFlags[hi]);
+    add(out, kHardeningStdlibDefines[hi]);
+    add(out, kSanitizerCompileFlags[si]);
+    add(out, kLtoCompileFlags[li]);
     return out;
 }
 

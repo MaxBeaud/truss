@@ -76,7 +76,7 @@ void NinjaWriter::var(std::string_view name, std::string_view value) {
     buf_ += '\n';
 }
 
-void NinjaWriter::rule(std::string_view name, std::vector<std::pair<std::string, std::string>> body) {
+void NinjaWriter::rule(std::string_view name, const std::vector<std::pair<std::string, std::string>>& body) {
     buf_ += "rule ";
     buf_ += name;
     buf_ += '\n';
@@ -86,7 +86,7 @@ void NinjaWriter::rule(std::string_view name, std::vector<std::pair<std::string,
     buf_ += '\n';
 }
 
-void NinjaWriter::build(Edge e) {
+void NinjaWriter::build(const Edge& e) {
     buf_ += "build";
     append_paths(buf_, e.outputs);
     if (!e.implicit_outs.empty()) {
@@ -111,10 +111,10 @@ void NinjaWriter::phony(std::string_view name, std::vector<std::string> ins) {
     e.outputs = {std::string(name)};
     e.rule = "phony";
     e.inputs = std::move(ins);
-    build(std::move(e));
+    build(e);
 }
 
-void NinjaWriter::default_targets(std::vector<std::string> names) {
+void NinjaWriter::default_targets(const std::vector<std::string>& names) {
     buf_ += "default";
     append_paths(buf_, names);
     buf_ += '\n';

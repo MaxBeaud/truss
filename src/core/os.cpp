@@ -88,15 +88,21 @@ namespace truss::os {
 std::optional<std::filesystem::path> find_program(std::string_view name) {
     /* memoized (incl. misses): every build probes the same handful of
      * programs (llvm-ar, ccache, sccache, clang-scan-deps, conan, ...) and
-     * the answer cannot change within one truss run */
+     * the answer cannot change within one truss run. The (disk-walking)
+     * lookup happens OUTSIDE the lock; a re-check under it closes the race */
     static std::map<std::string, std::optional<std::filesystem::path>, std::less<>> cache;
     static std::mutex mu;
-    std::lock_guard lk(mu);
-    if (const auto it = cache.find(name); it != cache.end())
+    {
+        std::lock_guard lk(mu);
+        if (const auto it = cache.find(name); it != cache.end())
+            return it->second;
+    }
+    auto found = find_program_uncached(name);
+    {
+        std::lock_guard lk(mu);
+        const auto [it, inserted] = cache.try_emplace(std::string(name), std::move(found));
         return it->second;
-    const auto found = find_program_uncached(name);
-    cache.emplace(std::string(name), found);
-    return found;
+    }
 }
 
 std::optional<std::filesystem::path> find_program(std::initializer_list<std::string_view> names) {
@@ -191,6 +197,9 @@ std::filesystem::path temp_dir() {
 
 namespace {
 Result<ProcessResult> spawn(std::span<const std::string> argv, bool capture, const RunOptions& opts) {
+    if (opts.timeout < 0)
+        return std::unexpected(Error {Error::Kind::Config,
+                                      "timeout must not be negative (0 = no limit)"});
     return detail::run_process(argv, capture, opts.cwd, opts.timeout)
         .transform([](auto outcome) { return ProcessResult {outcome.exit_code, std::move(outcome.output)}; });
 }
@@ -268,13 +277,18 @@ std::vector<std::filesystem::path> find_truss_modules() {
         try_add(self_exe.parent_path().parent_path() / "lib" / "truss");
 
     // Standard installation paths
+    const char* home = std::getenv("HOME");
     for (const auto& path_template : {"$HOME/.local/lib/truss", ".local/lib/truss",
                                       "/usr/local/lib/truss", "/usr/lib/truss",
                                       "/usr/lib64/truss"}) {
         std::string path_str = std::string(path_template);
-        // Expand $HOME
-        if (path_str.starts_with("$HOME"))
-            path_str.replace(0, 5, std::getenv("HOME") ? std::getenv("HOME") : "");
+        // Expand $HOME (skip the candidate when HOME is unset: a cwd-relative
+        // ~/.local would silently point somewhere else)
+        if (path_str.starts_with("$HOME")) {
+            if (home == nullptr)
+                continue;
+            path_str.replace(0, 5, home);
+        }
         // If the path is relative (like .local/lib/truss), make it absolute from current directory
         std::filesystem::path p(path_str);
         if (!p.is_absolute()) {

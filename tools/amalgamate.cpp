@@ -23,7 +23,9 @@
 namespace {
 
 std::set<std::string> emitted_headers;
-std::set<std::string> system_includes;
+std::vector<std::string> system_includes; /* first-encounter order: some C
+                          * headers are order-dependent */
+std::set<std::string> seen_system_includes;
 std::string body;
 
 std::string read_all(const std::filesystem::path& p) {
@@ -80,7 +82,8 @@ void process(const std::filesystem::path& path) {
             continue;
         }
         if (line.starts_with("#include <")) {
-            system_includes.insert(line);
+            if (seen_system_includes.insert(line).second)
+                system_includes.push_back(line);
             continue;
         }
         if (line.starts_with("export namespace "))

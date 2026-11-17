@@ -145,7 +145,8 @@ Result<ProcOutcome> run_impl(std::span<const std::string> argv, int capture_mode
         ::kill(pid, SIGKILL);  /* belt and braces if the group assignment failed */
     };
     /* reap without blocking where possible; the child's exit status lands in
-     * outcome.exit_code. Returns true once reaped. */
+     * outcome.exit_code. Returns true once reaped. A waitpid failure (other
+     * than a plain "still running") yields exit_code -1: no reliable status. */
     const auto reap = [&](bool block) -> bool {
         int status = 0;
         const int waited = waitpid(pid, &status, block ? 0 : WNOHANG);
@@ -185,17 +186,41 @@ Result<ProcOutcome> run_impl(std::span<const std::string> argv, int capture_mode
             } else if (ready < 0 && errno != EINTR) {
                 break; /* poll failed: stop reading, reap below */
             }
-            reaped = reap(false) || reaped;
+            if (!reaped)
+                reaped = reap(false); /* re-calling reap after success hits
+                                       * ECHILD and clobbers the exit code */
             if (expired()) {
+                /* kill the group exactly once, then leave: re-killing a
+                 * possibly-reaped pid could signal a recycled one */
                 timed_out = true;
-                kill_group(); /* all writers die: the next read hits EOF */
+                if (!reaped)
+                    kill_group();
+                break;
             }
         }
-        if (timed_out) /* the group kill closed the pipe: drain the tail */
-            for (ssize_t n; (n = read(pipe_fd[0], buf.data(), buf.size())) > 0;)
+        if (timed_out) {
+            /* the killed writers close the pipe; drain the tail under a short
+             * bounded grace — a setsid escapee still holding the write end
+             * must not wedge the drain (it would defeat the timeout) */
+            const auto drain_deadline =
+                std::chrono::steady_clock::now() + std::chrono::seconds(2);
+            for (;;) {
+                pollfd pfd {pipe_fd[0], POLLIN, 0};
+                if (::poll(&pfd, 1, 100) <= 0) {
+                    if (std::chrono::steady_clock::now() >= drain_deadline)
+                        break;
+                    continue;
+                }
+                const ssize_t n = read(pipe_fd[0], buf.data(), buf.size());
+                if (n <= 0)
+                    break;
                 if (outcome.output.size() < kMaxCapture)
                     outcome.output.append(buf.data(), static_cast<std::size_t>(n));
+            }
+        }
         close(pipe_fd[0]);
+    } else if (timeout_seconds <= 0) {
+        reaped = reap(true); /* no deadline: a plain blocking wait, no polling */
     } else {
         for (;;) {
             reaped = reap(false);
@@ -205,7 +230,6 @@ Result<ProcOutcome> run_impl(std::span<const std::string> argv, int capture_mode
                 timed_out = true;
                 kill_group();
                 reap(true); /* SIGKILL: immediate */
-                reaped = true;
                 break;
             }
             ::usleep(20 * 1000);
