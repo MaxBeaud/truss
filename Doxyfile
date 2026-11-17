@@ -1,21 +1,11 @@
 # truss — Doxygen reference (./setup.sh docs -> build/docs/html).
-# The README is the user guide; this is the in-depth API reference.
-# Doxygen 1.18 parses the C++20 module files (module;/export module/import :) natively.
-
-PROJECT_NAME           = "truss"
-PROJECT_BRIEF          = "Build your C++ using C++ — mate.h API, xmake-class features, samurai backend"
-PROJECT_NUMBER         = 0.1.0
-OUTPUT_DIRECTORY       = build/docs
-OUTPUT_LANGUAGE        = English
-
-# truss — Doxygen reference (./setup.sh docs -> build/docs/html).
 # The README is the user guide; the main page mirrors it with links into the
 # generated reference. This is the in-depth API + internals documentation.
 # Doxygen 1.18 parses the C++20 module files (module;/export module/import :) natively.
 
 PROJECT_NAME           = "truss"
 PROJECT_BRIEF          = "Build your C++ using C++ — mate.h API, xmake-class features, samurai backend"
-PROJECT_NUMBER         = 0.1.0
+PROJECT_NUMBER         = 1.0.0
 OUTPUT_DIRECTORY       = build/docs
 OUTPUT_LANGUAGE        = English
 

@@ -743,10 +743,31 @@ proj.configure(truss::Config{}.toolchain(truss::Toolchain::Zig).target("aarch64-
 ```
 
 Plain clang works too with a sysroot (`.flags("--sysroot=...")`); GCC
-cross-compiles through a prefixed driver (`compiler("aarch64-linux-gnu-g++")`)
-and rejects `target()`. The CLI equivalent is `./truss release --cross
+cross-compiles through a prefixed driver (`compiler("x86_64-w64-mingw32-g++")
+.target("x86_64-w64-mingw32")` for Windows via mingw-w64 — the prefixed
+driver IS the target selection) and rejects a bare `target()` with the
+non-prefixed driver. llvm-mingw's cross clang (`x86_64-w64-mingw32-clang++`)
+is a clang-family compiler: modules and `import std` cross to Windows out of
+the box, and the outputs run under wine (`runner("wine")`, with llvm-mingw's
+runtime dlls on `WINEPATH`). The CLI equivalent is `./truss release --cross
 aarch64-linux-musl` — no script edit needed. The design and roadmap are in
 [docs/cross-compilation.md](docs/cross-compilation.md).
+
+**Several triples at once (subgraphs).** `proj.targets({{name, Config}, ...})`
+builds the whole graph once per named configuration in a single invocation:
+
+```cpp
+proj.targets({
+    {"linux", Config{}.toolchain(Toolchain::LLVM)},
+    {"win",   Config{}.toolchain(Toolchain::Zig).target("x86_64-w64-mingw32")},
+});
+```
+
+Outputs land in their per-triple directories; `./truss test` runs every
+subgraph's tests with each subgraph's own runner; `--for win` narrows tasks
+to one subgraph; `--target win:app` builds one subgraph's target (a bare
+name applies to every subgraph that has it). Mutually exclusive with
+`configure()` and `--cross`.
 
 **Host tools in a cross build.** Mark build-time tools with `for_host()` —
 they always compile for the host triple, even when the project cross-compiles
@@ -879,27 +900,30 @@ end-to-end:
 
 ## Status & support matrix
 
-v0.1.0 — all thirteen planned phases complete; the engine is feature-complete.
-The path to a 1.0 release (Windows/macOS hosts, real MSVC runs, cross-compile
-phases 2–3, API freeze) is tracked in [`docs/1.0-roadmap.md`](docs/1.0-roadmap.md).
+v1.0.0 — the engine is feature-complete and the public API is frozen behind
+semver. Windows/macOS *hosts* remain out of scope for now; cross-*targeting*
+Windows from Linux is first-class.
 
-| Feature | GCC | Clang | MSVC (cl.exe / clang-cl) |
+| Feature | GCC (15+) | Clang | MSVC (cl.exe / clang-cl) |
 |---|---|---|---|
 | Executable / static / shared / interface | ✅ | ✅ | ✅ (built via clang-cl cross-build; not yet run on Windows) |
 | Globbing, tasks, compdb, incremental | ✅ | ✅ | ✅ |
 | Sanitizers, LTO, per-target options | ✅ | ✅ | ✅ (no ThinLTO — maps to `/GL`) |
-| C++ modules for your project (transitive wiring) | ✅ | ✅ | ❌ (clear error) |
-| `import std;` / `import std.compat;` | ❌ | ✅ (libc++, C++23+) | ❌ (clear error) |
+| C++ modules for your project | ✅ (module mapper, p1689 scan) | ✅ (clang-scan-deps) | ❌ (clear error) |
+| `import std;` / `import std.compat;` | ✅ (GCC 15+) | ✅ (libc++, C++23+) | ❌ (clear error) |
 | `merge()` combined archives | ✅ | ✅ | ❌ (clear error) |
 | self-rebuild tracks truss.cpp + its headers + truss BMIs | ✅ | ✅ | — |
 | fetch / add_subdirectory / conan / vcpkg | ✅ | ✅ | host-side, same |
 | static_link / static_deps / static_stdlib | ✅ | ✅ | ❌ (clear error) |
-| zig cross (`Toolchain::Zig` + `target`) | — | ✅ verified: musl / aarch64-musl / windows-gnu / gnu.2.17 (built, `file`/`ldd`/`objdump`-checked; x86_64 ones run on host) | — |
+| per-triple subgraphs (`proj.targets()`) | ✅ | ✅ | ✅ |
+| zig cross (`Toolchain::Zig` + `target`) | — | ✅ verified: musl / aarch64-musl / windows-gnu / gnu.2.17 (modules: ❌, Config error) | — |
+| mingw cross (Linux → Windows) | ✅ `x86_64-w64-mingw32-g++` + target | ✅ llvm-mingw: modules + `import std`; runs under wine | — |
 
 Known limitations: paths containing spaces or `:` are rejected (ninja
-escaping, conservative v0.1); truss runs on POSIX hosts only (Windows *host*
-support is a 1.0 item); zig cannot build C++20 modules or PCH (Config error);
-cross-compilation is phase 1 of the `docs/cross-compilation.md` roadmap.
+escaping, conservative); truss runs on POSIX hosts only; zig cannot build
+C++20 modules or PCH (Config error); header-unit imports (`import <x>`)
+resolve as headers, not BMIs (the compilers' scanners are not ready for them
+either).
 
 `docs/1.0-roadmap.md` tracks the road to 1.0; `PLAN.MD` the original phase plan;
 `AGENT.MD` records verified toolchain facts; vendored samurai patches are in

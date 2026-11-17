@@ -162,7 +162,11 @@
  * cross-compiles the whole project; host-side tools are pinned with
  * `for_host()`, and a `depends_on()` edge may not cross the host/target
  * boundary (different ABI/C library — a Config error). Per-target
- * `cross_target()` overrides the project setting. See the
+ * `cross_target()` overrides the project setting. For several triples at
+ * once, `proj.targets({{"linux", Config{}}, {"win", ...}})` builds one
+ * subgraph per configuration in a single invocation. Windows targets come
+ * via mingw-w64 (GCC, target-prefixed driver) or llvm-mingw (clang: modules
+ * + `import std` cross); outputs run under wine. See the
  * \ref cross_compilation_page "cross-compilation strategy" page for the
  * triple conventions, runners and known gaps.
  *

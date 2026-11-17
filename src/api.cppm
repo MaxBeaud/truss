@@ -42,7 +42,7 @@ export namespace truss {
  * \{
  */
 
-inline constexpr std::string_view kVersion = "0.1.0";
+inline constexpr std::string_view kVersion = "1.0.0";
 
 /// Target operating system.
 enum class Os {
@@ -787,8 +787,10 @@ public:
                         * whole tree; the target then fails validation with
                         * 'has no sources' */
             return self;
-        /* one literal prefix + one trailing pattern per language (no "/**"
-         * sequences: doxygen's comment scanner counts them as nested opens) */
+        /* one literal prefix + one trailing pattern per language (the
+         * double-star patterns keep their leading slash out of comments:
+         * doxygen's scanner counts a slash-star-star sequence as a nested
+         * comment open) */
         for (const std::string_view suffix : {"**.cpp", "**.cc", "**.cxx", "**.c", "**.cppm"})
             self.source_patterns_.push_back(d + "/" + suffix);
         return self;

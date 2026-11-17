@@ -21,13 +21,17 @@ page explains the architecture around them.
 
 1. **Validate** — target names, duplicate detection, clean-only invocations
    short-circuit before any resolution.
-2. **Resolve** — glob sources, scan module units (regex or clang-scan-deps
-   in `ModulesMode::Manual`), apply `Config` overlays to triples, resolve
+2. **Resolve** — once per subgraph (`proj.targets()`, defaulting to one
+   unnamed subgraph): glob sources, scan module units (hand-rolled lexer, or
+   the compiler's authoritative p1689 scan when available: clang-scan-deps /
+   GCC `-fdeps-format`), apply `Config` overlays to triples, resolve
    dependency graphs and link order.
 3. **Emit** — `emit_manifest()` (anonymous namespace in `build.cpp`) writes
    the ninja graph: rules per language/BMI/PCH/link, unity TU generation,
-   launcher (`ccache`) prefixing, per-edge variables. The manifest is written
-   with `write_file_if_changed` so an unchanged graph never dirties samurai.
+   launcher (`ccache`) prefixing, per-edge variables; GCC module targets get
+   a per-target module-mapper file; each subgraph gets its own `name:all`
+   phony. The manifest is written with `write_file_if_changed` so an
+   unchanged graph never dirties samurai.
 4. **Execute** — vendored samurai runs in-process (`samu_build`), then
    registered tasks (`test`, custom `task()`s) run.
 
@@ -36,8 +40,8 @@ page explains the architecture around them.
 | Unit | Role |
 |---|---|
 | `src/core/fs.cpp` | glob engine (brace expansion -> one regex per alternative, literal-prefix walk, hidden entries skipped), file helpers, `walk`/`read_lines` coroutines (`truss::generator`; libc++ lacks `std::generator`), native FIPS-180-4 sha256, `find_library` system dirs, truss.lock parsing |
-| `src/core/modules.cpp` | regex module scanner (`export module`/`import` line matching), BMI name resolution, p1689 `scan_deps_requires` fallback |
-| `src/core/flags.cpp` | enum-indexed flag tables per compiler family (GCC/Clang/MSVC), triple/Config resolution, launcher detection |
+| `src/core/modules.cpp` | module scanner: non-code blanking (comments/strings/raw strings) + hand-rolled line scan; BMI name resolution; per-compiler authoritative p1689 scanning (clang-scan-deps / GCC `-fdeps-format`); per-target module-mapper files for GCC's CMI paths |
+| `src/core/flags.cpp` | enum-indexed flag tables per compiler family (GCC/Clang/MSVC), triple/Config resolution, launcher detection, BMI-config flags |
 | `src/core/ninja.cpp` | `NinjaWriter` + ninja escaping rules |
 | `src/core/samu.cpp` | C shim over vendored samurai (`vendor/samurai`), in-process build + compdb |
 | `src/core/proc.cpp` | `posix_spawn` process runner (optional cwd via `addchdir_np`), output capture |
