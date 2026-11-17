@@ -592,9 +592,19 @@ Result<void> emit_manifest(const Project& proj, std::vector<ResolvedTarget>& res
                                      r.target->lto());
         /* the BMI config flags (hardening/sanitizer/LTO) must match the
          * consumers', or clang rejects the module file — they key the std
-         * build apart too (spaces collapsed: the key names a directory) */
-        std::string key_config = config_flags;
-        std::ranges::replace(key_config, ' ', '_');
+         * build apart too. Percent-encode for the directory name: the
+         * encoding is injective, so two different flag sets can never share
+         * a std build (a plain space-collapsing rename is not). */
+        std::string key_config;
+        for (const char c : config_flags)
+            if (c == '%')
+                key_config += "%25";
+            else if (c == ' ')
+                key_config += "%20";
+            else if (c == '/') /* one path component */
+                key_config += "%2F";
+            else
+                key_config += c;
         std::string key = detail::triple_dir(r.triple) + "-" + std::string(flag.substr(5))
                         + (key_config.empty() ? "" : "-" + key_config);
         const auto emit = [&](const StdEntry& en, const std::string& src, const std::string& obj,
@@ -953,7 +963,7 @@ Result<void> emit_manifest(const Project& proj, std::vector<ResolvedTarget>& res
                 return std::unexpected(Error {
                     Error::Kind::Io, "cannot create scan-deps scratch directory",
                 });
-            std::vector<Result<std::vector<std::string>>> scanned(r.units.size());
+            std::vector<Result<std::pair<std::vector<std::string>, std::vector<std::string>>>> scanned(r.units.size());
             const size_t nthreads = std::min<size_t>(r.units.size(), 8);
             {
                 std::vector<std::jthread> pool;
@@ -968,19 +978,35 @@ Result<void> emit_manifest(const Project& proj, std::vector<ResolvedTarget>& res
             }
             for (size_t i = 0; i < r.units.size(); ++i) {
                 if (!scanned[i]) {
-                    if (t.modules_mode() == ModulesMode::Manual)
+                    if (mm == ModulesMode::Manual)
                         return std::unexpected(scanned[i].error());
                     /* Auto: scan-deps preprocesses, so a TU that includes a
                      * not-yet-generated header (the codegen pattern) cannot be
                      * scanned — fall back to this unit's heuristic import list */
-                    log::warn("clang-scan-deps failed for '" + r.units[i].path + "' ("
+                    log::warn("the module scan failed for '" + r.units[i].path + "' ("
                               + scanned[i].error().message
                               + "); falling back to the heuristic module scan");
                     continue;
                 }
-                r.units[i].imports = std::move(*scanned[i]);
+                r.units[i].imports = std::move(scanned[i]->first);
+                r.units[i].header_imports = std::move(scanned[i]->second);
             }
         }
+
+        /* header-unit imports have no BMI wiring (truss builds no header-unit
+         * CMIs and the compilers' scanners do not report them reliably): say
+         * so clearly instead of failing opaquely inside the compiler */
+        for (const auto& u : r.units)
+            if (!u.header_imports.empty())
+                return std::unexpected(Error {
+                    Error::Kind::Config,
+                    "'" + u.path + "' imports the header unit '" + u.header_imports.front() +
+                        "': truss does not support header units (the compilers' dependency "
+                        "scanners cannot report them reliably yet);\n"
+                        "  use #include for it instead — macros do not cross module "
+                        "boundaries, so this is almost always equivalent",
+                    std::filesystem::path(u.path),
+                });
 
         /* precompiled header: one generation edge; every C++ object of this
          * target depends on it and carries the use-flag. GCC finds the .gch

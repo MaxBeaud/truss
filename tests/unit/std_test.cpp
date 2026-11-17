@@ -236,6 +236,51 @@ TEST_CASE("import std: exe links a shared lib that imports std (no std.o in the 
     CHECK(run->exit_code == 0);
 }
 
+TEST_CASE("import std / GCC: header-unit imports are a clear Config error, not an opaque failure") {
+    if (!gcc_std_module_available()) { MESSAGE("g++ without libstdc++.modules.json, skipping"); return; }
+    ScratchDir scratch {"gcc-hu"};
+    REQUIRE(detail::write_file("lib/bad.cppm",
+                               "export module bad;\nimport <vector>;\nexport int f() { return 1; }\n")
+                .has_value());
+    char prog[] = "truss-tests";
+    char* argv[] = {prog};
+    Project proj("gcc-hu", 1, argv);
+    proj.configure(Config().toolchain(Toolchain::GCC));
+    proj.add_static_library("bad").sources("lib/bad.cppm");
+    auto r = proj.build();
+    REQUIRE_FALSE(r.has_value());
+    CHECK(r.error().kind == Error::Kind::Config);
+    CHECK(contains(r.error().message, "header unit"));
+    CHECK(contains(r.error().message, "#include"));
+}
+
+TEST_CASE("import std / GCC: spaced include dirs scan and build (shell-shaped flag tokenizing)") {
+    if (!gcc_std_module_available()) { MESSAGE("g++ without libstdc++.modules.json, skipping"); return; }
+    ScratchDir scratch {"gcc-space"};
+    REQUIRE(detail::write_file("my dir/hd.h", "#pragma once\n#define HD 3\n").has_value());
+    REQUIRE(detail::write_file("lib/g.cppm",
+                               "module;\n#include \"hd.h\"\n"
+                               "export module g;\nexport int f() { return HD; }\n")
+                .has_value());
+    REQUIRE(detail::write_file("app/main.cpp",
+                               "import g;\nint main() { return f() == 3 ? 0 : 1; }\n")
+                .has_value());
+    char prog[] = "truss-tests";
+    char* argv[] = {prog};
+    Project proj("gcc-space", 1, argv);
+    proj.configure(Config().toolchain(Toolchain::GCC));
+    auto& g = proj.add_static_library("g").sources("lib/g.cppm").include_dirs("my dir");
+    proj.add_executable("app").sources("app/main.cpp").depends_on(g);
+    auto r = proj.build();
+    INFO((r ? "ok" : r.error().message));
+    REQUIRE(r.has_value());
+    const auto bin = std::filesystem::current_path() / "build/debug/bin" /
+                     detail::triple_dir(*detail::apply_config(Config().toolchain(Toolchain::GCC), host_triple()));
+    auto run = os::run({(bin / "app").string()});
+    REQUIRE(run.has_value());
+    CHECK(run->exit_code == 0);
+}
+
 TEST_CASE("import std + modules: GCC end to end (mapper, partitions, std.gcm)") {
     if (!gcc_std_module_available()) { MESSAGE("g++ without libstdc++.modules.json, skipping"); return; }
     ScratchDir scratch {"gcc-std"};
@@ -269,6 +314,8 @@ TEST_CASE("import std + modules: GCC end to end (mapper, partitions, std.gcm)") 
     auto std_gcm = fs::glob("build/debug/std/*/std.gcm");
     REQUIRE(std_gcm.has_value());
     CHECK(std_gcm->size() == 1);
+    /* the percent-encoded std key keeps spaces out of the CMI paths */
+    CHECK(std_gcm->front().generic_string().find(' ') == std::string::npos);
     const bool greet_cmi = std::filesystem::exists("build/debug/obj/x64-linux-gcc/greet/bmi/greet.gcm")
                         || std::filesystem::exists("build/debug/obj/x64-linux-gcc/lib/greet.gcm");
     CHECK(greet_cmi);

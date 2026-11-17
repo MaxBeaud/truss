@@ -95,6 +95,18 @@ import real;)SRC");
     CHECK(r->imports == std::vector<std::string>{"real"});
 }
 
+TEST_CASE("scan: header-unit imports are recorded, never silently dropped") {
+    const auto p = scratch_write("hdrunit.cpp",
+                                 "module;\n#include <vector>\nexport module hu;\n"
+                                 "import <string>;\nimport real;\n");
+    auto r = detail::scan_module_unit(p);
+    REQUIRE(r.has_value());
+    CHECK(r->module_name == "hu");
+    CHECK(r->imports == std::vector<std::string>{"real"});
+    REQUIRE(r->header_imports.size() == 1);
+    CHECK(r->header_imports.front() == "<string>");
+}
+
 TEST_CASE("resolve: importing a primary pulls its partitions") {
     const std::map<std::string, std::string, std::less<>> bmis {
         {"math", "/b/math.pcm"},
@@ -215,13 +227,13 @@ TEST_CASE("scan-deps: authoritative closures replace the regex heuristic") {
     const auto scan = [&](const char* f) {
         auto r = detail::scan_deps_requires("clang++", "-std=c++23", f, dir, dir);
         REQUIRE(r.has_value());
-        return *r;
+        return std::move(*r);
     };
-    CHECK(scan("math_part.cppm") == std::vector<std::string> {});
-    CHECK(scan("math.cppm") == std::vector<std::string> {"math:part"});
-    CHECK(scan("math_impl.cpp") == std::vector<std::string> {"math"});
+    CHECK(scan("math_part.cppm").first == std::vector<std::string> {});
+    CHECK(scan("math.cppm").first == std::vector<std::string> {"math:part"});
+    CHECK(scan("math_impl.cpp").first == std::vector<std::string> {"math"});
     /* line-spliced import found; comment "import bogus;" correctly not */
-    CHECK(scan("app.cpp") == std::vector<std::string> {"math"});
+    CHECK(scan("app.cpp").first == std::vector<std::string> {"math"});
 
     chdir(prev.c_str());
     std::filesystem::remove_all(dir);

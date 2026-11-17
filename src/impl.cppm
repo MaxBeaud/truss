@@ -119,6 +119,10 @@ struct ModuleUnitInfo {
     std::string module_name;      ///< "" for plain TUs; "math" or "math:part"
     bool is_bmi_source {};        ///< true for .cppm interface/partition units
     std::vector<std::string> imports; ///< raw names: "math", ":part", "std"...
+    std::vector<std::string> header_imports; ///< header-unit imports as written
+                                             ///< (e.g. "<vector>"): truss does
+                                             ///< not support them, and it must
+                                             ///< say so instead of dropping them
 };
 
 /// Extract the module declaration + import list from a source file with the
@@ -140,9 +144,11 @@ resolve_module_imports(const ModuleUnitInfo& u, const std::map<std::string, std:
 /// Authoritative import closure for one TU via the compiler's p1689 output:
 /// clang through clang-scan-deps, GCC through -fdeps-format=p1689r5 — one TU
 /// per invocation, ~10 ms per TU.
-/// \return fully-qualified module names (clang and GCC 14+).
+/// \return (named-module requires, header-unit requires as written — the
+///          latter are the caller's error to report; truss builds no
+///          header-unit CMIs)
 /// \ingroup grp_internals
-Result<std::vector<std::string>>
+Result<std::pair<std::vector<std::string>, std::vector<std::string>>>
 scan_deps_requires(const std::string& compiler, std::string_view compile_flags,
                    const std::string& source, const std::filesystem::path& cwd,
                    const std::filesystem::path& scratch);

@@ -164,9 +164,13 @@ Result<ModuleUnitInfo> scan_module_unit(const std::string& path) {
             const auto semi = s.find(';', i);
             if (semi != std::string::npos) {
                 const std::string_view cap(s.data() + i, semi - i);
-                /* header units (`import <x>;` / `import "x";`) take no BMI wiring */
-                if (!cap.empty() && cap.front() != '<' && cap.front() != '"'
-                    && cap.front() != ';' && cap.front() != ' ' && cap.front() != '\t') {
+                /* header units (`import <x>;` / `import "x";`) get no BMI
+                 * wiring — but they are recorded so the build can say so
+                 * explicitly instead of failing opaquely at compile time */
+                if (!cap.empty() && (cap.front() == '<' || cap.front() == '"')) {
+                    info.header_imports.emplace_back(cap);
+                } else if (!cap.empty() && cap.front() != ';'
+                           && cap.front() != ' ' && cap.front() != '\t') {
                     /* split partition lists like `import :a, :b;` */
                     for (auto part_rng : std::views::split(cap, ',')) {
                         if (part_rng.empty())
@@ -326,7 +330,7 @@ resolve_module_imports(const ModuleUnitInfo& u, const std::map<std::string, std:
  * build leaves "primary-output" empty in multi-TU CDB scans, so rules could
  * not be mapped back to files otherwise); GCC: the compiler itself with
  * -fdeps-format=p1689r5 (GCC 14+). ~10 ms per TU. */
-Result<std::vector<std::string>>
+Result<std::pair<std::vector<std::string>, std::vector<std::string>>>
 scan_deps_requires(const std::string& compiler, std::string_view compile_flags,
                    const std::string& source, const std::filesystem::path& cwd,
                    const std::filesystem::path& scratch) {
@@ -343,6 +347,7 @@ scan_deps_requires(const std::string& compiler, std::string_view compile_flags,
 
     const bool gcc = family_from_compiler_name(compiler) == CompilerFamily::Gcc;
     nlohmann::json j;
+    std::vector<std::string> header_units;
     if (gcc) {
         /* the compiler scans itself: preprocess-only (-M) with p1689 module
          * deps to a scratch file; the imported CMIs need not exist yet */
@@ -353,17 +358,51 @@ scan_deps_requires(const std::string& compiler, std::string_view compile_flags,
             std::filesystem::remove(deps, rm_ec);
             std::filesystem::remove(hdrs, rm_ec);
         };
-        /* compile_flags is space-joined: split it into real argv elements.
-         * The flags normally reach a shell through ninja, so build_flags
-         * quotes paths (-I"dir"): in argv form the quotes are literal —
-         * strip them. */
+        /* compile_flags is ONE shell-shaped string (build_flags quotes paths
+         * because it normally reaches a shell through ninja): tokenize it the
+         * way /bin/sh would — double quotes group and are removed, a
+         * backslash escapes the next character — so the scan receives exactly
+         * the argv a shell would have built, spaces inside quoted paths
+         * included */
+        const auto shell_tokens = [](std::string_view line) {
+            std::vector<std::string> out;
+            std::string tok;
+            bool in_quote = false, have_tok = false;
+            for (std::size_t k = 0; k < line.size(); ++k) {
+                const char c = line[k];
+                if (in_quote) {
+                    if (c == '"')
+                        in_quote = false;
+                    else if (c == '\\' && k + 1 < line.size())
+                        tok += line[++k];
+                    else
+                        tok += c;
+                    have_tok = true;
+                } else if (c == '"') {
+                    in_quote = true;
+                    have_tok = true;
+                } else if (c == '\\') {
+                    if (k + 1 < line.size())
+                        tok += line[++k];
+                    have_tok = true;
+                } else if (c == ' ' || c == '\t') {
+                    if (have_tok) {
+                        out.push_back(std::move(tok));
+                        tok.clear();
+                        have_tok = false;
+                    }
+                } else {
+                    tok += c;
+                    have_tok = true;
+                }
+            }
+            if (have_tok)
+                out.push_back(std::move(tok));
+            return out;
+        };
         std::vector<std::string> argv {compiler};
-        for (auto word : std::views::split(compile_flags, ' ') |
-                             std::views::filter([](auto w) { return !w.empty(); })) {
-            std::string tok(word.begin(), word.end());
-            std::erase(tok, '"');
+        for (auto& tok : shell_tokens(compile_flags))
             argv.push_back(std::move(tok));
-        }
         argv.insert(argv.end(), {"-fmodules", "-M", "-MP",
             "-fdeps-format=p1689r5", "-fdeps-file=" + deps.generic_string(),
             "-fdeps-target=" + source, "-MF", hdrs.generic_string(), source});
@@ -428,21 +467,23 @@ scan_deps_requires(const std::string& compiler, std::string_view compile_flags,
         for (const auto& req : rule["requires"]) {
             if (!req.is_object() || !req.contains("logical-name") || !req["logical-name"].is_string())
                 continue;
-            if (req.value("isHeaderUnit", false))
+            if (req.value("isHeaderUnit", false)) {
+                header_units.push_back(req["logical-name"].get<std::string>());
                 continue;
+            }
+            const std::string name = req["logical-name"].get<std::string>();
             /* no compiler emits header-unit metadata yet (GCC routes direct
              * header imports into requires with the header's flat name, and
-             * clang's named-module scan skips them): drop anything that is
-             * not a named module — header paths carry '/' or a header
-             * extension, angle/quoted forms keep their delimiters */
-            const std::string name = req["logical-name"].get<std::string>();
+             * clang's named-module scan skips them): anything that is not a
+             * named module is a header unit — reported, never dropped */
             if (name.contains('/') || name.starts_with('<') || name.starts_with('"')
                 || name.ends_with(".h") || name.ends_with(".hpp") || name.ends_with(".hh")
                 || name.ends_with(".hxx"))
-                continue;
-            names.push_back(std::move(name));
+                header_units.push_back(std::move(name));
+            else
+                names.push_back(std::move(name));
         }
-    return names;
+    return std::make_pair(std::move(names), std::move(header_units));
 }
 
 } // namespace truss::detail
