@@ -180,28 +180,39 @@ std::string_view std_module_flag(CppStandard s) {
     return s == CppStandard::Cpp26 ? "-std=c++26" : "-std=c++23";
 }
 
-/* Ask clang for libc++'s module manifest (empty for g++, zig, libstdc++).
+/* Ask the compiler for the std module's manifest (libc++: -print-library-
+ * module-manifest-path; GCC 15+: -print-file-name=libstdc++.modules.json).
  * Paths in it are relative to the manifest's directory. Cached per query. */
-Result<StdManifest> discover_std_manifest(const std::string& compiler, std::string_view std_flag) {
+Result<StdManifest> discover_std_manifest(const TargetTriple& triple, std::string_view std_flag) {
     static std::mutex mutex;
     static std::map<std::string, StdManifest, std::less<>> cache;
+    const std::string& compiler = triple.compiler;
     const std::string key = compiler + ' ' + std::string(std_flag);
     const std::scoped_lock lock(mutex);
     if (const auto it = cache.find(key); it != cache.end())
         return it->second;
 
+    const bool gcc = triple.family == CompilerFamily::Gcc;
     const auto fail = [&](std::string why) {
         return std::unexpected(Error {
             Error::Kind::Toolchain,
-            "`import std;` needs libc++'s module manifest, but " + why + " (compiler: '" + compiler +
-                "'); install libc++ with its module sources (e.g. libc++-dev / libc++ 18+)",
+            "`import std;` needs the standard library's module manifest, but " + why +
+                " (compiler: '" + compiler + "'); " +
+                (gcc ? "GCC 15+ ships libstdc++.modules.json (install a recent libstdc++)"
+                     : "install libc++ with its module sources (e.g. libc++-dev / libc++ 18+)"),
         });
     };
-    const std::vector<std::string> argv {compiler, std::string(std_flag), "-stdlib=libc++",
-                                         "-print-library-module-manifest-path"};
+    std::vector<std::string> argv {compiler};
+    if (gcc)
+        argv.push_back("-print-file-name=libstdc++.modules.json");
+    else {
+        argv.push_back(std::string(std_flag));
+        argv.push_back("-stdlib=libc++");
+        argv.push_back("-print-library-module-manifest-path");
+    }
     auto out = detail::run_process_stdout(argv);
     if (!out || out->exit_code != 0)
-        return fail("`" + compiler + " -print-library-module-manifest-path` failed");
+        return fail("querying the manifest path failed");
     std::string path = out->output;
     while (!path.empty() && std::isspace(static_cast<unsigned char>(path.back())))
         path.pop_back();
@@ -553,12 +564,13 @@ Result<void> emit_manifest(const Project& proj, std::vector<ResolvedTarget>& res
     const auto std_for = [&](const ResolvedTarget& r, bool compat) -> Result<StdModule> {
         const std::string_view flag = std_module_flag(r.target->cpp_standard());
         const std::string key = detail::triple_dir(r.triple) + "-" + std::string(flag.substr(5));
+        const bool gcc = r.triple.family == CompilerFamily::Gcc;
         const auto emit = [&](const StdEntry& en, const std::string& src, const std::string& obj,
                               const std::string& pcm, std::string_view extra, std::vector<std::string> ins) {
             NinjaWriter::Edge e;
             e.outputs = {obj};
             e.implicit_outs = {pcm};
-            e.rule = "compile_bmi";
+            e.rule = gcc ? "compile_bmi_gcc" : "compile_bmi";
             e.inputs = {src};
             e.implicit_ins = std::move(ins);
             e.vars = {
@@ -571,23 +583,37 @@ Result<void> emit_manifest(const Project& proj, std::vector<ResolvedTarget>& res
         };
         auto it = std_modules.find(key);
         if (it == std_modules.end()) {
-            auto man = discover_std_manifest(r.triple.compiler, flag);
+            auto man = discover_std_manifest(r.triple, flag);
             if (!man)
                 return std::unexpected(man.error());
             const std::string dir = (build_dir / "std" / key).generic_string();
             if (auto mk = detail::make_dirs(dir); !mk)
                 return std::unexpected(mk.error());
             StdEntry en;
-            en.paths = {dir + "/std.pcm", dir + "/std.o", dir + "/std.compat.pcm", dir + "/std.compat.o"};
-            en.flags = std::string(flag) + " -stdlib=libc++";
+            if (gcc) {
+                /* GCC: the CMI path comes from the module mapper, not
+                 * -fmodule-output; the map pins both std CMIs */
+                en.paths = {dir + "/std.gcm", dir + "/std.o",
+                            dir + "/std.compat.gcm", dir + "/std.compat.o"};
+                const std::string map = dir + "/std.map";
+                std::string body = "$root .\nstd " + en.paths.pcm + "\n";
+                if (!en.manifest.compat_source.empty())
+                    body += "std.compat " + en.paths.compat_pcm + "\n";
+                if (auto wr = detail::write_file_if_changed(map, body); !wr)
+                    return std::unexpected(wr.error());
+                en.flags = std::string(flag) + " -fmodules -fmodule-mapper=" + map;
+            } else {
+                en.paths = {dir + "/std.pcm", dir + "/std.o", dir + "/std.compat.pcm", dir + "/std.compat.o"};
+                en.flags = std::string(flag) + " -stdlib=libc++";
+                en.flags += " -fPIC -Wno-reserved-module-identifier";
+            }
             if (!r.triple.target.empty())
                 en.flags += " --target=" + r.triple.target;
-            en.flags += " -fPIC -Wno-reserved-module-identifier";
             for (const auto& d : man->system_dirs) {
                 if (!path_is_safe(std::filesystem::path(d)))
                     return std::unexpected(Error {
                         Error::Kind::Toolchain,
-                        "libc++'s module manifest has an unsafe system include dir '" + d + "'",
+                        "the std module manifest has an unsafe system include dir '" + d + "'",
                     });
                 en.flags += " -isystem \"" + d + "\"";
             }
@@ -599,10 +625,12 @@ Result<void> emit_manifest(const Project& proj, std::vector<ResolvedTarget>& res
         if (compat && !en.compat_emitted) {
             if (en.manifest.compat_source.empty())
                 return std::unexpected(Error {
-                    Error::Kind::Toolchain, "libc++'s module manifest has no `std.compat` module",
+                    Error::Kind::Toolchain, "the std module manifest has no `std.compat` module",
                 });
+            /* GCC's mapper already routes std.compat's import of std; clang needs the explicit flag */
             emit(en, en.manifest.compat_source, en.paths.compat_obj, en.paths.compat_pcm,
-                 " -fmodule-file=std=" + en.paths.pcm, {en.paths.pcm});
+                 gcc ? "" : " -fmodule-file=std=" + en.paths.pcm,
+                 gcc ? std::vector<std::string> {} : std::vector<std::string> {en.paths.pcm});
             en.compat_emitted = true;
         }
         return en.paths;
@@ -644,6 +672,20 @@ Result<void> emit_manifest(const Project& proj, std::vector<ResolvedTarget>& res
         {"deps", "gcc"},
         {"description", "BMI $out"},
     });
+    if (std::ranges::any_of(resolved, [](const ResolvedTarget& r) {
+            return r.triple.family == CompilerFamily::Gcc
+                && (!r.bmis.empty() || r.needs_std || r.needs_std_compat
+                    || std::ranges::any_of(r.units, [](const auto& u) {
+                           return !u.module_name.empty() || !u.imports.empty();
+                       }));
+        }))
+        w.rule("compile_bmi_gcc", {
+            /* GCC writes the CMI where the module mapper routes it (no
+             * -fmodule-output; that flag is clang-only) */
+            {"command", "$cxx $flags -MMD -MF $depfile -c $in -o $out"},
+            {"deps", "gcc"},
+            {"description", "BMI $out"},
+        });
     w.rule("archive", {
         {"command", "$ar rcs $out $in"},
         {"description", "AR $out"},
@@ -843,25 +885,27 @@ Result<void> emit_manifest(const Project& proj, std::vector<ResolvedTarget>& res
         if (!cflags)
             return std::unexpected(cflags.error());
 
-        /* Authoritative import lists via clang-scan-deps (parallel; ~10 ms per
-         * TU). Manual demands it; Auto (the default — Default resolves to
-         * Auto here) uses it whenever the toolchain can run it — clang
-         * family, not zig (whose two-token driver clang-scan-deps cannot
-         * parse) — and falls back to the hand-rolled lexer scan otherwise. */
-        const bool scan_deps_usable = r.triple.family == CompilerFamily::Clang
-                                      && !detail::is_zig(r.triple)
-                                      && os::program_exists("clang-scan-deps");
+        /* Authoritative import lists via the compiler's p1689 output (parallel;
+         * ~10 ms per TU). Manual demands it; Auto (the default — Default
+         * resolves to Auto here) uses it whenever the toolchain can run it —
+         * clang via clang-scan-deps (not zig: its two-token driver is
+         * unparseable), GCC via -fdeps-format=p1689r5 — and falls back to the
+         * hand-rolled lexer scan otherwise. */
+        const bool scan_deps_usable =
+            (r.triple.family == CompilerFamily::Clang && !detail::is_zig(r.triple)
+             && os::program_exists("clang-scan-deps"))
+            || r.triple.family == CompilerFamily::Gcc;
         const ModulesMode mm = t.modules_mode() == ModulesMode::Default
                                    ? ModulesMode::Auto
                                    : t.modules_mode();
         if (mm == ModulesMode::Manual || (mm == ModulesMode::Auto && scan_deps_usable)) {
-            if (t.modules_mode() == ModulesMode::Manual) {
-                if (r.triple.family != CompilerFamily::Clang)
+            if (mm == ModulesMode::Manual) {
+                if (r.triple.family != CompilerFamily::Clang && r.triple.family != CompilerFamily::Gcc)
                     return std::unexpected(Error {
                         Error::Kind::Config,
-                        "modules_mode(Manual) requires a clang-family compiler (clang-scan-deps)",
+                        "modules_mode(Manual) requires a clang- or GCC-family compiler (p1689 scanning)",
                     });
-                if (!os::program_exists("clang-scan-deps"))
+                if (r.triple.family == CompilerFamily::Clang && !os::program_exists("clang-scan-deps"))
                     return std::unexpected(Error {
                         Error::Kind::Toolchain, "modules_mode(Manual): clang-scan-deps not found on PATH",
                     });
@@ -957,6 +1001,29 @@ Result<void> emit_manifest(const Project& proj, std::vector<ResolvedTarget>& res
                 bmis["std.compat"] = std_mod.compat_pcm;
                 module_imports["std.compat"] = {"std"}; /* re-exports std */
             }
+        }
+
+        /* GCC modules: a module-mapper file pins every module this target
+         * touches (own BMIs, transitively imported ones, std) to its CMI path;
+         * GCC reads and writes CMIs through it ($root = the process cwd, which
+         * is the project root for every samurai command). */
+        const bool gcc_modules = r.triple.family == CompilerFamily::Gcc
+            && std::ranges::any_of(r.units, [](const auto& u) {
+                   return !u.module_name.empty() || !u.imports.empty();
+               });
+        std::string gcc_mod_flags;
+        if (gcc_modules) {
+            const std::string map_dir =
+                (build_dir / "modmap" / detail::triple_dir(r.triple)).generic_string();
+            if (auto mk = detail::make_dirs(map_dir); !mk)
+                return std::unexpected(mk.error());
+            const std::string map = map_dir + "/" + t.name() + ".map";
+            std::string body = "$root .\n"; /* paths below are project-root relative */
+            for (const auto& [name, path] : bmis)
+                body += name + " " + path + "\n";
+            if (auto wr = detail::write_file_if_changed(map, body); !wr)
+                return std::unexpected(wr.error());
+            gcc_mod_flags = "-fmodules -fmodule-mapper=" + map;
         }
 
         std::map<std::string_view, const detail::ModuleUnitInfo*> unit_by_path;
@@ -1059,10 +1126,10 @@ Result<void> emit_manifest(const Project& proj, std::vector<ResolvedTarget>& res
                 return std::unexpected(imp.error());
             NinjaWriter::Edge e;
             e.outputs = {b.object};
-            /* the .pcm is produced by -fmodule-output: declare it as an implicit
-             * output so samu can order consumers against it */
+            /* the BMI is produced alongside the object: declare it as an
+             * implicit output so samu can order consumers against it */
             e.implicit_outs = {b.bmi_path};
-            e.rule = "compile_bmi";
+            e.rule = gcc_modules ? "compile_bmi_gcc" : "compile_bmi";
             e.inputs = {b.source};
             e.implicit_ins = imp->second;
             /* generated files from depends_on custom commands: order-only, so
@@ -1070,6 +1137,8 @@ Result<void> emit_manifest(const Project& proj, std::vector<ResolvedTarget>& res
              * the generated header for incremental rebuilds) */
             e.implicit_ins.insert(e.implicit_ins.end(), usage.gen_outputs.begin(), usage.gen_outputs.end());
             std::string flags = cflags->compile;
+            if (!gcc_mod_flags.empty())
+                flags += " " + gcc_mod_flags; /* -fmodules + the mapper; GCC takes no -fmodule-file */
             if (!imp->first.empty())
                 flags += " " + imp->first;
             e.vars = {
@@ -1092,6 +1161,8 @@ Result<void> emit_manifest(const Project& proj, std::vector<ResolvedTarget>& res
                 e.implicit_ins.push_back(pch_out);
             e.implicit_ins.insert(e.implicit_ins.end(), usage.gen_outputs.begin(), usage.gen_outputs.end());
             std::string flags = cflags->compile;
+            if (!gcc_mod_flags.empty())
+                flags += " " + gcc_mod_flags; /* module imports resolve via the mapper */
             if (!unit.imp_flags.empty())
                 flags += " " + unit.imp_flags;
             if (!pch_flag.empty())
@@ -1928,7 +1999,10 @@ Result<void> Project::build() {
                 BmiUnit b;
                 b.source = f;
                 b.module_name = info->module_name;
-                b.bmi_path = r.objdir + "/bmi/" + flat + ".pcm";
+                /* clang: .pcm (written by -fmodule-output); GCC: .gcm (the
+                 * module mapper routes the CMI here) */
+                b.bmi_path = r.objdir + "/bmi/" + flat
+                           + (r.triple.family == CompilerFamily::Gcc ? ".gcm" : ".pcm");
                 b.object = r.objdir + "/" + f + obj_ext(r.triple.family);
                 r.units.push_back(std::move(*info));
                 r.bmis.push_back(std::move(b));
@@ -1995,13 +2069,16 @@ Result<void> Project::build() {
         if (r.needs_std || r.needs_std_compat) {
             const bool libcxx_clang = r.triple.family == CompilerFamily::Clang && !detail::is_zig(r.triple) &&
                                       r.triple.stdlib == StdLib::Libcxx;
-            if (!libcxx_clang) {
+            const bool gcc_ok = r.triple.family == CompilerFamily::Gcc; /* GCC 15+ ships the std module */
+            if (!libcxx_clang && !gcc_ok) {
                 Error e {
                     Error::Kind::Config,
-                    "target '" + t->name() + "' uses `import std;`, which needs clang with libc++;\n"
+                    "target '" + t->name() + "' uses `import std;`, which needs clang with libc++ or "
+                    "GCC 15+ with libstdc++;\n"
                     "  correct:   proj.configure(Config().toolchain(truss::Toolchain::LLVM))\n"
-                    "  incorrect: compiler '" + r.triple.compiler + "' (zig, g++, MSVC and libstdc++ "
-                    "do not provide a buildable std module)",
+                    "  correct:   proj.configure(Config().toolchain(truss::Toolchain::GCC))\n"
+                    "  incorrect: compiler '" + r.triple.compiler + "' (zig and MSVC do not provide "
+                    "a buildable std module)",
                 };
                 log::error(e);
                 return std::unexpected(std::move(e));

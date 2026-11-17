@@ -323,10 +323,11 @@ resolve_module_imports(const ModuleUnitInfo& u, const std::map<std::string, std:
     return std::make_pair(flags, order);
 }
 
-/* Authoritative import list for one TU via clang-scan-deps (p1689 JSON).
- * One TU per invocation (a single-entry compilation database): this clang
+/* Authoritative import list for one TU via the compiler's p1689 output.
+ * clang: clang-scan-deps over a single-entry compilation database (this clang
  * build leaves "primary-output" empty in multi-TU CDB scans, so rules could
- * not be mapped back to files otherwise. ~10 ms per TU. */
+ * not be mapped back to files otherwise); GCC: the compiler itself with
+ * -fdeps-format=p1689r5 (GCC 14+). ~10 ms per TU. */
 Result<std::vector<std::string>>
 scan_deps_requires(const std::string& compiler, std::string_view compile_flags,
                    const std::string& source, const std::filesystem::path& cwd,
@@ -340,37 +341,76 @@ scan_deps_requires(const std::string& compiler, std::string_view compile_flags,
      * counter keeps each TU's compilation database apart (a hash could
      * collide, and std::hash is not stable across runs) */
     static std::atomic<unsigned> cdb_seq {0};
-    const std::filesystem::path cdb =
-        scratch / ("cdb_" + std::to_string(cdb_seq.fetch_add(1, std::memory_order_relaxed))
-                   + "_" + flat + ".json");
-    const std::string cmd = compiler + " " + std::string(compile_flags) + " -c " + source;
-    const nlohmann::json entry {
-        {"directory", cwd.generic_string()},
-        {"file", source},
-        {"command", cmd},
-    };
-    if (auto r = write_file(cdb, nlohmann::json {entry}.dump()); !r)
-        return std::unexpected(r.error());
+    const std::string seq = std::to_string(cdb_seq.fetch_add(1, std::memory_order_relaxed));
 
-    const std::vector<std::string> argv {
-        "clang-scan-deps", "--format=p1689", "-compilation-database=" + cdb.generic_string(),
-    };
-    auto outcome = run_process_stdout(argv);
-    std::error_code rm_ec;
-    std::filesystem::remove(cdb, rm_ec); /* best effort */
-    if (!outcome)
-        return std::unexpected(outcome.error());
-    if (outcome->exit_code != 0)
-        return std::unexpected(Error {
-            Error::Kind::Toolchain,
-            "clang-scan-deps failed for '" + source + "' (modules_mode(Manual) requires clang)",
-            std::filesystem::path(source),
-        });
+    const bool gcc = family_from_compiler_name(compiler) == CompilerFamily::Gcc;
+    nlohmann::json j;
+    if (gcc) {
+        /* the compiler scans itself: preprocess-only (-M) with p1689 module
+         * deps to a scratch file; the imported CMIs need not exist yet */
+        const std::filesystem::path deps = scratch / ("deps_" + seq + "_" + flat + ".json");
+        const std::filesystem::path hdrs = scratch / ("deps_" + seq + "_" + flat + ".d");
+        /* compile_flags is space-joined: split it into real argv elements
+         * (paths with spaces are rejected project-wide, so no flag embeds
+         * spaces) */
+        std::vector<std::string> argv {compiler};
+        for (auto word : std::views::split(compile_flags, ' ') |
+                             std::views::filter([](auto w) { return !w.empty(); }))
+            argv.emplace_back(word.begin(), word.end());
+        argv.insert(argv.end(), {"-fmodules", "-M", "-MP",
+            "-fdeps-format=p1689r5", "-fdeps-file=" + deps.generic_string(),
+            "-fdeps-target=" + source, "-MF", hdrs.generic_string(), source});
+        auto outcome = run_process_stdout(argv);
+        if (!outcome)
+            return std::unexpected(outcome.error());
+        if (outcome->exit_code != 0)
+            return std::unexpected(Error {
+                Error::Kind::Toolchain,
+                "module scan failed for '" + source + "' (GCC 14+ required for -fdeps-format)",
+                std::filesystem::path(source),
+            });
+        auto text = read_file(deps);
+        std::error_code rm_ec;
+        std::filesystem::remove(deps, rm_ec); /* best effort */
+        std::filesystem::remove(hdrs, rm_ec);
+        if (!text)
+            return std::unexpected(Error {
+                Error::Kind::Toolchain, "the GCC module scan wrote no p1689 output for '" + source + "'",
+                std::filesystem::path(source),
+            });
+        j = nlohmann::json::parse(*text, nullptr, false);
+    } else {
+        const std::filesystem::path cdb =
+            scratch / ("cdb_" + seq + "_" + flat + ".json");
+        const std::string cmd = compiler + " " + std::string(compile_flags) + " -c " + source;
+        const nlohmann::json entry {
+            {"directory", cwd.generic_string()},
+            {"file", source},
+            {"command", cmd},
+        };
+        if (auto r = write_file(cdb, nlohmann::json {entry}.dump()); !r)
+            return std::unexpected(r.error());
 
-    const auto j = nlohmann::json::parse(outcome->output, nullptr, false);
+        const std::vector<std::string> argv {
+            "clang-scan-deps", "--format=p1689", "-compilation-database=" + cdb.generic_string(),
+        };
+        auto outcome = run_process_stdout(argv);
+        std::error_code rm_ec;
+        std::filesystem::remove(cdb, rm_ec); /* best effort */
+        if (!outcome)
+            return std::unexpected(outcome.error());
+        if (outcome->exit_code != 0)
+            return std::unexpected(Error {
+                Error::Kind::Toolchain,
+                "clang-scan-deps failed for '" + source + "' (modules_mode(Manual) requires clang)",
+                std::filesystem::path(source),
+            });
+        j = nlohmann::json::parse(outcome->output, nullptr, false);
+    }
+
     if (!j.is_object() || !j.contains("rules") || !j["rules"].is_array() || j["rules"].empty())
         return std::unexpected(Error {
-            Error::Kind::Toolchain, "clang-scan-deps produced no p1689 rules for '" + source + "'",
+            Error::Kind::Toolchain, "the module scan produced no p1689 rules for '" + source + "'",
             std::filesystem::path(source),
         });
     std::vector<std::string> names;

@@ -59,6 +59,20 @@ bool std_module_available() {
     return !p.empty() && std::filesystem::is_regular_file(p, ec);
 }
 
+/* g++ with libstdc++'s std module manifest (GCC 15+) */
+bool gcc_std_module_available() {
+    if (!os::program_exists("g++"))
+        return false;
+    auto r = os::capture({"g++", "-print-file-name=libstdc++.modules.json"});
+    if (!r || r->exit_code != 0)
+        return false;
+    std::string p = r->output;
+    while (!p.empty() && (p.back() == '\n' || p.back() == '\r' || p.back() == ' '))
+        p.pop_back();
+    std::error_code ec;
+    return !p.empty() && std::filesystem::is_regular_file(p, ec);
+}
+
 constexpr std::string_view kPrintln =
     "import std;\nint main() { std::println(\"hello {}\", 42); return 0; }\n";
 
@@ -110,9 +124,15 @@ TEST_CASE("import std: toolchains without libc++ modules are a Config error") {
         proj.configure(Config().toolchain(Toolchain::GCC));
         proj.add_executable("app").sources("app/main.cpp");
         auto r = proj.build();
-        REQUIRE_FALSE(r.has_value());
-        CHECK(r.error().kind == Error::Kind::Config);
-        CHECK(contains(r.error().message, "libc++"));
+        if (gcc_std_module_available()) {
+            /* GCC 15+ ships the std module: a valid configuration now */
+            INFO((r ? "ok" : r.error().message));
+            CHECK(r.has_value());
+        } else {
+            REQUIRE_FALSE(r.has_value());
+            CHECK(r.error().kind == Error::Kind::Config);
+            CHECK(contains(r.error().message, "GCC 15+"));
+        }
     }
     {
         Project proj("std-libstdcxx", 2, argv);
@@ -210,6 +230,45 @@ TEST_CASE("import std: exe links a shared lib that imports std (no std.o in the 
     const std::string app_link = m.substr(start, eol - start);
     CHECK_FALSE(contains(app_link, "std.o"));
 
+    const auto bin = std::filesystem::current_path() / "build/debug/bin" / tdir;
+    auto run = os::run({(bin / "app").string()});
+    REQUIRE(run.has_value());
+    CHECK(run->exit_code == 0);
+}
+
+TEST_CASE("import std + modules: GCC end to end (mapper, partitions, std.gcm)") {
+    if (!gcc_std_module_available()) { MESSAGE("g++ without libstdc++.modules.json, skipping"); return; }
+    ScratchDir scratch {"gcc-std"};
+    /* a partition + a GMF include + std inside the partition: exercises the
+     * module mapper (CMI paths), compile_bmi_gcc and the transitive closure */
+    REQUIRE(detail::write_file("lib/greet.cppm", "export module greet;\nexport import :core;\n").has_value());
+    REQUIRE(detail::write_file("lib/core.cppm",
+                               "module;\n#include <string>\n"
+                               "export module greet:core;\n"
+                               "import std;\n"
+                               "export std::string greet() { return std::format(\"gcc: {}\", 7); }\n")
+                .has_value());
+    REQUIRE(detail::write_file("app/main.cpp",
+                               "import std;\nimport greet;\n"
+                               "int main() { std::println(\"{}\", greet()); }\n")
+                .has_value());
+    char prog[] = "truss-tests";
+    char* argv[] = {prog};
+    Project proj("gcc-std", 1, argv);
+    proj.configure(Config().toolchain(Toolchain::GCC));
+    auto& g = proj.add_static_library("greet").sources({"lib/greet.cppm", "lib/core.cppm"});
+    proj.add_executable("app").sources("app/main.cpp").depends_on(g);
+    auto r = proj.build();
+    INFO((r ? "ok" : r.error().message));
+    REQUIRE(r.has_value());
+
+    const std::string tdir =
+        detail::triple_dir(*detail::apply_config(Config().toolchain(Toolchain::GCC), host_triple()));
+    /* CMIs landed where the mapper routed them */
+    CHECK(std::filesystem::exists("build/debug/std/" + tdir + "-c++23/std.gcm"));
+    const bool greet_cmi = std::filesystem::exists("build/debug/obj/x64-linux-gcc/greet/bmi/greet.gcm")
+                        || std::filesystem::exists("build/debug/obj/x64-linux-gcc/lib/greet.gcm");
+    CHECK(greet_cmi);
     const auto bin = std::filesystem::current_path() / "build/debug/bin" / tdir;
     auto run = os::run({(bin / "app").string()});
     REQUIRE(run.has_value());
