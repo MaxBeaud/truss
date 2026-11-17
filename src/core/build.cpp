@@ -128,6 +128,7 @@ struct BmiUnit {
 /* A resolved target: everything the emitter needs. */
 struct ResolvedTarget {
     Target* target {};
+    std::string subgraph;                        /* per-triple subgraph name ("" = single-config project) */
     TargetTriple triple;
     std::vector<std::string> cxx_sources, c_sources; /* relative to cwd */
     std::vector<BmiUnit> bmis;
@@ -140,8 +141,11 @@ struct ResolvedTarget {
     bool needs_std_compat {};                        /* some unit does `import std.compat;` */
 };
 
-/* name -> resolved target, built once per build (avoids repeated linear scans) */
-using TargetIndex = std::map<std::string_view, const ResolvedTarget*, std::less<>>;
+/* name -> resolved target, built once per build (avoids repeated linear
+ * scans). Keyed by (subgraph, target name): the same target name legitimately
+ * resolves once per subgraph. */
+using SubName = std::pair<std::string_view, std::string_view>;
+using TargetIndex = std::map<SubName, const ResolvedTarget*, std::less<>>;
 
 /* BMIs visible to a target: its own plus those of depends_on (transitively). */
 void collect_bmis(const ResolvedTarget& r, const TargetIndex& idx,
@@ -157,7 +161,7 @@ void collect_bmis(const ResolvedTarget& r, const TargetIndex& idx,
         if (u.is_bmi_source)
             module_imports.emplace(u.module_name, u.imports);
     for (const Target* dep : r.target->deps()) {
-        const auto it = idx.find(dep->name());
+        const auto it = idx.find({r.subgraph, dep->name()});
         if (it != idx.end())
             collect_bmis(*it->second, idx, out, module_imports, seen);
     }
@@ -310,7 +314,7 @@ private:
             }
         }
         for (const Target* dep : r.target->deps())
-            if (const auto it = idx_.find(dep->name()); it != idx_.end())
+            if (const auto it = idx_.find({r.subgraph, dep->name()}); it != idx_.end())
                 visit(*it->second);
     }
 
@@ -551,7 +555,7 @@ Result<void> emit_manifest(const Project& proj, std::vector<ResolvedTarget>& res
 
     TargetIndex by_name;
     for (const auto& r : resolved)
-        by_name[std::string_view(r.target->name())] = &r;
+        by_name[{r.subgraph, r.target->name()}] = &r;
 
     /* std / std.compat edges: one pair per (triple dir, -std), emitted on first use */
     struct StdEntry {
@@ -802,7 +806,6 @@ Result<void> emit_manifest(const Project& proj, std::vector<ResolvedTarget>& res
                                  ("lib" + r.target->name() + ".a")).generic_string();
     }
 
-    std::vector<std::string> all_outputs;
     for (auto& r : resolved) {
         const Target& t = *r.target;
         /* custom command: one edge with every output; the used tool and the
@@ -814,7 +817,7 @@ Result<void> emit_manifest(const Project& proj, std::vector<ResolvedTarget>& res
             for (const Target* dep : t.deps()) {
                 if (dep->kind() == TargetKind::Interface)
                     continue; /* header-only: no file to feed the command */
-                const auto it = by_name.find(dep->name());
+                const auto it = by_name.find({r.subgraph, dep->name()});
                 if (it == by_name.end())
                     return std::unexpected(Error {
                         Error::Kind::Config,
@@ -831,7 +834,7 @@ Result<void> emit_manifest(const Project& proj, std::vector<ResolvedTarget>& res
             }
             std::string tool_path;
             if (const Target* tool = cc.used_tool(); tool != nullptr) {
-                const auto it = by_name.find(tool->name());
+                const auto it = by_name.find({r.subgraph, tool->name()});
                 if (it == by_name.end() || it->second->output.empty())
                     return std::unexpected(Error {
                         Error::Kind::Config,
@@ -862,8 +865,6 @@ Result<void> emit_manifest(const Project& proj, std::vector<ResolvedTarget>& res
                 e.inputs.push_back(tool_path);
             e.vars = {{"command", std::move(command)}};
             w.build(std::move(e));
-            for (const auto& o : r.cmd_outputs)
-                all_outputs.push_back(o);
             continue;
         }
         /* header-only and imported-prebuilt targets contribute usage
@@ -1233,7 +1234,7 @@ Result<void> emit_manifest(const Project& proj, std::vector<ResolvedTarget>& res
                 if (dep->kind() == TargetKind::Interface ||
                     dep->kind() == TargetKind::CustomCommand)
                     continue;
-                const auto it = by_name.find(dep->name());
+                const auto it = by_name.find({r.subgraph, dep->name()});
                 if (it == by_name.end())
                     return std::unexpected(Error {
                         Error::Kind::Config,
@@ -1286,7 +1287,7 @@ Result<void> emit_manifest(const Project& proj, std::vector<ResolvedTarget>& res
                 for (const Target* dep : d.deps()) {
                     if (!std_seen.insert(dep).second)
                         continue;
-                    const auto it = by_name.find(dep->name());
+                    const auto it = by_name.find({r.subgraph, dep->name()});
                     if (it == by_name.end())
                         continue;
                     if (dep->kind() == TargetKind::SharedLibrary && !static_consumer)
@@ -1320,7 +1321,7 @@ Result<void> emit_manifest(const Project& proj, std::vector<ResolvedTarget>& res
             for (const auto& obj : inputs)
                 script += "ADDMOD " + obj + "\n";
             for (const Target* m : t.merged_libraries()) {
-                const auto it = by_name.find(m->name());
+                const auto it = by_name.find({r.subgraph, m->name()});
                 if (it == by_name.end() || m->kind() != TargetKind::StaticLibrary)
                     return std::unexpected(Error {
                         Error::Kind::Config,
@@ -1429,26 +1430,60 @@ Result<void> emit_manifest(const Project& proj, std::vector<ResolvedTarget>& res
             }
             w.build(std::move(e));
         }
-        all_outputs.push_back(r.output);
     }
 
-    w.phony("all", std::move(all_outputs));
+    /* per-subgraph phony targets (win:all, ...); the unnamed single-config
+     * project keeps its bare `all` */
+    {
+        std::map<std::string, std::vector<std::string>, std::less<>> per_sg;
+        for (const auto& r : resolved)
+            if (!r.output.empty())
+                per_sg[r.subgraph].push_back(r.output);
+        std::vector<std::string> everything;
+        for (auto& [sg, outs] : per_sg) {
+            if (!sg.empty())
+                w.phony(sg + ":all", outs);
+            everything.insert(everything.end(), outs.begin(), outs.end());
+        }
+        w.phony("all", std::move(everything));
+    }
 
     if (proj.only_targets().empty()) {
         w.default_targets({"all"});
     } else {
+        /* --target NAME:target picks one subgraph; a bare NAME applies to
+         * every subgraph that has it */
         std::vector<std::string> selected;
         for (const auto& name : proj.only_targets()) {
-            const auto it = by_name.find(name);
-            if (it == by_name.end())
-                return std::unexpected(Error {Error::Kind::Config, "unknown --target '" + name + "'"});
-            if (it->second->output.empty())
-                return std::unexpected(Error {
-                    Error::Kind::Config,
-                    "--target '" + name + "': that target produces no artifact "
-                    "(header-only interface or imported prebuilt library)",
-                });
-            selected.push_back(it->second->output);
+            const auto pick = [&](const SubName& key) -> Result<void> {
+                const auto it = by_name.find(key);
+                if (it == by_name.end())
+                    return std::unexpected(Error {Error::Kind::Config,
+                        "unknown --target '" + std::string(key.second) + "'" +
+                        (key.first.empty() ? "" : " in subgraph '" + std::string(key.first) + "'")});
+                if (it->second->output.empty())
+                    return std::unexpected(Error {
+                        Error::Kind::Config,
+                        "--target '" + std::string(key.second) + "': that target produces no artifact "
+                        "(header-only interface or imported prebuilt library)",
+                    });
+                selected.push_back(it->second->output);
+                return {};
+            };
+            if (const auto colon = name.find(':'); colon != std::string::npos) {
+                if (auto r = pick({name.substr(0, colon), name.substr(colon + 1)}); !r)
+                    return std::unexpected(r.error());
+            } else {
+                bool found = false;
+                for (const auto& [key, rt] : by_name)
+                    if (key.second == name) {
+                        found = true;
+                        if (auto r = pick(key); !r)
+                            return std::unexpected(r.error());
+                    }
+                if (!found)
+                    return std::unexpected(Error {Error::Kind::Config, "unknown --target '" + name + "'"});
+            }
         }
         w.default_targets(std::move(selected));
     }
@@ -1565,10 +1600,14 @@ constexpr std::string_view kHelp =
     "  -v, --verbose    print full command lines\n"
     "  -n, --dry-run    show what would run without running it\n"
     "      --explain    explain why each step is rebuilt\n"
-    "      --target NAME  build (or run) only NAME; repeatable\n"
+    "      --target NAME  build (or run) only NAME; repeatable. With subgraphs\n"
+    "                      (proj.targets()): NAME:target picks one subgraph, a\n"
+    "                      bare name applies to every subgraph that has it\n"
+    "      --for NAME      with subgraphs: run tasks (test/run) for one subgraph only\n"
     "      --cross TRIPLE  override the script's Config::target for this invocation,\n"
     "                      e.g. --cross aarch64-linux-musl (outputs land in their\n"
-    "                      own build/<mode>/bin/<triple> dir)\n"
+    "                      own build/<mode>/bin/<triple> dir; not usable with\n"
+    "                      proj.targets() subgraphs)\n"
     "      --build-dir PATH  build root (default: build)\n"
     "  -V, --version    print the truss version\n"
     "  -h, --help       show this help\n"
@@ -1607,6 +1646,11 @@ Project::Project(std::string name, std::span<char* const> argv) : name_(std::mov
         else if (a == "--target") {
             if (++i >= argv.size()) { cli_error_ = Error {Error::Kind::Config, "--target requires a name"}; continue; }
             only_targets_.emplace_back(argv[i]);
+        }
+        else if (a == "--for") {
+            /* subgraph selector for tasks (test/run); validated in build() */
+            if (++i >= argv.size()) { cli_error_ = Error {Error::Kind::Config, "--for requires a subgraph name"}; continue; }
+            for_selector_ = argv[i];
         }
         else if (a == "--cross") {
             /* overrides Config::target for this invocation only; validated by
@@ -1703,6 +1747,13 @@ Result<void> Project::build() {
         return std::unexpected(*cli_error_);
     }
 
+    /* the log-and-fail pattern for build()-time config validation */
+    const auto config_error = [](std::string msg) -> Result<void> {
+        Error e {Error::Kind::Config, std::move(msg)};
+        log::error(e);
+        return std::unexpected(std::move(e));
+    };
+
     const std::filesystem::path bld = build_dir();
     if (!path_is_safe(cwd_) || !path_is_safe(bld))
         return std::unexpected(Error {
@@ -1775,70 +1826,98 @@ Result<void> Project::build() {
         return std::unexpected(r.error());
     }
 
-    /* project-wide toolchain: Config overlaid on the host triple (per-target
-     * cross_target() overrides completely; for_host() pins targets back onto
-     * the host while keeping the Config's compiler/stdlib/ar overlays).
-     * The --cross CLI flag overrides Config::target for this invocation only. */
-    Config eff_config = config_;
-    if (cross_override_) {
-        if (cross_override_->empty()) {
-            Error e {
-                Error::Kind::Config,
-                "--cross requires a non-empty target triple, e.g.:\n"
-                "  correct:   --cross aarch64-linux-musl\n"
-                "  incorrect: --cross \"\"",
-            };
-            log::error(e);
-            return std::unexpected(std::move(e));
+    /* per-triple subgraphs: without targets() this is one unnamed subgraph
+     * carrying the project Config (+ the --cross CLI override) */
+    struct SubCtx {
+        std::string name;
+        Config config;
+        TargetTriple base, host; /* base triple + the for_host()-pinned one */
+    };
+    std::vector<SubCtx> sub_ctx;
+    {
+        std::vector<std::pair<std::string, Config>> subs;
+        if (!subgraphs_.empty()) {
+            if (configured_)
+                return config_error(
+                    "configure() and targets() are mutually exclusive:\n"
+                    "  correct:   proj.targets({{\"linux\", Config{}.toolchain(...)}, ...})\n"
+                    "  incorrect: proj.configure(conf) followed by proj.targets(...)");
+            if (cross_override_)
+                return config_error(
+                    "--cross overrides a single project triple and cannot be combined with "
+                    "proj.targets() subgraphs (build the subgraphs you want instead)");
+            subs = subgraphs_;
+        } else {
+            Config eff = config_;
+            if (cross_override_) {
+                if (cross_override_->empty())
+                    return config_error(
+                        "--cross requires a non-empty target triple, e.g.:\n"
+                        "  correct:   --cross aarch64-linux-musl\n"
+                        "  incorrect: --cross \"\"");
+                eff.target(*cross_override_);
+            }
+            subs = {{"", std::move(eff)}};
         }
-        eff_config.target(*cross_override_);
-    }
-    /* Config::runner validates here: a malformed runner is a Config error,
-     * never a silently wrong command line */
-    if (eff_config.runner_set()) {
-        if (eff_config.runner().empty()) {
-            Error e {
-                Error::Kind::Config,
-                "runner(\"\"): the runner must be a non-empty command prefix, e.g.:\n"
-                "  correct:   conf.runner(\"qemu-aarch64 -L /sysroot\")\n"
-                "  incorrect: conf.runner(\"\")",
-            };
-            log::error(e);
-            return std::unexpected(std::move(e));
+        /* subgraph names: target-name rules, unique, 'all' reserved (it is the
+         * union phony) */
+        std::set<std::string> names;
+        for (const auto& [sg, conf] : subs) {
+            if (!sg.empty() && (sg == "all" || sg.contains(':') || !path_is_safe(std::filesystem::path(sg))))
+                return config_error("subgraph name '" + sg + "' is invalid (bare name, no ':', not 'all')");
+            if (!names.insert(sg).second)
+                return config_error("subgraph '" + sg + "' is declared twice");
         }
-        if (eff_config.runner().starts_with('-')) {
-            Error e {
-                Error::Kind::Config,
-                "runner('" + eff_config.runner() + "'): the runner must be a command, not a flag; "
-                "did you mean runner(\"qemu-aarch64\") or a flag like --cross?",
-            };
-            log::error(e);
-            return std::unexpected(std::move(e));
+        /* validate each subgraph's config: runner + triple resolution */
+        std::set<std::string> seen_triples;
+        for (auto& [sg, conf] : subs) {
+            if (conf.runner_set()) {
+                if (conf.runner().empty())
+                    return config_error(
+                        (sg.empty() ? "" : "subgraph '" + sg + "': ") +
+                        "runner(\"\"): the runner must be a non-empty command prefix, e.g.:\n"
+                        "  correct:   conf.runner(\"qemu-aarch64 -L /sysroot\")\n"
+                        "  incorrect: conf.runner(\"\")");
+                if (conf.runner().starts_with('-'))
+                    return config_error(
+                        (sg.empty() ? "" : "subgraph '" + sg + "': ") +
+                        "runner('" + conf.runner() + "'): the runner must be a command, not a flag; "
+                        "did you mean runner(\"qemu-aarch64\") or a flag like --cross?");
+            }
+            auto base = detail::apply_config(conf, host_triple());
+            if (!base) {
+                Error e = std::move(base.error());
+                if (!sg.empty())
+                    e.message = "subgraph '" + sg + "': " + e.message;
+                else if (cross_override_)
+                    e.message = "--cross '" + *cross_override_ + "': " + e.message;
+                return config_error(e.message);
+            }
+            Config host_conf = conf;
+            host_conf.target(""); /* a for_host() tool never crosses, whatever the project does */
+            auto host_pinned = detail::apply_config(host_conf, host_triple());
+            if (!host_pinned)
+                return config_error(host_pinned.error().message);
+            /* two subgraphs on one triple would collide on every output path */
+            if (const auto td = detail::triple_dir(*base); !seen_triples.insert(td).second)
+                return config_error("subgraph '" + sg + "' builds for '" + td +
+                                    "', which another subgraph already covers: per-triple "
+                                    "subgraphs must use distinct triples");
+            sub_ctx.push_back({sg, std::move(conf), std::move(*base), std::move(*host_pinned)});
         }
-    }
-    auto base_triple = detail::apply_config(eff_config, host_triple());
-    if (!base_triple) {
-        Error e = std::move(base_triple.error());
-        if (cross_override_)
-            e.message = "--cross '" + *cross_override_ + "': " + e.message;
-        log::error(e);
-        return std::unexpected(std::move(e));
-    }
-    Config host_config = eff_config;
-    host_config.target(""); /* a for_host() tool never crosses, whatever the project does */
-    auto host_pinned = detail::apply_config(host_config, host_triple());
-    if (!host_pinned) {
-        log::error(host_pinned.error());
-        return std::unexpected(host_pinned.error());
     }
 
-    /* resolve + validate sources */
+    /* resolve + validate sources: the whole graph, once per subgraph */
     std::vector<ResolvedTarget> resolved;
-    resolved.reserve(targets_.size());
-    for (const auto& t : targets_) {
+    resolved.reserve(targets_.size() * sub_ctx.size());
+    for (const auto& sub : sub_ctx) {
+      const TargetTriple& base_triple = sub.base;
+      const TargetTriple& host_pinned = sub.host;
+      for (const auto& t : targets_) {
         ResolvedTarget r;
         r.target = t.get();
-        r.triple = t->is_for_host() ? *host_pinned : t->triple_override().value_or(*base_triple);
+        r.subgraph = sub.name;
+        r.triple = t->is_for_host() ? host_pinned : t->triple_override().value_or(base_triple);
 
         /* imported prebuilt libraries and custom commands resolve no sources
          * (nothing to compile) */
@@ -1872,8 +1951,8 @@ Result<void> Project::build() {
                 dep->kind() == TargetKind::ImportedLibrary)
                 continue; /* no artifact: usable from either side */
             const TargetTriple dep_triple = dep->is_for_host()
-                                                ? *host_pinned
-                                                : dep->triple_override().value_or(*base_triple);
+                                                ? host_pinned
+                                                : dep->triple_override().value_or(base_triple);
             if (dep_triple.target != r.triple.target) {
                 Error e {
                     Error::Kind::Config,
@@ -1895,8 +1974,8 @@ Result<void> Project::build() {
             const auto& cc = static_cast<const CustomCommand&>(*t);
             if (const Target* tool = cc.used_tool(); tool != nullptr) {
                 const TargetTriple tool_triple = tool->is_for_host()
-                                                     ? *host_pinned
-                                                     : tool->triple_override().value_or(*base_triple);
+                                                     ? host_pinned
+                                                     : tool->triple_override().value_or(base_triple);
                 if (!tool_triple.target.empty()) {
                     Error e {
                         Error::Kind::Config,
@@ -2120,6 +2199,7 @@ Result<void> Project::build() {
             (r.triple.family == CompilerFamily::Msvc || r.triple.os == Os::Windows))
             r.implib = import_lib_path(*t, bld, tdir, r.triple);
         resolved.push_back(std::move(r));
+      }
     }
 
     /* a module name must have exactly one source: two .cppm files declaring
@@ -2127,18 +2207,21 @@ Result<void> Project::build() {
      * refuses the manifest), and across targets the BMI wiring would silently
      * pick whichever target the dep walk reached first */
     {
-        std::map<std::string, std::string, std::less<>> module_owner;
+        std::map<std::pair<std::string, std::string>, std::string, std::less<>> module_owner;
         for (const auto& r : resolved)
             for (const auto& u : r.units)
                 if (u.is_bmi_source && !u.module_name.empty()) {
+                    /* keyed per subgraph: the same module legitimately exists
+                     * once per subgraph of a multi-triple build */
                     const auto [it, inserted] =
-                        module_owner.try_emplace(u.module_name, r.target->name());
+                        module_owner.try_emplace({r.subgraph, u.module_name}, r.target->name());
                     if (!inserted)
                         return std::unexpected(Error {
                             Error::Kind::Config,
                             "module '" + u.module_name + "' is exported by both target '" +
                                 it->second + "' and target '" + r.target->name() +
-                                "': a module must have exactly one interface unit",
+                                "' (subgraph '" + r.subgraph +
+                                "'): a module must have exactly one interface unit",
                         });
                 }
     }
@@ -2179,6 +2262,41 @@ Result<void> Project::build() {
             hooks_post_done = true;
         }
         return {};
+    };
+
+    /* subgraph lookup for task dispatch (the runner is per subgraph) */
+    std::map<std::string, const Config*, std::less<>> sub_configs;
+    for (const auto& sub : sub_ctx)
+        sub_configs[sub.name] = &sub.config;
+    const auto config_for = [&](const std::string& sg) -> const Config& {
+        const auto it = sub_configs.find(sg);
+        return it != sub_configs.end() ? *it->second : config_;
+    };
+    if (!for_selector_.empty()) {
+        if (subgraphs_.empty())
+            return config_error(
+                "--for '" + for_selector_ +
+                "': this project has no subgraphs (--for selects among proj.targets() configurations)");
+        if (!sub_configs.contains(for_selector_)) {
+            std::string known;
+            for (const auto& [sg, cfg] : sub_configs) {
+                if (!known.empty())
+                    known += ", ";
+                known += sg.empty() ? "(default)" : sg;
+            }
+            return config_error("unknown --for '" + for_selector_ + "' (subgraphs: " + known + ")");
+        }
+    }
+    /* --target selection with subgraph support: "name:subgraph" picks one, a
+     * bare name applies to every subgraph that has it */
+    const auto target_selected = [&](const std::string& sg, const std::string& name) {
+        return only_targets_.empty() ||
+               std::ranges::any_of(only_targets_, [&](const std::string& sel) {
+                   const auto colon = sel.find(':');
+                   return colon == std::string::npos
+                              ? sel == name
+                              : sel.substr(0, colon) == sg && sel.substr(colon + 1) == name;
+               });
     };
 
     for (const auto& task : tasks) {
@@ -2303,40 +2421,50 @@ Result<void> Project::build() {
             }
 
             if (task == "test") {
-                std::vector<std::pair<std::string, bool>> tests; /* (output, is_cross) */
+                struct TestExe {
+                    std::string output, subgraph;
+                    bool cross;
+                };
+                std::vector<TestExe> tests;
                 for (const auto& r : resolved)
-                    if (r.target->is_test_target())
-                        tests.emplace_back(r.output, !r.triple.target.empty());
+                    if (r.target->is_test_target()
+                        && (for_selector_.empty() || r.subgraph == for_selector_))
+                        tests.push_back({r.output, r.subgraph, !r.triple.target.empty()});
                 if (tests.empty()) {
                     log::warn("no targets marked is_test(); nothing to run");
                     return {};
                 }
-                std::vector<std::string> to_build = tests | std::views::keys | std::ranges::to<std::vector>();
+                std::vector<std::string> to_build;
+                to_build.reserve(tests.size());
+                for (const auto& t : tests)
+                    to_build.push_back(t.output);
                 if (auto r = run_samu(to_build); !r)
                     return r;
                 if (dry_run_) { /* a dry run must not execute the test binaries */
                     log::info("dry run: would run " + std::to_string(tests.size()) + " test(s)");
                     return {};
                 }
-                const bool has_runner = config_.runner_set() && !config_.runner().empty();
                 int failures = 0, skipped = 0;
-                for (const auto& [exe, cross] : tests) {
-                    if (cross && !has_runner) {
+                for (const auto& test : tests) {
+                    const Config& cfg = config_for(test.subgraph);
+                    const bool has_runner = cfg.runner_set() && !cfg.runner().empty();
+                    if (test.cross && !has_runner) {
                         /* a cross-compiled test exe cannot run on the host:
                          * built above, skipped here — never silently "passed" */
-                        log::warn("test '" + exe +
+                        log::warn("test '" + test.output +
                                   "' skipped: it was built for a different machine "
                                   "(configure Config::runner to execute cross-compiled tests)");
                         ++skipped;
                         continue;
                     }
-                    log::info("running " + exe + (cross ? " (via runner '" + config_.runner() + "')" : ""));
-                    const auto argv = exec_argv(config_, cross, exe);
+                    log::info("running " + test.output
+                              + (test.cross ? " (via runner '" + cfg.runner() + "')" : ""));
+                    const auto argv = exec_argv(cfg, test.cross, test.output);
                     auto outcome = detail::run_process(argv, false, {}, 0); /* tests: no timeout */
                     if (!outcome)
                         return std::unexpected(outcome.error());
                     if (outcome->exit_code != 0) {
-                        log::error("test '" + exe + "' failed with exit code " + std::to_string(outcome->exit_code));
+                        log::error("test '" + test.output + "' failed with exit code " + std::to_string(outcome->exit_code));
                         ++failures;
                     }
                 }
@@ -2349,27 +2477,34 @@ Result<void> Project::build() {
             }
 
             if (task == "run") {
-                /* --target narrows the candidates; otherwise the first
-                 * declared executable runs */
-                std::vector<std::string> exe_outputs, exe_names;
+                /* --target narrows the candidates (a bare name applies to
+                 * every subgraph that has it, name:subgraph picks one);
+                 * --for selects the subgraph; otherwise the first declared
+                 * executable runs */
+                std::vector<std::string> exe_outputs, exe_names, exe_subgraphs;
                 std::vector<bool> exe_cross;
                 for (const auto& r : resolved) {
                     if (r.target->kind() != TargetKind::Executable || r.target->is_test_target())
                         continue;
-                    if (!only_targets_.empty() && std::ranges::find(only_targets_, r.target->name()) == only_targets_.end())
+                    if (!for_selector_.empty() && r.subgraph != for_selector_)
+                        continue;
+                    if (!target_selected(r.subgraph, r.target->name()))
                         continue;
                     exe_outputs.push_back(r.output);
                     exe_names.push_back(r.target->name());
+                    exe_subgraphs.push_back(r.subgraph);
                     exe_cross.push_back(!r.triple.target.empty());
                 }
                 if (exe_outputs.empty())
                     return std::unexpected(Error {Error::Kind::Config, "no executable to run (test executables are excluded)"});
-                const bool has_runner = config_.runner_set() && !config_.runner().empty();
+                const Config& cfg = config_for(exe_subgraphs.front());
+                const bool has_runner = cfg.runner_set() && !cfg.runner().empty();
                 if (exe_cross.front() && !has_runner)
                     return std::unexpected(Error {
                         Error::Kind::Config,
                         "cannot run '" + exe_outputs.front() + "': it is cross-compiled for a different "
-                        "machine than the host; configure a runner (e.g. qemu/wine) to execute it",
+                        "machine than the host; configure a runner (e.g. wine for Windows builds, "
+                        "qemu for foreign architectures) to execute it",
                     });
                 if (exe_outputs.size() > 1)
                     log::info("running '" + exe_names.front() + "' (" + std::to_string(exe_outputs.size())
@@ -2380,7 +2515,7 @@ Result<void> Project::build() {
                     log::info("dry run: would run " + exe_outputs.front());
                     return {};
                 }
-                auto argv = exec_argv(config_, exe_cross.front(), exe_outputs.front());
+                auto argv = exec_argv(cfg, exe_cross.front(), exe_outputs.front());
                 argv.insert(argv.end(), run_args_.begin(), run_args_.end());
                 auto outcome = detail::run_process(argv, false, {}, 0); /* run: no timeout */
                 if (!outcome)

@@ -1549,11 +1549,40 @@ public:
 
     /**
      * \brief Project-wide toolchain selection (compiler/linker/stdlib/archiver).
-     * Per-target cross_target() still overrides it completely.
+     * Per-target cross_target() still overrides it completely. Mutually
+     * exclusive with targets(): using both is a Config error.
      */
-    Project& configure(const Config& conf) { config_ = conf; return *this; }
+    Project& configure(const Config& conf) { config_ = conf; configured_ = true; return *this; }
     /// The active Config.
     const Config& config() const { return config_; }
+    /**
+     * \brief Per-triple subgraphs: build the WHOLE graph once per named
+     * configuration — one manifest, per-triple output dirs, one invocation:
+     * \code
+     * proj.targets({
+     *     {"linux", Config{}.toolchain(Toolchain::LLVM)},
+     *     {"win",   Config{}.toolchain(Toolchain::Zig).target("x86_64-w64-mingw32")},
+     * });
+     * \endcode
+     * Every target is built for every subgraph (outputs land in their
+     * per-triple directories); `./truss test` runs each subgraph's tests with
+     * that subgraph's runner; `--for NAME` narrows tasks to one subgraph and
+     * `--target NAME:target` (or a bare target name = every subgraph that has
+     * it) selects build targets. Mutually exclusive with configure() (a Config
+     * error when both are used). Subgraph names follow target-name rules and
+     * must be unique; two subgraphs may not share a triple (their outputs
+     * would collide).
+     * \param subgraphs (name, config) pairs, in declaration order; the first
+     *                  is the default for `run`
+     * \return *this for chaining.
+     */
+    Project& targets(std::vector<std::pair<std::string, Config>> subgraphs) {
+        subgraphs_ = std::move(subgraphs);
+        subgraphs_set_ = true;
+        return *this;
+    }
+    /// The declared subgraphs (empty until targets() is called).
+    const std::vector<std::pair<std::string, Config>>& subgraphs() const { return subgraphs_; }
 
     /**
      * \brief fetch(): git (shallow clone pinned to tag) or tarball
@@ -1674,6 +1703,10 @@ private:
     std::vector<UserTask> user_tasks_;
     std::vector<TaskFn> pre_build_, post_build_;
     Config config_;
+    bool configured_ {false};                                /* configure() was called */
+    std::vector<std::pair<std::string, Config>> subgraphs_;  /* targets(): per-triple graphs */
+    bool subgraphs_set_ {false};
+    std::string for_selector_;                               /* --for NAME: task-level subgraph */
 
     /* parsed CLI state */
     BuildMode mode_ {BuildMode::Debug};
