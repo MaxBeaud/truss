@@ -169,6 +169,13 @@ struct LinkFlags {
 /// \ingroup grp_internals
 DebugInfo resolve_debug(BuildMode mode, DebugInfo debug);
 
+/// The compile flags clang folds into a BMI's configuration check (hardening,
+/// sanitizers, LTO): build BMIs that must match consumers (the std module)
+/// with these same flags. GCC/Clang dialect; MSVC builds no std module.
+/// \ingroup grp_internals
+std::string bmi_config_flags(const TargetTriple& triple, Hardening hardening,
+                             Sanitizer sanitizer, Lto lto);
+
 /// Build the compile flag strings from target options via the enum-indexed
 /// flag tables (GCC, Clang and MSVC dialects; unknown families are errors).
 /// \ingroup grp_internals

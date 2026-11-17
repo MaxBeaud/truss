@@ -3,6 +3,7 @@ module;
 #include <array>
 #include <cstddef>
 #include <expected>
+#include <filesystem>
 #include <span>
 #include <string>
 #include <string_view>
@@ -159,20 +160,36 @@ Result<void> require_supported(const TargetTriple& t) {
     if (t.family != CompilerFamily::Gcc && t.family != CompilerFamily::Clang &&
         t.family != CompilerFamily::Msvc)
         return std::unexpected(Error {Error::Kind::Toolchain, "unknown compiler family for target '" + t.compiler + "'"});
-    if (!t.target.empty() && t.family == CompilerFamily::Gcc)
-        return std::unexpected(Error {
-            Error::Kind::Config,
-            "target('" + t.target + "'): GCC cross-compiles through a target-prefixed driver, not a flag, e.g:\n"
-            "  correct:   Config().compiler(\"aarch64-linux-gnu-g++\")\n"
-            "  correct:   Config().toolchain(truss::Toolchain::Zig).target(\"aarch64-linux-gnu\")\n"
-            "  incorrect: Config().toolchain(truss::Toolchain::GCC).target(\"aarch64-linux-gnu\")",
-        });
+    if (!t.target.empty() && t.family == CompilerFamily::Gcc) {
+        /* a target-prefixed cross driver IS the GCC cross way: allow it when
+         * the driver's basename stem matches the triple (x86_64-w64-mingw32-g++
+         * for x86_64-w64-mingw32, aarch64-linux-gnu-g++-15, ...) */
+        std::string base = std::filesystem::path(t.compiler).filename().generic_string();
+        for (const std::string_view suffix : {"-g++", "-gcc", "-c++"})
+            if (base.ends_with(suffix)) {
+                base.erase(base.size() - suffix.size());
+                break;
+            }
+        if (base != t.target && !base.starts_with(t.target))
+            return std::unexpected(Error {
+                Error::Kind::Config,
+                "target('" + t.target + "'): GCC cross-compiles through a target-prefixed driver, not a flag, e.g:\n"
+                "  correct:   Config().compiler(\"aarch64-linux-gnu-g++\")\n"
+                "  correct:   Config().toolchain(truss::Toolchain::Zig).target(\"aarch64-linux-gnu\")\n"
+                "  correct:   Config().compiler(\"x86_64-w64-mingw32-g++\").target(\"x86_64-w64-mingw32\")\n"
+                "  incorrect: Config().toolchain(truss::Toolchain::GCC).target(\"aarch64-linux-gnu\")",
+            });
+        return {};
+    }
     return {};
 }
 
-/* `-target` is zig's spelling; clang and clang-cl take `--target=` */
+/* `-target` is zig's spelling; clang and clang-cl take `--target=`; GCC takes
+ * neither — its target selection IS the prefixed driver name */
 std::string target_flag(const TargetTriple& t) {
     if (t.target.empty())
+        return {};
+    if (t.family == CompilerFamily::Gcc)
         return {};
     return is_zig(t) ? "-target " + t.target : "--target=" + t.target;
 }
@@ -266,6 +283,32 @@ DebugInfo resolve_debug(BuildMode mode, DebugInfo debug) {
     return debug == DebugInfo::Default
                ? (mode == BuildMode::Debug ? DebugInfo::Full : DebugInfo::None)
                : debug;
+}
+
+/* The compile flags clang folds into a BMI's configuration check (hardening,
+ * sanitizers, LTO): the std module's BMI must be built with the same settings
+ * as its consumers, or clang rejects it with a config mismatch (llvm-mingw's
+ * clang errors on a stack-protector difference where the Linux build happens
+ * to tolerate it). build_flags emits the same strings, so consumer and std
+ * module always agree. */
+std::string bmi_config_flags(const TargetTriple& triple, Hardening hardening,
+                             Sanitizer sanitizer, Lto lto) {
+    const auto hi = static_cast<std::size_t>(resolve_hardening(hardening));
+    const auto si = static_cast<std::size_t>(sanitizer);
+    const auto li = static_cast<std::size_t>(lto);
+    std::string out;
+    const auto add = [&](std::string_view f) {
+        if (f.empty()) return;
+        if (!out.empty()) out += ' ';
+        out += f;
+    };
+    add(kHardeningCompileFlags[hi]);
+    if (triple.arch == Arch::X64)
+        add(kHardeningArchCompileFlags[hi]);
+    add(kHardeningStdlibDefines[hi]);
+    add(kSanitizerCompileFlags[si]);
+    add(kLtoCompileFlags[li]);
+    return out;
 }
 
 Result<FlagSet> build_flags(const TargetTriple& triple, BuildMode mode,

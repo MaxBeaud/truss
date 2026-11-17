@@ -264,8 +264,11 @@ TEST_CASE("import std + modules: GCC end to end (mapper, partitions, std.gcm)") 
 
     const std::string tdir =
         detail::triple_dir(*detail::apply_config(Config().toolchain(Toolchain::GCC), host_triple()));
-    /* CMIs landed where the mapper routed them */
-    CHECK(std::filesystem::exists("build/debug/std/" + tdir + "-c++23/std.gcm"));
+    /* CMIs landed where the mapper routed them (the std dir name carries the
+     * BMI-config flags, so glob rather than spell it) */
+    auto std_gcm = fs::glob("build/debug/std/*/std.gcm");
+    REQUIRE(std_gcm.has_value());
+    CHECK(std_gcm->size() == 1);
     const bool greet_cmi = std::filesystem::exists("build/debug/obj/x64-linux-gcc/greet/bmi/greet.gcm")
                         || std::filesystem::exists("build/debug/obj/x64-linux-gcc/lib/greet.gcm");
     CHECK(greet_cmi);

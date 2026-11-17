@@ -137,7 +137,8 @@ std::string c_driver(std::string_view cxx) {
     std::string out(cxx);
     /* only the basename's last occurrence is rewritten: "/opt/g++-tools/bin/g++"
      * keeps its directory */
-    const auto base = out.find_last_of("/\\") == std::string::npos ? 0 : out.find_last_of("/\\") + 1;
+    const auto slash = out.find_last_of("/\\");
+    const auto base = slash == std::string::npos ? 0 : slash + 1;
     const auto swap = [&](std::string_view from, std::string_view to) {
         const auto at = out.rfind(from);
         if (at == std::string::npos || at < base)

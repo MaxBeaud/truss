@@ -563,8 +563,20 @@ Result<void> emit_manifest(const Project& proj, std::vector<ResolvedTarget>& res
     std::map<std::string, StdEntry, std::less<>> std_modules;
     const auto std_for = [&](const ResolvedTarget& r, bool compat) -> Result<StdModule> {
         const std::string_view flag = std_module_flag(r.target->cpp_standard());
-        const std::string key = detail::triple_dir(r.triple) + "-" + std::string(flag.substr(5));
         const bool gcc = r.triple.family == CompilerFamily::Gcc;
+        /* the BMI config flags (hardening/sanitizer/LTO) must match the
+         * consumers', or clang rejects the module file — they key the std
+         * build apart too */
+        const std::string config_flags =
+            detail::bmi_config_flags(r.triple, r.target->hardening(), r.target->sanitizer(),
+                                     r.target->lto());
+        /* the BMI config flags (hardening/sanitizer/LTO) must match the
+         * consumers', or clang rejects the module file — they key the std
+         * build apart too (spaces collapsed: the key names a directory) */
+        std::string key_config = config_flags;
+        std::ranges::replace(key_config, ' ', '_');
+        std::string key = detail::triple_dir(r.triple) + "-" + std::string(flag.substr(5))
+                        + (key_config.empty() ? "" : "-" + key_config);
         const auto emit = [&](const StdEntry& en, const std::string& src, const std::string& obj,
                               const std::string& pcm, std::string_view extra, std::vector<std::string> ins) {
             NinjaWriter::Edge e;
@@ -603,10 +615,17 @@ Result<void> emit_manifest(const Project& proj, std::vector<ResolvedTarget>& res
                     return std::unexpected(wr.error());
                 en.flags = std::string(flag) + " -fmodules -fmodule-mapper=" + map;
             } else {
-                en.paths = {dir + "/std.pcm", dir + "/std.o", dir + "/std.compat.pcm", dir + "/std.compat.o"};
+                en.paths = {dir + "/std.pcm", dir + "/std.o", dir + "/std.compat.pcm",
+                            dir + "/std.compat.o"};
                 en.flags = std::string(flag) + " -stdlib=libc++";
-                en.flags += " -fPIC -Wno-reserved-module-identifier";
+                /* -fPIC only where consumers get it (Windows targets don't;
+                 * a mismatching PIC setting is another config check) */
+                if (r.triple.os != Os::Windows)
+                    en.flags += " -fPIC";
+                en.flags += " -Wno-reserved-module-identifier";
             }
+            if (!config_flags.empty())
+                en.flags += " " + config_flags;
             if (!r.triple.target.empty())
                 en.flags += " --target=" + r.triple.target;
             for (const auto& d : man->system_dirs) {
