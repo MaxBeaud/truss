@@ -151,7 +151,7 @@ or the cross toolchains below. POSIX hosts only (Linux is the tested one).
 ## Command line
 
 ```
-./truss [debug|release] [command...] [-j N] [-v] [-n] [--explain] [--target NAME[:SUBGRAPH]] [--for SUBGRAPH] [--build-dir PATH]
+./truss [debug|release] [command...] [-j N] [-q] [-v] [-n] [--explain] [--target NAME[:SUBGRAPH]] [--for SUBGRAPH] [--build-dir PATH]
 ```
 
 truss has **built-in commands** and your **user tasks** — they are different
@@ -163,7 +163,7 @@ things: commands are truss's own verbs; tasks are yours, registered with
 | `test` | Builds, then runs every target marked `.is_test()` (per subgraph, each with its own runner). |
 | `run` | Builds, then runs the first non-test executable (or the one named by `--target`), forwarding the arguments after `--`. |
 | `clean` | Deletes the mode's build dir (cannot be combined with other commands). |
-| `compdb` | Writes `compile_commands.json` (via samurai's compdb tool). |
+| `compdb` | Writes `build/<mode>/compile_commands.json` (via samurai's compdb tool), replacing it only when its content changed. |
 | `reload` | Rebuilds the `truss` executable from source and replaces the current binary. Only works from the truss repository root. |
 | `task NAME` | Builds, then runs a task registered with `proj.task(...)` (see [User tasks](#user-tasks)). |
 | `task list` | Lists the registered tasks with their descriptions; builds nothing. |
@@ -172,7 +172,7 @@ things: commands are truss's own verbs; tasks are yours, registered with
 |---|---|
 | `debug` / `release` | Build mode (default `debug`). One build dir per mode. |
 | `-j N` | Parallel jobs (default: samurai's auto, ≈ nproc+2). |
-| `-q, --quiet` | Errors and warnings only (same as `TRUSS_LOG=quiet`). |
+| `-q, --quiet` | Errors only (same as `TRUSS_LOG=quiet`; warnings are hidden too). |
 | `-v` | Echo every command samurai runs (disables the live progress block). |
 | `-n` | Dry run: print what *would* run, change nothing (no hooks fire, no test/run binary executes). |
 | `--explain` | Print *why* each edge is (re)built — samurai's explain mode. |
@@ -194,15 +194,18 @@ compiling — finished files disappear instead of scrolling:
 
 ```text
 ▸ configure  4 ms · scan 287 hot / 2 cold / 3 skipped
-  [42/301] 14% ▸ CXX src/net/tcp.cpp
-                 ▸ CXX src/net/tls.cpp
+  [42/301] 14%
+  ▸ CXX src/net/tcp.cpp
+  ▸ CXX src/net/tls.cpp
 ▸ build      2.1 s
 ```
 
-Piped output (CI, editors) stays plain and greppable: one line per step,
-no cursor control. Related knobs: `TRUSS_LOG=quiet|warn|info|debug`,
-`TRUSS_PROGRESS=plain` (disable the live block), and the standard
-`NO_COLOR` / `CLICOLOR_FORCE` environment variables.
+Piped output (CI, editors) stays plain and greppable: no colour, no cursor
+control, no redraw block — samurai's usual one-line-per-job stream
+(`[42/301] CXX src/net/tcp.cpp`) plus truss's phase lines. Related knobs:
+`TRUSS_LOG=quiet|warn|info|debug`, `TRUSS_PROGRESS=plain` (disable the live
+block even on a terminal), and the standard `NO_COLOR` / `CLICOLOR_FORCE`
+environment variables.
 
 ## The build script
 
@@ -461,7 +464,8 @@ User tasks live in their own namespace, so a task may be called `test` or
 `task` (`./truss hello`) is an error that points to the right command; `list`
 is a reserved name and registering a name twice is a Config error.
 
-`TaskContext` carries the project name, mode, build dir, cwd, and job count.
+`TaskContext` carries the project name, mode, build dir, cwd, job count and
+the `-v` flag.
 
 ### Build hooks
 
@@ -555,6 +559,7 @@ At a glance:
 | `fs::sha256_file` | the same digest `fetch()` pinning uses |
 | `fs::current_dir` / `copy_tree` / `generic_str` | misc path work |
 | `log::info/warn/success/error` | truss's own colored output channel |
+| `log::step(name, detail)` | a build-phase line (`▸ configure  4 ms · …`), aligned like truss's own |
 
 Windows-specific probes currently return `nullopt`/`0` — truss is a
 POSIX-host tool (Linux is the tested host).
@@ -591,12 +596,13 @@ errors rather than being silently miscompiled). Header-unit imports
 with an explicit Config error telling you to `#include` the header instead
 (the compilers' scanners cannot report header units reliably yet).
 
-**Scan results are cached** in `build/<mode>/scan-cache/`, keyed by source
-path, mtime, size, compile flags and compiler identity. An unchanged tree
-performs no scans at all, and a TU whose raw text contains neither `import`
-nor `module` is never handed to the compiler (the keywords cannot come from a
-macro, so the answer is provably empty). Editing a source rescans only that
-source.
+**Scan results are cached** in `build/<mode>/scan-cache/`: compiler scans are
+keyed by source path, mtime, size, compile flags and compiler identity; the
+cheap text scan is keyed by path and validated by (mtime, size). An unchanged
+tree performs no scans **and opens no sources at all** — only stats. A TU whose
+raw text contains neither `import` nor `module` is never handed to the compiler
+(the keywords cannot come from a macro, so the answer is provably empty).
+Editing a source rescans only that source.
 
 **GCC specifics**: CMIs (`.gcm`) are routed through a per-target
 module-mapper file (`build/<mode>/modmap/<triple>/<target>.map`) — no
@@ -652,7 +658,8 @@ auto pkgs = proj.fetch_all({
 ```
 
 Exactly one of `git+tag` (shallow clone pinned to a tag/branch/commit) or
-`url+sha256` (`.tar.gz`/`.tar.xz` verified against the hash) must be set.
+`url+sha256` (`.tar.gz`/`.tgz`/`.tar.xz`/`.txz`/`.tar.bz2`/`.tar`, verified
+against the hash) must be set.
 Downloads are cached in `~/.cache/truss` (the cached tarball's hash is
 re-verified on every run — a corrupted cache entry is re-downloaded, never
 reused), materialized into `build/<mode>/packages/<name>`, and pinned in a
@@ -767,7 +774,8 @@ dialect, zig's bundled libc++; `stdlib()` is refused, the compiler cache is
 skipped since ccache does not recognize zig). Explicit calls after
 `toolchain()` override it. Selections are validated:
 `g++` + `libc++` and any `stdlib()` on MSVC targets are clear Config errors.
-`-stdlib=` is emitted on both compile and link lines. Per-target
+On clang targets `-stdlib=` is emitted on both compile and link lines (GCC
+takes no such flag: libstdc++ is its only option). Per-target
 `cross_target(triple)` still overrides the project default completely, and
 `TargetTriple` has a `stdlib` field for per-target selection too.
 
@@ -894,7 +902,9 @@ build/
     ninja/build.ninja         # generated manifest
     obj/<triple>/<target>/…   # .o/.obj (+ .d depfiles, bmi/*.pcm | *.gcm)
     modmap/<triple>/          # GCC module-mapper files (per target)
-    scan-cache/               # module-scan results (path+mtime+size+flags+compiler)
+    scan-cache/               # compiler scans (path+mtime+size+flags+compiler)
+                              # and text scans (path+mtime+size)
+    pch/<target>/  unity/<target>/  gen/<target>/  mri/<triple>/
     bin/<triple>/<exe>        # executables
     lib/<triple>/…            # archives, shared libs (+ import libs)
     std/<triple>-<std>-<cfg>/ # the std module's BMI/CMI + object, cached
@@ -933,6 +943,7 @@ truss builds itself (`truss.cpp` at the repo root is its own build script).
 Other useful commands: `./setup.sh unit` (doctest, ASan/UBSan), `./setup.sh
 examples`, `./setup.sh installed`, `./setup.sh amalgam`, `./setup.sh install
 [prefix]`, `./setup.sh docs` (Doxygen API reference → `build/docs/html/`),
+`./setup.sh bench` (build-system comparison fixtures), `./setup.sh add-package`,
 `./setup.sh clean`. All generated output lives under `build/`.
 
 `./setup.sh dist` produces the shippable CLI, `build/dist/bin/truss`: the

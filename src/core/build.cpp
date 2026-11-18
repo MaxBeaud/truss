@@ -1676,7 +1676,7 @@ constexpr std::string_view kHelp =
     "\n"
     "options:\n"
     "  -j, --jobs N     parallel jobs (default: CPU count)\n"
-    "  -q, --quiet      errors and warnings only\n"
+    "  -q, --quiet      errors only\n"
     "  -v, --verbose    print full command lines\n"
     "  -n, --dry-run    show what would run without running it\n"
     "      --explain    explain why each step is rebuilt\n"
@@ -2403,9 +2403,9 @@ Result<void> Project::build() {
                 return run_samu({});
 
             if (task == "compdb") {
-                auto r = detail::samu_compdb(manifest.generic_string(), (bld / "compile_commands.json").generic_string());
-                if (r) log::success("wrote " + (bld / "compile_commands.json").generic_string());
-                return r;
+                /* same if-changed discipline as `proj.compile_commands()`:
+                 * an unchanged database keeps its mtime and prints nothing */
+                return compile_commands(bld);
             }
 
             if (task == "reload") {
