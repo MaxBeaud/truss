@@ -30,6 +30,10 @@ a major version.
 - `proj.compile_commands()` / `./truss compdb` now writes through a temp
   file and only replaces `compile_commands.json` when its content changed
   (no mtime churn, no "wrote ..." line on unchanged runs).
+- **Download progress** — on a terminal, `fetch()` streams git's and curl's
+  native progress bars (curl runs with `--progress-bar` and without `-s`;
+  git's detached-HEAD advice is suppressed). Piped output still captures the
+  tools' diagnostics for error messages.
 
 ## [1.0.0] — 2026-11-16
 

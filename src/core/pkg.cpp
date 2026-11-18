@@ -124,8 +124,18 @@ bool looks_like_commit(std::string_view ref) {
     return true;
 }
 
+/* True when the child's stderr reaches a terminal: download tools render their
+ * own progress bars there (git clone/fetch, curl --progress-bar), and a
+ * captured stream cannot show progress. Piped/CI runs keep the capture so
+ * failures still carry the tool's diagnostics. */
+bool progress_to_terminal() { return ::isatty(STDERR_FILENO) != 0; }
+
 Result<void> run_tool(std::span<const std::string> argv, std::string_view what, int timeout_seconds = 600) {
-    auto outcome = detail::run_process(argv, true, timeout_seconds);
+    /* interactive: let stderr through (progress bars), capture stdout only;
+     * non-interactive: capture both so the error message carries the detail */
+    auto outcome = progress_to_terminal()
+        ? detail::run_process_stdout(argv, timeout_seconds)
+        : detail::run_process(argv, true, timeout_seconds);
     if (!outcome)
         return std::unexpected(outcome.error());
     if (outcome->exit_code != 0) {
@@ -148,7 +158,10 @@ Result<void> git_fetch(const std::string& url, const std::string& ref,
     /* a stalled mirror must not hold the fetch (and the lockfile) forever:
      * abort transfers crawling under 1 KiB/s for 30 s */
     const std::vector<std::string> git_slow {"git", "-c", "http.lowSpeedLimit=1024",
-                                             "-c", "http.lowSpeedTime=30"};
+                                             "-c", "http.lowSpeedTime=30",
+                                             /* the commit path checks out --detach:
+                                              * the wall of advice is pure noise */
+                                             "-c", "advice.detachedHead=false"};
     if (!looks_like_commit(ref)) {
         std::vector<std::string> argv = git_slow;
         argv.insert(argv.end(), {"clone", "--depth", "1", "--branch", ref, url,
@@ -208,13 +221,19 @@ Result<void> tarball_fetch(const std::string& url, const std::string& sha256,
         std::filesystem::remove(cache_file, ec); /* corrupt or unreadable: refetch */
     }
     const std::filesystem::path tmp = staging_path(cache_file);
-    std::vector<std::string> curl {"curl", "-fsSL", "--retry", "2",
+    /* -s would silence the progress meter too: on a terminal the bar is the
+     * point, so only -f (fail on HTTP errors) and -L (follow redirects) apply */
+    std::vector<std::string> curl {"curl", progress_to_terminal() ? "-fL" : "-fsSL", "--retry", "2",
                                    "--connect-timeout", "15",
                                    /* a stalled mirror must not hang the build:
                                     * abort transfers under 1 KiB/s for 30 s */
                                    "--speed-limit", "1024", "--speed-time", "30"};
     if (timeout_seconds > 0)
         curl.insert(curl.end(), {"--max-time", std::to_string(timeout_seconds)});
+    /* one-line meter instead of curl's 4-row table; only on a terminal (a
+     * captured stream would collect carriage-return spam) */
+    if (progress_to_terminal())
+        curl.insert(curl.end(), "--progress-bar");
     curl.insert(curl.end(), {"-o", tmp.generic_string(), url});
     if (auto r = run_tool(curl, "curl", timeout_seconds); !r) {
         std::filesystem::remove(tmp, ec);

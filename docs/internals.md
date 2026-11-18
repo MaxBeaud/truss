@@ -48,7 +48,7 @@ page explains the architecture around them.
 | `src/core/samu.cpp` | C shim over vendored samurai (`vendor/samurai`), in-process build + compdb; on a terminal, samurai's stdout is pumped through a pipe by a reader thread that renders the live in-flight block (`[started/total pct]` + the jobs currently compiling, FIFO-evicted as new ones start); compiler diagnostics clear the block and print verbatim, `TRUSS_PROGRESS=plain`/`-v`/`-n`/`--explain` keep the plain stream |
 | `src/core/proc.cpp` | `posix_spawn` process runner (optional cwd via `addchdir_np`), output capture |
 | `src/core/os.cpp` | `truss::os`: consteval host predicates, memoized fork-free `find_program` `$PATH` walk, lenient `env` parsing, machine specs, `temp_scope`, `find_truss_modules` auto-discovery |
-| `src/core/pkg.cpp` | fetch (git/tarball + sha256), `~/.cache/truss` cache, hardlink materialization, conan/vcpkg fingerprint + configure-skip |
+| `src/core/pkg.cpp` | fetch (git/tarball + sha256), `~/.cache/truss` cache, hardlink materialization, conan/vcpkg fingerprint + configure-skip; on a terminal, fetch tools stream their progress bars (stderr inherited), off a terminal their diagnostics are captured |
 | `src/core/target.cpp` | host triple detection, `Config` → `TargetTriple` resolution (`apply_config`), triple parsing, compiler-family/`c_driver` detection, launcher resolution |
 | `src/core/build.cpp` | the emitter: rules, edges, unity batching, PCH edges, scan-deps wiring, `Project::build()` orchestration, `compile_commands` generation, `reload` task |
 | `src/core/log.cpp` | colored stdout logging, the public `truss::log` channel |

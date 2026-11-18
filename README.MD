@@ -662,7 +662,10 @@ lock (a stuck holder errors after 120 s instead of blocking forever).
 
 Downloads are bounded by `FetchOptions::timeout` (default 900 s, `0` =
 unlimited) with stall detection: a transfer crawling under 1 KiB/s for 30 s
-is aborted, so a stalled mirror cannot hang the build.
+is aborted, so a stalled mirror cannot hang the build. On a terminal, git
+clone/fetch and curl render their live progress bars (percentage, transfer
+rate); piped output captures the tool's diagnostics instead, so CI logs stay
+clean.
 
 Git trees are materialized with hardlinks (instant, no extra disk; real copies
 across filesystems). Caveat: a hardlinked fetched file shares its inode with
