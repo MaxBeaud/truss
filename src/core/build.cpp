@@ -2145,8 +2145,9 @@ Result<void> Project::build() {
                 log::error(e);
                 return std::unexpected(std::move(e));
             }
+            const std::filesystem::path scan_cache = bld / "scan-cache";
             if (is_bmi) {
-                auto info = detail::scan_module_unit(f);
+                auto info = detail::scan_module_unit_cached(scan_cache, f);
                 if (!info) {
                     log::error(info.error());
                     return std::unexpected(info.error());
@@ -2174,7 +2175,7 @@ Result<void> Project::build() {
                 r.units.push_back(std::move(*info));
                 r.bmis.push_back(std::move(b));
             } else if (f.ends_with(".cpp") || f.ends_with(".cc") || f.ends_with(".cxx")) {
-                auto info = detail::scan_module_unit(f);
+                auto info = detail::scan_module_unit_cached(scan_cache, f);
                 if (!info) {
                     log::error(info.error());
                     return std::unexpected(info.error());
@@ -2407,6 +2408,14 @@ Result<void> Project::build() {
             if (task == "reload") {
                 // reload: rebuild the truss executable and replace current binary
                 // Only works when truss.cpp exists in cwd (self-hosting scenario)
+                /* replacing the binary while privilege was RAISED (a setuid
+                 * install) would let whoever ran it replace a root-owned
+                 * executable with a build of their choosing: refuse */
+                if (::geteuid() != ::getuid())
+                    return std::unexpected(Error {
+                        Error::Kind::Config,
+                        "reload: refusing to replace the executable while running with elevated privileges",
+                    });
                 std::error_code ec;
                 if (!std::filesystem::exists(cwd_ / "truss.cpp", ec)) {
                     return std::unexpected(Error {

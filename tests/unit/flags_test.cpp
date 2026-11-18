@@ -355,3 +355,48 @@ TEST_CASE("config: -stdlib= emitted on compile and link when selected") {
     REQUIRE(l2.has_value());
     CHECK(contains(l2->driver, "-stdlib=libstdc++"));
 }
+
+TEST_CASE("flags: include paths are quote-escaped for the shell") {
+    const auto t = clang_triple();
+    const std::array<std::string, 0> none {};
+    const std::array<std::string, 2> incs {"plain/include", "odd/$(touch pwned)/`id`"};
+    auto r = detail::build_flags(t, BuildMode::Debug, CppStandard::Default, Warnings::Default,
+                                 DebugInfo::Default, Optimization::Default, Sanitizer::Default,
+                                 Lto::Default, Hardening::None, false, none, incs, "");
+    REQUIRE(r.has_value());
+    CHECK(contains(r->compile, "-I\"plain/include\""));
+    /* $ and ` stay literal inside double quotes only when backslash-escaped */
+    const auto at = r->compile.find("-I\"odd/");
+    REQUIRE(at != std::string::npos);
+    const auto quoted = r->compile.substr(at, r->compile.find('"', at + 3) - at + 1);
+    CHECK(quoted.find("\\$(") != std::string::npos);
+    CHECK(quoted.find("\\`id\\`") != std::string::npos);
+    const bool no_bare_dollar_paren = quoted.find("\"$(") == std::string::npos;
+    CHECK(no_bare_dollar_paren); /* every $( is escaped, so no substitution happens */
+}
+
+TEST_CASE("flags: library and framework names are validated, not interpolated") {
+    const auto t = clang_triple();
+    const std::array<std::string, 0> none {};
+    const auto link = [&](std::span<const std::string> libs,
+                          std::span<const std::string> fws = {}) {
+        return detail::link_flags(t, BuildMode::Debug, DebugInfo::Default, Sanitizer::Default,
+                                  Lto::Default, Hardening::None, none, libs, fws, none, "");
+    };
+    const std::array<std::string, 1> ok {"z"};
+    auto good = link(ok);
+    REQUIRE(good.has_value());
+    CHECK(contains(good->linker, "-lz"));
+
+    for (const char* bad : {"z;touch pwned", "z$(id)", "-lz", "a b"}) {
+        const std::array<std::string, 1> libs {bad};
+        auto r = link(libs);
+        INFO(bad);
+        REQUIRE_FALSE(r.has_value());
+        CHECK(r.error().kind == Error::Kind::Config);
+    }
+    const std::array<std::string, 1> bad_fw {"Cocoa$(id)"};
+    auto r = link(std::array<std::string, 0> {}, bad_fw);
+    REQUIRE_FALSE(r.has_value());
+    CHECK(r.error().kind == Error::Kind::Config);
+}

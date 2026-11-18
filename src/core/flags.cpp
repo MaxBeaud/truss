@@ -1,12 +1,14 @@
 module;
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <cstddef>
 #include <expected>
 #include <filesystem>
 #include <span>
 #include <string>
 #include <string_view>
+#include <utility>
 
 module truss;
 import :api;
@@ -19,6 +21,46 @@ void add(std::string& out, std::string_view flag) {
     if (flag.empty()) return;
     if (!out.empty()) out += ' ';
     out += flag;
+}
+
+/* Quote one value for /bin/sh, escaping everything that stays special inside
+ * double quotes ($ and ` would still substitute, " and \ would terminate or
+ * escape). Paths legitimately contain spaces, so they are quoted rather than
+ * rejected; this makes an include dir or link path that came from package
+ * metadata unable to smuggle a command into the build line. MSVC command
+ * lines are parsed by the CRT (no $/backtick expansion), so they keep the
+ * plain `"value"` form. */
+std::string sh_dq(std::string_view value) {
+    std::string out;
+    out.reserve(value.size() + 2);
+    out.push_back('"');
+    for (const char c : value) {
+        if (c == '"' || c == '\\' || c == '$' || c == '`')
+            out.push_back('\\');
+        out.push_back(c);
+    }
+    out.push_back('"');
+    return out;
+}
+
+/* -lNAME / -framework NAME are emitted unquoted (they are linker names, not
+ * paths): reject anything a shell would interpret instead of trying to quote
+ * it. A leading '-' is refused because it would become a linker option. */
+Result<std::string> link_name(std::string_view value, std::string_view what) {
+    if (value.empty() || value.front() == '-')
+        return std::unexpected(Error {
+            Error::Kind::Config,
+            std::string(what) + " '" + std::string(value) + "' is not a valid linker name",
+        });
+    for (const char c : value)
+        if (!(std::isalnum(static_cast<unsigned char>(c)) || c == '.' || c == '_' || c == '+'
+              || c == '-' || c == '/'))
+            return std::unexpected(Error {
+                Error::Kind::Config,
+                std::string(what) + " '" + std::string(value) +
+                    "' contains characters the shell would interpret (letters, digits and . _ + - / only)",
+            });
+    return std::string(value);
 }
 
 /* GCC/Clang tables, indexed by the public enums (Default = 0 means "no flag"). */
@@ -381,12 +423,12 @@ Result<FlagSet> build_flags(const TargetTriple& triple, BuildMode mode,
     for (const auto& d : defines)
         if (!d.empty()) add_both((msvc ? "/D" : "-D") + d);
     for (const auto& i : includes)
-        add_both(msvc ? "/I\"" + i + "\"" : "-I\"" + i + "\"");
+        add_both(msvc ? "/I\"" + i + "\"" : "-I" + sh_dq(i));
     /* system dirs after -I (searched later); MSVC needs /external:W0 to
      * actually silence them */
     if (msvc && !system_includes.empty()) add_both("/external:W0");
     for (const auto& i : system_includes)
-        add_both(msvc ? "/external:I\"" + i + "\"" : "-isystem \"" + i + "\"");
+        add_both(msvc ? "/external:I\"" + i + "\"" : "-isystem " + sh_dq(i));
 
     add_both(user_flags);
     return fs;
@@ -433,7 +475,10 @@ Result<LinkFlags> link_flags(const TargetTriple& triple, BuildMode mode, DebugIn
             const std::string_view base = std::string_view(l).ends_with(".lib")
                                               ? std::string_view(l).substr(0, l.size() - 4)
                                               : std::string_view(l);
-            add(lf.linker, std::string(base) + ".lib");
+            auto name = link_name(base, "link library");
+            if (!name)
+                return std::unexpected(name.error());
+            add(lf.linker, std::move(*name) + ".lib");
         }
         if (!static_libs.empty())
             return std::unexpected(Error {
@@ -455,8 +500,8 @@ Result<LinkFlags> link_flags(const TargetTriple& triple, BuildMode mode, DebugIn
         if (triple.stdlib != StdLib::Default && triple.family == CompilerFamily::Clang)
             add(lf.driver, triple.stdlib == StdLib::Libcxx ? "-stdlib=libc++" : "-stdlib=libstdc++");
         add(lf.driver, runtime->driver);
-        for (const auto& p : link_paths) add(lf.linker, "-L\"" + p + "\"");
-        for (const auto& p : framework_paths) add(lf.linker, "-F\"" + p + "\"");
+        for (const auto& p : link_paths) add(lf.linker, "-L" + sh_dq(p));
+        for (const auto& p : framework_paths) add(lf.linker, "-F" + sh_dq(p));
         if (!static_libs.empty()) {
             if (triple.os == Os::MacOS)
                 return std::unexpected(Error {
@@ -467,11 +512,26 @@ Result<LinkFlags> link_flags(const TargetTriple& triple, BuildMode mode, DebugIn
             /* static archives first: their own -l needs resolve against the
              * dynamic libraries to their right (GNU ld is single-pass) */
             add(lf.linker, "-Wl,-Bstatic");
-            for (const auto& l : static_libs) add(lf.linker, "-l" + l);
+            for (const auto& l : static_libs) {
+                auto name = link_name(l, "static link library");
+                if (!name)
+                    return std::unexpected(name.error());
+                add(lf.linker, "-l" + *name);
+            }
             add(lf.linker, "-Wl,-Bdynamic");
         }
-        for (const auto& l : libs) add(lf.linker, "-l" + l);
-        for (const auto& f : frameworks) add(lf.linker, "-framework " + f);
+        for (const auto& l : libs) {
+            auto name = link_name(l, "link library");
+            if (!name)
+                return std::unexpected(name.error());
+            add(lf.linker, "-l" + *name);
+        }
+        for (const auto& f : frameworks) {
+            auto name = link_name(f, "framework");
+            if (!name)
+                return std::unexpected(name.error());
+            add(lf.linker, "-framework " + *name);
+        }
         add(lf.linker, runtime->linker);
     }
     add(lf.linker, user_linker_flags);

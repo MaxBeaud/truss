@@ -460,6 +460,17 @@ Result<void> validate_fetch(const std::string& pkg_name, const FetchOptions& opt
             return std::unexpected(Error {
                 Error::Kind::Config, "fetch('" + pkg_name + "'): '" + *v + "' must not start with '-'",
             });
+    /* git's ext:: transport runs an arbitrary command line: a fetch URL must
+     * never be able to do that (a script is already code; a URL is data) */
+    {
+        std::string scheme = opts.git;
+        std::ranges::transform(scheme, scheme.begin(), [](unsigned char c) { return std::tolower(c); });
+        if (scheme.starts_with("ext::"))
+            return std::unexpected(Error {
+                Error::Kind::Config,
+                "fetch('" + pkg_name + "'): the git ext:: transport is not allowed (it executes commands)",
+            });
+    }
     if (opts.tag == "." || opts.tag == ".." || opts.tag.contains('\\'))
         return std::unexpected(Error {
             Error::Kind::Config, "fetch('" + pkg_name + "'): invalid tag '" + opts.tag + "'",

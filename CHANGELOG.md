@@ -35,6 +35,27 @@ a major version.
   git's detached-HEAD advice is suppressed). Piped output still captures the
   tools' diagnostics for error messages.
 
+### Security
+
+- Include directories, system include directories, link paths and framework
+  paths are now escaped for `/bin/sh` inside their quotes (`$`, backtick,
+  `"`, `\`): a path coming from package metadata can no longer smuggle a
+  command substitution into a compile or link line.
+- `link_libs()` / `link_frameworks()` names are validated (letters, digits,
+  `. _ + - /`; no leading `-`) instead of being interpolated — a shell
+  metacharacter is a Config error naming the offending value.
+- `fetch()` refuses git's `ext::` transport (it executes an arbitrary
+  command line).
+- `reload` refuses to replace the executable when running with elevated
+  privileges (euid != uid).
+
+### Performance
+
+- The text scan (module/import discovery by reading each source) is now
+  cached too, keyed by path and validated by (mtime, size): a no-op
+  invocation performs no file reads at all, only stats. Verified by a test
+  that makes the sources unreadable and still builds from the cache.
+
 ## [1.0.0] — 2026-11-16
 
 The engine was feature-complete at 0.1.0 (all thirteen PLAN.MD phases); 1.0

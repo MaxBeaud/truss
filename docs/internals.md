@@ -66,6 +66,18 @@ page explains the architecture around them.
   scripts. Package-spec values (conan/vcpkg) are whitelist-validated separately.
 - **Determinism**: identical inputs produce a byte-identical `build.ninja`
   (sorted edges, memoized probes), so `write_file_if_changed` skips writes.
+- **Command-line integrity**: every path that reaches a command line is either
+  refused by `path_is_safe` (sources, targets, build dirs) or quoted through a
+  shell escaper (`$`, backtick, `"`, `\` stay literal inside the quotes —
+  include dirs and link paths may contain spaces but never expand anything).
+  `-l`/`-framework` names are validated against a conservative charset instead
+  of being quoted, since they are linker names rather than paths. `fetch()`
+  values never reach a shell (argv only), must not start with `-`, and the
+  git `ext::` transport (which executes commands) is refused outright.
+- **Privilege boundary**: `reload` refuses to replace the executable when
+  euid != uid (a setuid install must not let an unprivileged caller swap a
+  root-owned binary); `write_file` publishes through an O_EXCL|O_NOFOLLOW
+  sibling temp + rename, so a pre-placed symlink is never followed.
 - **Module wiring**: BMI edges are separate rules; consumers get
   `-fmodule-file=` flags from the scanner (Auto) or clang-scan-deps (Manual);
   unity never batches `.cppm` units.

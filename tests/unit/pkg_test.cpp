@@ -102,6 +102,18 @@ TEST_CASE("fetch: option validation errors before any network access") {
     REQUIRE_FALSE(r5.has_value());
     CHECK(r5.error().kind == Error::Kind::Config);
     CHECK(contains(r5.error().message, "timeout"));
+
+    /* git's ext:: transport executes commands: a URL must not reach it */
+    for (const char* url : {"ext::sh -c id", "EXT::sh -c id"}) {
+        FetchOptions ext;
+        ext.git = url;
+        ext.tag = "v1";
+        auto r6 = proj.fetch("x", ext);
+        INFO(url);
+        REQUIRE_FALSE(r6.has_value());
+        CHECK(r6.error().kind == Error::Kind::Config);
+        CHECK(contains(r6.error().message, "ext::"));
+    }
 }
 
 TEST_CASE("fetch_all: validation and duplicate names before any network access") {

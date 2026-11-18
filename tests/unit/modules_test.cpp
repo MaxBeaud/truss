@@ -6,6 +6,7 @@ module;
 #include <string>
 #include <vector>
 
+#include <sys/stat.h>
 #include <unistd.h>
 
 module truss;
@@ -505,6 +506,35 @@ TEST_CASE("scan cache: TUs with no module syntax never reach the compiler scan")
     CHECK(s.skipped == 1);
     CHECK(s.cold == 0); /* clang-scan-deps never ran */
     CHECK(s.hot == 0);
-    /* and nothing was cached: there is nothing to remember */
-    CHECK_FALSE(std::filesystem::exists("build/debug/scan-cache"));
+    /* the cheap text scan is cached (so a no-op run does not even read the
+     * file), but no compiler-scan entry exists: there was no scan */
+    std::size_t text_entries = 0, scan_entries = 0;
+    for (const auto& e : std::filesystem::directory_iterator("build/debug/scan-cache")) {
+        if (e.path().extension() == ".text")
+            ++text_entries;
+        if (e.path().extension() == ".scan")
+            ++scan_entries;
+    }
+    CHECK(text_entries == 1);
+    CHECK(scan_entries == 0);
+}
+
+TEST_CASE("scan cache: a no-op build never even opens the sources") {
+    ChainDir dir {"no-read"};
+    REQUIRE(detail::write_file("plain.cpp", "#include <cstdio>\nint main() { return 0; }\n").has_value());
+    const auto run_build = [&] {
+        char prog[] = "truss-tests";
+        char dry[] = "-n";
+        char* argv[] = {prog, dry};
+        Project proj("no-read", 2, argv);
+        proj.configure(Config().toolchain(Toolchain::LLVM));
+        proj.add_executable("app").sources("plain.cpp");
+        return proj.build();
+    };
+    REQUIRE(run_build().has_value());
+    REQUIRE(chmod("plain.cpp", 0) == 0); /* unreadable now */
+    auto second = run_build();           /* served from the .text cache: no read */
+    REQUIRE(chmod("plain.cpp", 0644) == 0);
+    INFO((second ? "ok" : second.error().message));
+    CHECK(second.has_value());
 }

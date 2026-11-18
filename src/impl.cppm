@@ -223,6 +223,13 @@ Result<void> scan_cache_store(const std::filesystem::path& cache_dir, std::strin
                               std::span<const std::string> imports,
                               std::span<const std::string> header_imports);
 
+/// scan_module_unit() with a (mtime, size)-validated result cache: a no-op
+/// invocation does not even read the sources (one stat per file). The cache is
+/// keyed by source path only (the text scan does not depend on flags).
+/// \ingroup grp_internals
+Result<ModuleUnitInfo> scan_module_unit_cached(const std::filesystem::path& cache_dir,
+                                               const std::string& source);
+
 /* --- compiler flags ------------------------------------------------------ */
 
 /// Compiled per-target compiler flag strings (space-joined).

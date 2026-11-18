@@ -195,4 +195,100 @@ Result<void> scan_cache_store(const std::filesystem::path& cache_dir, std::strin
     return {};
 }
 
+/* --- text-scan cache: skip reading every source on every invocation ------ */
+
+namespace {
+
+/* the text scan's answer depends only on the file's bytes, so the key is the
+ * path alone; the entry is validated by (mtime, size) like the compiler-scan
+ * cache. Format version lives in the key material, so bumping it orphans old
+ * entries. */
+std::string text_key(const std::string& source) {
+    std::string material = "truss-text-cache-1\n";
+    material.append(std::to_string(source.size())).push_back(':');
+    material += source;
+    return sha256_bytes(material);
+}
+
+} // namespace
+
+Result<ModuleUnitInfo> scan_module_unit_cached(const std::filesystem::path& cache_dir,
+                                               const std::string& source) {
+    const std::string key = text_key(source);
+    const auto file = cache_dir / (key + ".text");
+    const StatInfo now = stat_of(source);
+    if (now.ok) {
+        if (auto text = read_file(file); text) {
+            std::size_t pos = 0;
+            const auto next = [&]() -> std::string_view {
+                if (pos >= text->size())
+                    return {};
+                const auto eol = text->find('\n', pos);
+                const auto end = eol == std::string::npos ? text->size() : eol;
+                const std::string_view line(text->data() + pos, end - pos);
+                pos = eol == std::string::npos ? text->size() : eol + 1;
+                return line;
+            };
+            bool ok = next() == "truss-text-scan 1";
+            const std::string_view stamp = next();
+            const auto space = stamp.find(' ');
+            std::int64_t mtime = 0;
+            std::uintmax_t size = 0;
+            const auto parse = [](std::string_view v, std::uintmax_t& out) {
+                if (v.empty())
+                    return false;
+                out = 0;
+                for (char c : v) {
+                    if (c < '0' || c > '9')
+                        return false;
+                    out = out * 10 + static_cast<std::uintmax_t>(c - '0');
+                }
+                return true;
+            };
+            std::uintmax_t mtime_u = 0;
+            if (ok && space != std::string_view::npos
+                && parse(stamp.substr(0, space), mtime_u) && parse(stamp.substr(space + 1), size))
+                ok = static_cast<std::int64_t>(mtime_u) == now.mtime && size == now.size;
+            else
+                ok = false;
+            ModuleUnitInfo info;
+            info.path = source;
+            for (std::string_view line = ok ? next() : std::string_view {}; ok && !line.empty();
+                 line = next()) {
+                if (line.size() < 3 || line[1] != '\t') {
+                    ok = false;
+                    break;
+                }
+                const std::string_view value = line.substr(2);
+                switch (line[0]) {
+                case 'n': info.mentions_module_syntax = value == "1"; break;
+                case 'm': info.module_name = std::string(value); break;
+                case 'i': info.imports.emplace_back(value); break;
+                case 'h': info.header_imports.emplace_back(value); break;
+                default: ok = false; break;
+                }
+            }
+            if (ok)
+                return info;
+        }
+    }
+    auto info = scan_module_unit(source);
+    if (!info)
+        return info;
+    /* best effort: a read-only build dir just rescans next time */
+    if (const StatInfo stamp = stat_of(source); stamp.ok) {
+        std::string data = "truss-text-scan 1\n";
+        data += std::to_string(stamp.mtime) + " " + std::to_string(stamp.size) + "\n";
+        data += std::string("n\t") + (info->mentions_module_syntax ? "1" : "0") + "\n";
+        if (!info->module_name.empty())
+            data += "m\t" + info->module_name + "\n";
+        for (const auto& name : info->imports)
+            data += "i\t" + name + "\n";
+        for (const auto& name : info->header_imports)
+            data += "h\t" + name + "\n";
+        static_cast<void>(write_file(cache_dir / (key + ".text"), data));
+    }
+    return info;
+}
+
 } // namespace truss::detail
