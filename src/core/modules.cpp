@@ -116,7 +116,9 @@ Result<ModuleUnitInfo> scan_module_unit(const std::string& path) {
     /* cheap pre-filter on the RAW text first: a file that never mentions
      * module/import anywhere (the majority of TUs) skips the strip+scan
      * work entirely (the strip can only remove matches, never add them) */
-    if (s.find("module") == std::string::npos && s.find("import") == std::string::npos)
+    info.mentions_module_syntax =
+        s.find("module") != std::string::npos || s.find("import") != std::string::npos;
+    if (!info.mentions_module_syntax)
         return info;
     /* comments and string/char/raw literals are blanked: module and import
      * statements only count when they are real code */

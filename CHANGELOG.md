@@ -6,6 +6,17 @@ All notable changes to truss are documented here. The format follows
 surface (`import truss;` — everything in the API reference) is stable within
 a major version.
 
+## [Unreleased]
+
+### Added
+
+- **Module-scan result cache** — compiler scans (~10 ms per TU) are cached
+  under `build/<mode>/scan-cache/`, keyed by source path, mtime, size,
+  compile flags and compiler identity. An unchanged tree now rescans nothing:
+  a no-op `./truss` invocation on a 300-TU project drops from ~750 ms to
+  ~5 ms. Corrupt entries are misses; write failures never fail the build;
+  `clean` (or deleting the directory) forces a rescan.
+
 ## [1.0.0] — 2026-11-16
 
 The engine was feature-complete at 0.1.0 (all thirteen PLAN.MD phases); 1.0

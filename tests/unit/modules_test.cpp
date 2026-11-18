@@ -363,3 +363,128 @@ TEST_CASE("modules: real build and run through a three-library module chain") {
     REQUIRE(run.has_value());
     CHECK(run->exit_code == 0);
 }
+
+/* --- module-scan result cache -------------------------------------------- */
+
+namespace {
+
+std::filesystem::path fresh_cache_dir(const std::string& name) {
+    const auto dir = std::filesystem::temp_directory_path() / ("truss-scan-cache-" + name);
+    std::filesystem::remove_all(dir);
+    return dir;
+}
+
+} // namespace
+
+TEST_CASE("scan cache: a stored result is served back for an unchanged source") {
+    const auto dir = fresh_cache_dir("roundtrip");
+    const auto src = scratch_write("cached.cpp", "import math;\nint main() { return 0; }\n");
+    const std::string key = detail::scan_cache_key("/proj", "clang++", "-std=c++23", src);
+
+    detail::scan_cache_reset_stats();
+    auto before = detail::scan_cache_lookup(dir, key, src);
+    REQUIRE(before.has_value());
+    CHECK_FALSE(before->has_value()); /* nothing stored yet */
+
+    const std::vector<std::string> imports {"math"};
+    const std::vector<std::string> headers {"<vector>"};
+    REQUIRE(detail::scan_cache_store(dir, key, src, imports, headers).has_value());
+
+    auto hit = detail::scan_cache_lookup(dir, key, src);
+    REQUIRE(hit.has_value());
+    REQUIRE(hit->has_value());
+    CHECK((*hit)->first == imports);
+    CHECK((*hit)->second == headers);
+    CHECK(detail::scan_cache_stats().hot == 1);
+    CHECK(detail::scan_cache_stats().cold == 1); /* counted by the store */
+}
+
+TEST_CASE("scan cache: a changed source (size) or a different key misses") {
+    const auto dir = fresh_cache_dir("invalidate");
+    const auto src = scratch_write("changed.cpp", "import a;\n");
+    const std::string key = detail::scan_cache_key("/proj", "clang++", "-O0", src);
+    const std::vector<std::string> imports {"a"};
+    REQUIRE(detail::scan_cache_store(dir, key, src, imports, std::vector<std::string>{}).has_value());
+
+    /* same key, different flags: a distinct entry */
+    const std::string other = detail::scan_cache_key("/proj", "clang++", "-O2", src);
+    CHECK(other != key);
+    auto miss = detail::scan_cache_lookup(dir, other, src);
+    REQUIRE(miss.has_value());
+    CHECK_FALSE(miss->has_value());
+
+    /* rewriting the source changes its size -> stale entry is not served */
+    REQUIRE(detail::write_file(src, "import a;\nimport b;\n").has_value());
+    auto changed = detail::scan_cache_lookup(dir, key, src);
+    REQUIRE(changed.has_value());
+    CHECK_FALSE(changed->has_value());
+}
+
+TEST_CASE("scan cache: a corrupt entry is a miss, never an error") {
+    const auto dir = fresh_cache_dir("corrupt");
+    const auto src = scratch_write("corrupt.cpp", "import a;\n");
+    const std::string key = detail::scan_cache_key("/proj", "clang++", "", src);
+    REQUIRE(detail::scan_cache_store(dir, key, src, std::vector<std::string>{"a"}, {}).has_value());
+
+    const auto file = dir / (key + ".scan");
+    auto text = detail::read_file(file);
+    REQUIRE(text.has_value());
+    REQUIRE(detail::write_file(file, text->substr(0, text->size() - 3)).has_value()); /* truncate */
+
+    auto r = detail::scan_cache_lookup(dir, key, src);
+    REQUIRE(r.has_value());
+    CHECK_FALSE(r->has_value());
+}
+
+TEST_CASE("scan cache: the compiler identity is part of the key") {
+    const auto key = detail::scan_cache_key("/proj", "clang++", "-std=c++23", "src/a.cpp");
+    CHECK(key == detail::scan_cache_key("/proj", "clang++", "-std=c++23", "src/a.cpp"));
+    CHECK(key != detail::scan_cache_key("/proj", "g++", "-std=c++23", "src/a.cpp"));
+    CHECK(key != detail::scan_cache_key("/other", "clang++", "-std=c++23", "src/a.cpp"));
+    CHECK(key != detail::scan_cache_key("/proj", "clang++", "-std=c++23", "src/b.cpp"));
+    CHECK(key.size() == 64); /* lowercase hex sha256 */
+}
+
+TEST_CASE("scan: mentions_module_syntax is the raw-text pre-filter") {
+    const auto plain = scratch_write("raw_plain.cpp", "#include <cstdio>\nint main() { return 0; }\n");
+    auto a = detail::scan_module_unit(plain);
+    REQUIRE(a.has_value());
+    CHECK_FALSE(a->mentions_module_syntax);
+
+    /* a keyword inside a comment still sets it: false positives only cost a
+     * compiler scan, while false negatives would drop real imports */
+    const auto commented = scratch_write("raw_comment.cpp", "// no import here\nint main() { return 0; }\n");
+    auto b = detail::scan_module_unit(commented);
+    REQUIRE(b.has_value());
+    CHECK(b->mentions_module_syntax);
+    CHECK(b->imports.empty());
+}
+
+TEST_CASE("scan cache: a second build of an unchanged tree rescans nothing") {
+    if (!os::program_exists("clang-scan-deps")) { MESSAGE("clang-scan-deps not installed, skipping"); return; }
+    ChainDir dir {"e2e-stats"};
+    write_chain();
+    char prog[] = "truss-tests";
+    char dry[] = "-n";
+
+    for (int run = 0; run < 2; ++run) {
+        char* argv[] = {prog, dry};
+        Project proj("chain-cache", 2, argv);
+        proj.configure(Config().toolchain(Toolchain::LLVM));
+        auto& l3 = proj.add_static_library("lib3").sources("c.cppm");
+        auto& l2 = proj.add_static_library("lib2").sources("b.cppm").depends_on(l3);
+        auto& l1 = proj.add_static_library("lib1").sources("a.cppm").depends_on(l2);
+        proj.add_executable("app").sources("main.cpp").depends_on(l1);
+        auto r = proj.build();
+        INFO((r ? "ok" : r.error().message));
+        REQUIRE(r.has_value());
+        const auto s = detail::scan_cache_stats();
+        if (run == 0) {
+            CHECK(s.cold == 4); /* four units scanned on a cold tree */
+            CHECK(s.hot == 0);
+        } else {
+            CHECK(s.hot == 4); /* everything served from build/debug/scan-cache */
+            CHECK(s.cold == 0);
+        }
+    }
+}

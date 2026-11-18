@@ -964,15 +964,39 @@ Result<void> emit_manifest(const Project& proj, std::vector<ResolvedTarget>& res
                     Error::Kind::Io, "cannot create scan-deps scratch directory",
                 });
             std::vector<Result<std::pair<std::vector<std::string>, std::vector<std::string>>>> scanned(r.units.size());
-            const size_t nthreads = std::min<size_t>(r.units.size(), 8);
-            {
+            /* unchanged TUs are served from build/<mode>/scan-cache/ instead of
+             * paying ~10 ms each through the compiler: the key covers the cwd,
+             * source, compiler binary identity and the exact flag string, and
+             * a hit additionally requires the source's (mtime, size) to match */
+            const std::filesystem::path cache_dir = build_dir / "scan-cache";
+            std::vector<std::string> keys(r.units.size());
+            std::vector<std::size_t> pending;
+            pending.reserve(r.units.size());
+            for (std::size_t i = 0; i < r.units.size(); ++i) {
+                keys[i] = detail::scan_cache_key(proj.cwd().generic_string(), r.triple.compiler,
+                                                 cflags->compile, r.units[i].path);
+                if (auto hit = detail::scan_cache_lookup(cache_dir, keys[i], r.units[i].path);
+                    hit && hit->has_value()) {
+                    scanned[i] = std::move(**hit);
+                    continue;
+                }
+                pending.push_back(i);
+            }
+
+            const size_t nthreads = std::min<size_t>(pending.size(), 8);
+            if (nthreads > 0) {
                 std::vector<std::jthread> pool;
                 for (size_t w = 0; w < nthreads; ++w)
                     pool.emplace_back([&, w] {
-                        for (size_t i = w; i < r.units.size(); i += nthreads)
+                        for (size_t j = w; j < pending.size(); j += nthreads) {
+                            const size_t i = pending[j];
                             scanned[i] = detail::scan_deps_requires(
                                 r.triple.compiler, cflags->compile, r.units[i].path, proj.cwd(),
                                 scratch.path());
+                            if (scanned[i])
+                                detail::scan_cache_store(cache_dir, keys[i], r.units[i].path,
+                                                         scanned[i]->first, scanned[i]->second);
+                        }
                     });
                 /* jthread destructors join at scope end */
             }
@@ -1774,6 +1798,7 @@ Result<void> Project::compile_commands(const std::filesystem::path& path) {
 
 Result<void> Project::build() {
     const auto start = std::chrono::steady_clock::now();
+    detail::scan_cache_reset_stats();
     if (cli_error_) {
         log::error(*cli_error_);
         return std::unexpected(*cli_error_);

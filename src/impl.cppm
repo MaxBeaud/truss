@@ -9,9 +9,11 @@
  * for maintainers, not guaranteed stable across releases.
  */
 module;
+#include <cstddef>
 #include <filesystem>
 #include <functional>
 #include <map>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -33,6 +35,10 @@ namespace truss::detail {
 /// Read a whole file into a string (one allocation for seekable files).
 /// \ingroup grp_internals
 Result<std::string> read_file(const std::filesystem::path& p);
+/// SHA-256 of an in-memory buffer, lowercase hex (the same digest fetch()
+/// pinning uses, applied to a string).
+/// \ingroup grp_internals
+std::string sha256_bytes(std::string_view data);
 /// Write a whole file, creating parent directories as needed.
 /// \ingroup grp_internals
 Result<void> write_file(const std::filesystem::path& p, std::string_view data);
@@ -123,6 +129,14 @@ struct ModuleUnitInfo {
                                              ///< (e.g. "<vector>"): truss does
                                              ///< not support them, and it must
                                              ///< say so instead of dropping them
+    bool mentions_module_syntax {}; ///< the RAW text contains "import" or
+                                    ///< "module" somewhere (comments and
+                                    ///< literals included — deliberate: this
+                                    ///< is a CHEAP pre-filter, and a false
+                                    ///< positive only costs a compiler scan).
+                                    ///< When false, no compiler scan can find
+                                    ///< an import: the keywords cannot be
+                                    ///< macro-generated.
 };
 
 /// Extract the module declaration + import list from a source file with the
@@ -152,6 +166,53 @@ Result<std::pair<std::vector<std::string>, std::vector<std::string>>>
 scan_deps_requires(const std::string& compiler, std::string_view compile_flags,
                    const std::string& source, const std::filesystem::path& cwd,
                    const std::filesystem::path& scratch);
+
+/* --- module-scan result cache -------------------------------------------- */
+
+/// Counters for one `build()`: how many compiler scans were avoided.
+/// \ingroup grp_internals
+struct ScanCacheStats {
+    std::size_t hot {};     ///< served from the cache (file unchanged)
+    std::size_t cold {};    ///< actually scanned, then cached
+    std::size_t skipped {}; ///< no module syntax in the raw text: nothing to scan
+};
+
+/// The counters accumulate across one process run; call this before a build.
+/// \ingroup grp_internals
+void scan_cache_reset_stats();
+/// Snapshot of the counters.
+/// \ingroup grp_internals
+ScanCacheStats scan_cache_stats();
+/// Record one skipped unit (no module syntax) in the counters.
+/// \ingroup grp_internals
+void scan_cache_note_skipped();
+
+/// Cache key for one TU's scan result: everything the compiler scan's answer
+/// depends on that truss knows up front — the working directory, the source
+/// path, the compiler binary (path + size + mtime, so an upgrade invalidates
+/// it), the exact compile-flag string, and the cache format version. Header
+/// CONTENT is not part of the key (truss does not have the deps before the
+/// manifest exists); see the Internals page for the documented consequence.
+/// \ingroup grp_internals
+std::string scan_cache_key(const std::string& cwd, const std::string& compiler,
+                           std::string_view compile_flags, const std::string& source);
+
+/// Look a cached scan result up. A hit requires the format version to match
+/// and the source's (mtime, size) to be unchanged. Any I/O or parse problem is
+/// a miss, never an error: the cache is an optimization, never a dependency.
+/// \return the parsed (imports, header_imports), or nullopt on a miss
+/// \ingroup grp_internals
+Result<std::optional<std::pair<std::vector<std::string>, std::vector<std::string>>>>
+scan_cache_lookup(const std::filesystem::path& cache_dir, std::string_view key,
+                  const std::string& source);
+
+/// Store a successful scan result (atomic replace; parents created). Failures
+/// are ignored by callers — a read-only build dir must not fail the build.
+/// \ingroup grp_internals
+Result<void> scan_cache_store(const std::filesystem::path& cache_dir, std::string_view key,
+                              const std::string& source,
+                              std::span<const std::string> imports,
+                              std::span<const std::string> header_imports);
 
 /* --- compiler flags ------------------------------------------------------ */
 

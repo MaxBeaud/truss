@@ -54,8 +54,10 @@ compiled once into a `./truss` binary. From then on, every invocation:
 
 The regeneration is cheap because the script is cheap to run and the
 manifest is derived from its declarations; samurai then does the incremental
-work. The one cost that scales with tree size is module-import scanning
-(~10 ms per TU through the compiler) — it runs on every invocation today.
+work. Module-import scanning — ~10 ms per TU through the compiler — is
+**cached**: each result is keyed by (source path, mtime, size, compile flags,
+compiler) under `build/<mode>/scan-cache/`, so an unchanged tree skips the
+scan entirely and a re-run costs a few milliseconds.
 
 **The script rebuilds itself.** On startup, truss compares `truss.cpp` (next
 to the executable) *and every header it includes, plus the truss library and
@@ -863,6 +865,7 @@ build/
     ninja/build.ninja         # generated manifest
     obj/<triple>/<target>/…   # .o/.obj (+ .d depfiles, bmi/*.pcm | *.gcm)
     modmap/<triple>/          # GCC module-mapper files (per target)
+    scan-cache/               # module-scan results (path+mtime+size+flags+compiler)
     bin/<triple>/<exe>        # executables
     lib/<triple>/…            # archives, shared libs (+ import libs)
     std/<triple>-<std>-<cfg>/ # the std module's BMI/CMI + object, cached

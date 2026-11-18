@@ -24,8 +24,8 @@ page explains the architecture around them.
 2. **Resolve** — once per subgraph (`proj.targets()`, defaulting to one
    unnamed subgraph): glob sources, scan module units (hand-rolled lexer, or
    the compiler's authoritative p1689 scan when available: clang-scan-deps /
-   GCC `-fdeps-format`), apply `Config` overlays to triples, resolve
-   dependency graphs and link order.
+   GCC `-fdeps-format`; unchanged units are served from `scan-cache/`), apply
+   `Config` overlays to triples, resolve dependency graphs and link order.
 3. **Emit** — `emit_manifest()` (anonymous namespace in `build.cpp`) writes
    the ninja graph: rules per language/BMI/PCH/link, unity TU generation,
    launcher (`ccache`) prefixing, per-edge variables; GCC module targets get
@@ -41,6 +41,7 @@ page explains the architecture around them.
 |---|---|
 | `src/core/fs.cpp` | glob engine (brace expansion -> one regex per alternative, literal-prefix walk, hidden entries skipped), file helpers, `walk`/`read_lines` coroutines (`truss::generator`; libc++ lacks `std::generator`), native FIPS-180-4 sha256, `find_library` system dirs, truss.lock parsing |
 | `src/core/modules.cpp` | module scanner: non-code blanking (comments/strings/raw strings) + hand-rolled line scan; BMI name resolution; per-compiler authoritative p1689 scanning (clang-scan-deps / GCC `-fdeps-format`); per-target module-mapper files for GCC's CMI paths |
+| `src/core/scancache.cpp` | `build/<mode>/scan-cache/` store: keys a compiler scan result by (cwd, source, compiling flags, compiler binary size+mtime, cache format) and validates it against the source's (mtime, size); corrupt/truncated entries are misses, store failures never fail the build, and the hot/cold/skipped counters feed the phase log |
 | `src/core/flags.cpp` | enum-indexed flag tables per compiler family (GCC/Clang/MSVC), triple/Config resolution, launcher detection, BMI-config flags |
 | `src/core/ninja.cpp` | `NinjaWriter` + ninja escaping rules |
 | `src/core/samu.cpp` | C shim over vendored samurai (`vendor/samurai`), in-process build + compdb |
@@ -67,6 +68,16 @@ page explains the architecture around them.
 - **Module wiring**: BMI edges are separate rules; consumers get
   `-fmodule-file=` flags from the scanner (Auto) or clang-scan-deps (Manual);
   unity never batches `.cppm` units.
+- **Scan-cache invalidation**: the key covers what truss knows before the
+  manifest exists (cwd, source path, resolved compile flags, compiler and
+  scanner binary identity), and a hit also requires the source's (mtime, size)
+  to be unchanged. Header *content* is deliberately not part of the key — the
+  compiler's header deps do not exist yet when the graph is generated, and
+  asking the compiler is the cost being avoided. Consequence: adding an
+  `import` inside an included header does not invalidate that TU's entry until
+  the TU itself changes; `./setup.sh clean` (or deleting `build/<mode>/scan-cache/`)
+  forces a rescan. Adding an `import` to the TU itself — the normal way —
+  changes its size and invalidates it.
 - **jthread pools**: locals captured by reference must be declared *before*
   the pool vector (destruction order would otherwise join too late).
 

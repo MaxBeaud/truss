@@ -465,6 +465,12 @@ struct Sha256Ctx {
 
 } // namespace
 
+std::string sha256_bytes(std::string_view data) {
+    Sha256Ctx ctx;
+    ctx.update(reinterpret_cast<const std::uint8_t*>(data.data()), data.size());
+    return ctx.final_hex();
+}
+
 } // namespace truss::detail
 
 /* --- public truss::fs (phase 13): thin surface over the internals ---------- */
