@@ -1004,8 +1004,11 @@ Result<void> emit_manifest(const Project& proj, std::vector<ResolvedTarget>& res
                                 r.triple.compiler, cflags->compile, r.units[i].path, proj.cwd(),
                                 scratch.path());
                             if (scanned[i])
-                                detail::scan_cache_store(cache_dir, keys[i], r.units[i].path,
-                                                         scanned[i]->first, scanned[i]->second);
+                                /* an optimization: a read-only build dir must not
+                                 * fail the build, so the store result is ignored */
+                                static_cast<void>(detail::scan_cache_store(
+                                    cache_dir, keys[i], r.units[i].path, scanned[i]->first,
+                                    scanned[i]->second));
                         }
                     });
                 /* jthread destructors join at scope end */

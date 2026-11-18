@@ -263,6 +263,8 @@ Result<LinkFlags> static_stdlib_flags(const TargetTriple& t, StaticStdlib s) {
         });
     const bool zig = is_zig(t);
     switch (s) {
+    case StaticStdlib::Default: /* unreachable: returned above; keeps -Wswitch quiet */
+        break;
     case StaticStdlib::Gcc:
         if (zig || (t.family == CompilerFamily::Clang && t.stdlib == StdLib::Libcxx))
             return std::unexpected(Error {

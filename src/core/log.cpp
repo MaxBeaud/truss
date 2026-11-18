@@ -24,7 +24,6 @@ std::atomic<int> g_min_level {1};
  * even through a pipe, CLICOLOR=0 disables. */
 constexpr const char* kReset = "\x1b[0m";
 constexpr const char* kBold = "\x1b[1m";
-constexpr const char* kDim = "\x1b[2m";
 constexpr const char* kCyan = "\x1b[0;36m";
 constexpr const char* kRed = "\x1b[0;31m";
 constexpr const char* kGreen = "\x1b[0;32m";

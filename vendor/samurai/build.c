@@ -565,10 +565,10 @@ build(void)
 	int sig;
 	ssize_t ret;
 
-	if (ntotal == 0) {
-		warn("nothing to do");
+	/* truss patch: a no-op build is not a warning ("<argv0>: nothing to do"
+	 * is noise between truss's own phase lines); stay silent */
+	if (ntotal == 0)
 		return;
-	}
 
 	if (pipe(sigfd) != 0)
 		fatal("pipe:");

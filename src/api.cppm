@@ -1220,7 +1220,11 @@ private:
     bool pic_ {false};
     bool test_ {false};
     bool static_link_ {false};
-    bool demoted_shared_ {false}; /* SharedLib turned into a static archive by static_link() */
+    /* SharedLib turned into a static archive by static_link(): remembers the
+     * original kind so static_link(false) can restore it. Only read from the
+     * deducing-this template below, so the module interface TU (where the
+     * template is never instantiated) would flag it as unused. */
+    [[maybe_unused]] bool demoted_shared_ {false};
     bool static_deps_ {false};
     StaticStdlib static_stdlib_ {};
     bool for_host_ {false};

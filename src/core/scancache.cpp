@@ -232,7 +232,7 @@ Result<ModuleUnitInfo> scan_module_unit_cached(const std::filesystem::path& cach
             bool ok = next() == "truss-text-scan 1";
             const std::string_view stamp = next();
             const auto space = stamp.find(' ');
-            std::int64_t mtime = 0;
+            std::uintmax_t mtime = 0;
             std::uintmax_t size = 0;
             const auto parse = [](std::string_view v, std::uintmax_t& out) {
                 if (v.empty())
@@ -245,10 +245,9 @@ Result<ModuleUnitInfo> scan_module_unit_cached(const std::filesystem::path& cach
                 }
                 return true;
             };
-            std::uintmax_t mtime_u = 0;
             if (ok && space != std::string_view::npos
-                && parse(stamp.substr(0, space), mtime_u) && parse(stamp.substr(space + 1), size))
-                ok = static_cast<std::int64_t>(mtime_u) == now.mtime && size == now.size;
+                && parse(stamp.substr(0, space), mtime) && parse(stamp.substr(space + 1), size))
+                ok = static_cast<std::int64_t>(mtime) == now.mtime && size == now.size;
             else
                 ok = false;
             ModuleUnitInfo info;
