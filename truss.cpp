@@ -1,4 +1,4 @@
-// truss's own build script — truss building truss (PLAN.MD phase 8).
+// truss's own build script — truss building truss.
 //
 // Build this script once (xmake `truss-cli` target, or bootstrap.sh artifacts),
 // then `./truss debug` produces build/debug/bin/<triple>/truss — truss compiled

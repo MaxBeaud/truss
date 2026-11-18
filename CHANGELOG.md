@@ -58,7 +58,7 @@ a major version.
 
 ## [1.0.0] — 2026-11-16
 
-The engine was feature-complete at 0.1.0 (all thirteen PLAN.MD phases); 1.0
+The engine was feature-complete at 0.1.0 (all thirteen original-plan phases); 1.0
 adds the cross-build, module-scanning and robustness work, hardens the
 outward-facing surfaces, and freezes the public API behind semver.
 
@@ -144,7 +144,7 @@ outward-facing surfaces, and freezes the public API behind semver.
 
 ## [0.1.0] — 2026
 
-Initial public state: all thirteen PLAN.MD phases — targets and globbing,
+Initial public state: all thirteen original-plan phases — targets and globbing,
 usage requirements, C++20/26 modules with transitive BMI closure and
 `import std` (clang + libc++), static linking, zig cross-compilation,
 `fetch`/`conan`/`vcpkg`, MSVC flag mapping, hardening tiers, merged

@@ -1,11 +1,14 @@
 # AGENT.MD — Constraints & Guidelines for working on truss
 
-Read `PLAN.MD` first. This file is the rulebook for any agent/human modifying this repo.
+This file is the rulebook for any agent/human modifying this repo. Background:
+`README.MD` (user guide), `docs/internals.md` (architecture),
+`docs/history.md` (why decisions were made; all original phases are complete),
+`docs/1.0-roadmap.md` (what comes next).
 
 ## 1. Project identity
 
-- truss = a C++26 build-system library ("build your C++ using C++"), mate.h API style,
-  xmake-class features, samurai backend.
+- truss = a C++26 build-system library ("build your C++ using C++"), fluent builder
+  API inspired by mate.h, samurai backend.
 - truss itself: **clang (trunk-pinned) + libc++ + `-std=c++26`**, built by **`./setup.sh`**
   (plain clang++, no build system). Never introduce CMake or another build system for
   truss itself.
@@ -38,7 +41,8 @@ Read `PLAN.MD` first. This file is the rulebook for any agent/human modifying th
   Every parallel site needs a comment justifying why.
 - **Naming**: types `PascalCase`, functions/methods `snake_case` (mate.h heritage + xmake
   friendliness), constants `kPascalCase` or `UPPER_SNAKE` for enum values matching the
-  public enums in PLAN.MD. Namespaces: everything under `truss::`, internals in
+  public enums in the API reference (`src/api.cppm`). Namespaces: everything under
+  `truss::`, internals in
   `truss::detail` or unnamed namespaces in implementation units.
 - **Warnings are errors-adjacent**: the setup.sh warning set (`-Wall -Wextra -Wpedantic
   -Wshadow -Wconversion -Wsign-conversion -Wold-style-cast ...`) must stay clean. No C-style
@@ -74,10 +78,10 @@ Read `PLAN.MD` first. This file is the rulebook for any agent/human modifying th
   lives under `build/` (`build/bootstrap` = libtruss.a + BMIs, `build/dist` = amalgamation).
 - Run tests: `./setup.sh test` (doctest unit tests with ASan/UBSan + all example flows).
 - Never commit `build/`, `compile_commands.json`, `truss.lock` churn (gitignore covers).
-- **Phase discipline**: implement PLAN.MD phases in order; each phase ends with its
-  "Done when" criterion demonstrably passing before starting the next. Small commits,
-  prefix: `feat:`, `fix:`, `test:`, `chore:`, `docs:`, `refactor:`.
-- Every phase adds/keeps `examples/hello` (and later `tests/fixtures/*`) building green.
+- **Batch discipline**: planned work is tracked in `docs/1.0-roadmap.md`; finish one
+  item (with tests) before starting the next. Small commits, prefix: `feat:`, `fix:`,
+  `test:`, `chore:`, `docs:`, `refactor:`.
+- Every change keeps `examples/*` and `tests/fixtures/*` building green.
 
 ## 6. Testing rules
 
@@ -107,7 +111,7 @@ Read `PLAN.MD` first. This file is the rulebook for any agent/human modifying th
 - Compiler flag enums map through constexpr tables in `flags.cpp`; GCC + Clang complete,
   MSVC stubs return a `Toolchain` "not yet supported" `Error` (never silent wrong flags).
 
-## 8. Things explicitly OUT of scope (until a phase says otherwise)
+## 8. Things explicitly OUT of scope (until the roadmap says otherwise)
 
 - MSVC/cl.exe execution path, WASI/emscripten targets, CMake interop for vendored deps,
   package *publishing*, IDE integration beyond `compile_commands.json`,

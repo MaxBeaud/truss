@@ -1,4 +1,4 @@
-// amalgam — example: truss as a single-header drop-in (PLAN.MD phase 9).
+// amalgam — example: truss as a single-header drop-in.
 //
 // No modules, no vendored tree, no link step against libtruss: just
 //   clang++ -std=c++26 -I<repo>/dist truss.cpp -o truss

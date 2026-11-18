@@ -1,4 +1,4 @@
-// installed — example: truss as an installed tool (PLAN.MD phase 8).
+// installed — example: truss as an installed tool.
 //
 // This fixture has NO vendored truss source. The build script below is
 // compiled against the staged artifacts from `./bootstrap.sh --install`:

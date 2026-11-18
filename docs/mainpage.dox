@@ -206,7 +206,9 @@
  * - \ref cross_compilation_page "Cross-compilation strategy" — triple
  *   conventions, runners, the host/target boundary rules, known gaps.
  * - \ref roadmap_page "1.0 roadmap" — where the project is heading.
- * - In the repository: README.MD (user guide), PLAN.MD (the original plan),
+ * - \ref history_page "Project history" — why the big decisions were made,
+ *   the shipped phases, carried risks and the testing strategy.
+ * - In the repository: README.MD (user guide),
  *   AGENT.MD (constraints & verified toolchain facts), examples/ (working
  *   scripts for every feature: modules, cross-host, fetch, conan, vcpkg,
  *   imported, shared, amalgam, installed, hello).

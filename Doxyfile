@@ -13,7 +13,8 @@ OUTPUT_LANGUAGE        = English
 # pages (README.MD stays the GitHub user guide — its markdown anchors don't
 # map to doxygen sections; the main page mirrors it with \ref links)
 INPUT                  = docs/mainpage.dox src/api.cppm src/impl.cppm \
-                         docs/internals.md docs/cross-compilation.md docs/1.0-roadmap.md
+                         docs/internals.md docs/cross-compilation.md docs/1.0-roadmap.md \
+                         docs/history.md
 FILE_PATTERNS          = *.cppm *.md *.dox
 RECURSIVE              = NO
 
