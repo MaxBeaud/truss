@@ -16,6 +16,9 @@ a major version.
   a no-op `./truss` invocation on a 300-TU project drops from ~750 ms to
   ~5 ms. Corrupt entries are misses; write failures never fail the build;
   `clean` (or deleting the directory) forces a rescan.
+- **Scan-skip gate** — a TU with no `import`/`module` in its raw text is
+  never handed to the compiler (the keywords cannot be macro-generated), so
+  a 300-TU tree of plain TUs now configures in ~5 ms even cold.
 
 ## [1.0.0] — 2026-11-16
 

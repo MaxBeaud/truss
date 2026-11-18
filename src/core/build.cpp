@@ -973,6 +973,16 @@ Result<void> emit_manifest(const Project& proj, std::vector<ResolvedTarget>& res
             std::vector<std::size_t> pending;
             pending.reserve(r.units.size());
             for (std::size_t i = 0; i < r.units.size(); ++i) {
+                /* no `import`/`module` anywhere in the raw text: no compiler
+                 * scan can find anything (the keywords cannot be
+                 * macro-generated), so do not even ask. Conservative on
+                 * purpose — a keyword inside a comment or string literal only
+                 * costs one scan. */
+                if (!r.units[i].mentions_module_syntax) {
+                    scanned[i] = std::pair<std::vector<std::string>, std::vector<std::string>> {};
+                    detail::scan_cache_note_skipped();
+                    continue;
+                }
                 keys[i] = detail::scan_cache_key(proj.cwd().generic_string(), r.triple.compiler,
                                                  cflags->compile, r.units[i].path);
                 if (auto hit = detail::scan_cache_lookup(cache_dir, keys[i], r.units[i].path);

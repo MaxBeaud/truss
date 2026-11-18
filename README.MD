@@ -553,12 +553,12 @@ compiler needs every BMI a consumed BMI refers to.
 
 1. **The compiler's own scan (authoritative, the default when available)** —
    clang via `clang-scan-deps`, GCC via `-fdeps-format=p1689r5`, run at
-   configure time in parallel (~10 ms per TU). The import lists are the
-   compiler's own: exact partition names, imports the text scan cannot see
-   (line-spliced `import \` continuations, macro-gated imports). A TU that
-   includes a not-yet-generated header (the codegen pattern) cannot be
-   preprocessed — truss falls back to the text scan for that unit with a
-   warning.
+   configure time in parallel (~10 ms per TU, then cached: see below). The
+   import lists are the compiler's own: exact partition names, imports the
+   text scan cannot see (line-spliced `import \` continuations, macro-gated
+   imports). A TU that includes a not-yet-generated header (the codegen
+   pattern) cannot be preprocessed — truss falls back to the text scan for
+   that unit with a warning.
 2. **The text scan (fallback, and the GCC<14/clang-without-scan-deps path)** —
    a hand-rolled line scanner over each file, after comments, strings, char
    literals and raw strings have been blanked: `import`/`module`
@@ -571,6 +571,13 @@ errors rather than being silently miscompiled). Header-unit imports
 (`import <vector>;` / `import "x.h";`) are **not supported** — truss fails
 with an explicit Config error telling you to `#include` the header instead
 (the compilers' scanners cannot report header units reliably yet).
+
+**Scan results are cached** in `build/<mode>/scan-cache/`, keyed by source
+path, mtime, size, compile flags and compiler identity. An unchanged tree
+performs no scans at all, and a TU whose raw text contains neither `import`
+nor `module` is never handed to the compiler (the keywords cannot come from a
+macro, so the answer is provably empty). Editing a source rescans only that
+source.
 
 **GCC specifics**: CMIs (`.gcm`) are routed through a per-target
 module-mapper file (`build/<mode>/modmap/<triple>/<target>.map`) — no

@@ -488,3 +488,23 @@ TEST_CASE("scan cache: a second build of an unchanged tree rescans nothing") {
         }
     }
 }
+
+TEST_CASE("scan cache: TUs with no module syntax never reach the compiler scan") {
+    ChainDir dir {"skip"};
+    REQUIRE(detail::write_file("plain.cpp", "#include <cstdio>\nint main() { return 0; }\n").has_value());
+    char prog[] = "truss-tests";
+    char dry[] = "-n";
+    char* argv[] = {prog, dry};
+    Project proj("skip-gate", 2, argv);
+    proj.configure(Config().toolchain(Toolchain::LLVM));
+    proj.add_executable("app").sources("plain.cpp");
+    auto r = proj.build();
+    INFO((r ? "ok" : r.error().message));
+    REQUIRE(r.has_value());
+    const auto s = detail::scan_cache_stats();
+    CHECK(s.skipped == 1);
+    CHECK(s.cold == 0); /* clang-scan-deps never ran */
+    CHECK(s.hot == 0);
+    /* and nothing was cached: there is nothing to remember */
+    CHECK_FALSE(std::filesystem::exists("build/debug/scan-cache"));
+}
