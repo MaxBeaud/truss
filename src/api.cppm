@@ -662,6 +662,14 @@ void success(std::string_view msg);
 void error(std::string_view msg);
 /// Error line including err.path when set.
 void error(const Error& err);
+/**
+ * \brief A build phase line: `▸ name  detail` (e.g. `▸ configure  4 ms ·
+ * scan 287 hot / 2 cold / 3 skipped`).
+ *
+ * Printed only when the log level allows info messages; the name is padded so
+ * consecutive phases align.
+ */
+void step(std::string_view name, std::string_view detail);
 } // namespace log
 
 /**

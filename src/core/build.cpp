@@ -708,18 +708,18 @@ Result<void> emit_manifest(const Project& proj, std::vector<ResolvedTarget>& res
     w.rule("compile_cxx", {
         {"command", launch + "$cxx $flags -MMD -MF $depfile -c $in -o $out"},
         {"deps", "gcc"},
-        {"description", "CXX $out"},
+        {"description", "CXX $in"},
     });
     w.rule("compile_c", {
         {"command", launch + "$cc $flags -MMD -MF $depfile -c $in -o $out"},
         {"deps", "gcc"},
-        {"description", "CC $out"},
+        {"description", "CC $in"},
     });
     w.rule("compile_bmi", {
         /* no launcher: ccache's C++20 module (BMI) support is unreliable */
         {"command", "$cxx $flags -fmodule-output=$bmi -MMD -MF $depfile -c $in -o $out"},
         {"deps", "gcc"},
-        {"description", "BMI $out"},
+        {"description", "BMI $in"},
     });
     if (std::ranges::any_of(resolved, [](const ResolvedTarget& r) {
             return r.triple.family == CompilerFamily::Gcc
@@ -733,7 +733,7 @@ Result<void> emit_manifest(const Project& proj, std::vector<ResolvedTarget>& res
              * -fmodule-output; that flag is clang-only) */
             {"command", "$cxx $flags -MMD -MF $depfile -c $in -o $out"},
             {"deps", "gcc"},
-            {"description", "BMI $out"},
+            {"description", "BMI $in"},
         });
     w.rule("archive", {
         {"command", "$ar rcs $out $in"},
@@ -772,7 +772,7 @@ Result<void> emit_manifest(const Project& proj, std::vector<ResolvedTarget>& res
             /* no launcher: ccache's PCH support is unreliable */
             {"command", "$cxx $flags -x c++-header -MMD -MF $depfile -c $in -o $out"},
             {"deps", "gcc"},
-            {"description", "PCH $out"},
+            {"description", "PCH $in"},
         });
     if (any_msvc) {
         /* header deps via /showIncludes: the vendored samurai parses these
@@ -781,12 +781,12 @@ Result<void> emit_manifest(const Project& proj, std::vector<ResolvedTarget>& res
         w.rule("compile_cxx_msvc", {
             {"command", "$cxx $flags /showIncludes /c /Fo$out $in"},
             {"deps", "msvc"},
-            {"description", "CXX $out"},
+            {"description", "CXX $in"},
         });
         w.rule("compile_c_msvc", {
             {"command", "$cc $flags /showIncludes /c /Fo$out $in"},
             {"deps", "msvc"},
-            {"description", "CC $out"},
+            {"description", "CC $in"},
         });
         /* object lists go through response files: Windows command lines are short */
         w.rule("archive_msvc", {
@@ -1673,6 +1673,7 @@ constexpr std::string_view kHelp =
     "\n"
     "options:\n"
     "  -j, --jobs N     parallel jobs (default: CPU count)\n"
+    "  -q, --quiet      errors and warnings only\n"
     "  -v, --verbose    print full command lines\n"
     "  -n, --dry-run    show what would run without running it\n"
     "      --explain    explain why each step is rebuilt\n"
@@ -1691,6 +1692,7 @@ constexpr std::string_view kHelp =
     "  truss run --target server\n";
 
 Project::Project(std::string name, std::span<char* const> argv) : name_(std::move(name)) {
+    detail::log_init_from_env();
     if (auto stale = refresh_build_script(argv))
         cli_error_ = std::move(*stale);
 
@@ -1706,6 +1708,7 @@ Project::Project(std::string name, std::span<char* const> argv) : name_(std::mov
         if (a == "debug") mode_ = BuildMode::Debug;
         else if (a == "release") mode_ = BuildMode::Release;
         else if (a == "-v" || a == "--verbose") verbose_ = true;
+        else if (a == "-q" || a == "--quiet") detail::log_set_min_level(3);
         else if (a == "-n" || a == "--dry-run") dry_run_ = true;
         else if (a == "--explain") explain_ = true;
         else if (a == "-j" || a == "--jobs") {
@@ -1797,11 +1800,25 @@ Result<void> Project::compile_commands(const std::filesystem::path& path) {
         });
     }
     
-    // Invoke samurai compdb tool
-    if (auto r = detail::samu_compdb(manifest.generic_string(), output_path.generic_string()); !r) {
+    // Invoke samurai compdb tool into a sibling temp file, then replace only
+    // when the content changed: a no-op `./truss` must not touch mtimes or
+    // print "wrote ..." every time
+    const auto tmp = std::filesystem::path(output_path.generic_string() + ".tmp");
+    if (auto r = detail::samu_compdb(manifest.generic_string(), tmp.generic_string()); !r)
         return r;
+    auto fresh = detail::read_file(tmp);
+    auto existing = detail::read_file(output_path);
+    if (fresh && existing && *fresh == *existing) {
+        std::filesystem::remove(tmp, ec);
+        return {};
     }
-    
+    std::filesystem::rename(tmp, output_path, ec);
+    if (ec) {
+        std::filesystem::remove(tmp, ec);
+        return std::unexpected(Error {
+            Error::Kind::Io, "failed to write compile_commands.json", output_path});
+    }
+
     log::success("wrote " + output_path.generic_string());
     return {};
 }
@@ -2291,6 +2308,22 @@ Result<void> Project::build() {
         return std::unexpected(r.error());
     }
 
+    /* phase timing: everything up to here is configuration + graph emission */
+    const auto ms_since = [](std::chrono::steady_clock::time_point t0) {
+        return static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                          std::chrono::steady_clock::now() - t0)
+                                          .count());
+    };
+    {
+        const detail::ScanCacheStats scan = detail::scan_cache_stats();
+        std::string phase = std::to_string(ms_since(start)) + " ms";
+        if (scan.hot != 0 || scan.cold != 0 || scan.skipped != 0)
+            phase += " \u00b7 scan " + std::to_string(scan.hot) + " hot / "
+                   + std::to_string(scan.cold) + " cold / " + std::to_string(scan.skipped)
+                   + " skipped";
+        log::step("configure", phase);
+    }
+
     /* dispatch tasks */
     const TaskContext ctx {name_, mode_, bld, cwd_, jobs_, verbose_};
 
@@ -2298,6 +2331,8 @@ Result<void> Project::build() {
      * once after the first successful one; a failing hook aborts. A dry run
      * reports the graph without side effects, so hooks never fire. */
     bool hooks_pre_done = false, hooks_post_done = false;
+    bool samu_ran = false;
+    long long samu_ms = 0;
     auto run_samu = [&](std::span<const std::string> targets) -> Result<void> {
         if (!hooks_pre_done && !dry_run_) {
             for (auto& fn : pre_build_)
@@ -2305,8 +2340,11 @@ Result<void> Project::build() {
                     return r;
             hooks_pre_done = true;
         }
+        const auto samu_start = std::chrono::steady_clock::now();
         if (auto r = detail::samu_build(manifest.generic_string(), jobs_, verbose_, dry_run_, explain_, targets); !r)
             return r;
+        samu_ms += ms_since(samu_start);
+        samu_ran = true;
         if (!hooks_post_done && !dry_run_) {
             for (auto& fn : post_build_)
                 if (auto r = fn(ctx); !r)
@@ -2606,10 +2644,12 @@ Result<void> Project::build() {
         }
     }
 
-    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-                             std::chrono::steady_clock::now() - start)
-                             .count();
-    log::info("truss: build took " + std::to_string(elapsed) + "ms");
+    if (samu_ran) {
+        std::string phase = std::to_string(samu_ms) + " ms";
+        if (dry_run_)
+            phase += " \u00b7 dry run";
+        log::step("build", phase);
+    }
     return {};
 }
 

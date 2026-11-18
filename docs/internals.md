@@ -32,7 +32,8 @@ page explains the architecture around them.
    a per-target module-mapper file; each subgraph gets its own `name:all`
    phony. The manifest is written with `write_file_if_changed` so an
    unchanged graph never dirties samurai.
-4. **Execute** — vendored samurai runs in-process (`samu_build`), then
+4. **Execute** — vendored samurai runs in-process (`samu_build`; a live
+   in-flight progress block on a terminal), then
    registered tasks (`test`, custom `task()`s) run.
 
 ## Subsystems
@@ -44,7 +45,7 @@ page explains the architecture around them.
 | `src/core/scancache.cpp` | `build/<mode>/scan-cache/` store: keys a compiler scan result by (cwd, source, compiling flags, compiler binary size+mtime, cache format) and validates it against the source's (mtime, size); corrupt/truncated entries are misses, store failures never fail the build, and the hot/cold/skipped counters feed the phase log |
 | `src/core/flags.cpp` | enum-indexed flag tables per compiler family (GCC/Clang/MSVC), triple/Config resolution, launcher detection, BMI-config flags |
 | `src/core/ninja.cpp` | `NinjaWriter` + ninja escaping rules |
-| `src/core/samu.cpp` | C shim over vendored samurai (`vendor/samurai`), in-process build + compdb |
+| `src/core/samu.cpp` | C shim over vendored samurai (`vendor/samurai`), in-process build + compdb; on a terminal, samurai's stdout is pumped through a pipe by a reader thread that renders the live in-flight block (`[started/total pct]` + the jobs currently compiling, FIFO-evicted as new ones start); compiler diagnostics clear the block and print verbatim, `TRUSS_PROGRESS=plain`/`-v`/`-n`/`--explain` keep the plain stream |
 | `src/core/proc.cpp` | `posix_spawn` process runner (optional cwd via `addchdir_np`), output capture |
 | `src/core/os.cpp` | `truss::os`: consteval host predicates, memoized fork-free `find_program` `$PATH` walk, lenient `env` parsing, machine specs, `temp_scope`, `find_truss_modules` auto-discovery |
 | `src/core/pkg.cpp` | fetch (git/tarball + sha256), `~/.cache/truss` cache, hardlink materialization, conan/vcpkg fingerprint + configure-skip |

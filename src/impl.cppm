@@ -30,6 +30,15 @@ namespace truss::detail {
 
 /* --- logging: promoted to the public truss::log (see :api) --------------- */
 
+/// Set the log threshold (0 debug, 1 info, 2 warn, 3 error-only). The CLI's
+/// `-q` maps to 3; `TRUSS_LOG` (quiet/warn/info/debug) is applied once at
+/// startup by log_init_from_env().
+/// \ingroup grp_internals
+void log_set_min_level(int level);
+/// Apply the TRUSS_LOG environment variable (idempotent, first call wins).
+/// \ingroup grp_internals
+void log_init_from_env();
+
 /* --- filesystem ---------------------------------------------------------- */
 
 /// Read a whole file into a string (one allocation for seekable files).

@@ -172,7 +172,8 @@ things: commands are truss's own verbs; tasks are yours, registered with
 |---|---|
 | `debug` / `release` | Build mode (default `debug`). One build dir per mode. |
 | `-j N` | Parallel jobs (default: samurai's auto, ≈ nproc+2). |
-| `-v` | Echo every command samurai runs. |
+| `-q, --quiet` | Errors and warnings only (same as `TRUSS_LOG=quiet`). |
+| `-v` | Echo every command samurai runs (disables the live progress block). |
 | `-n` | Dry run: print what *would* run, change nothing (no hooks fire, no test/run binary executes). |
 | `--explain` | Print *why* each edge is (re)built — samurai's explain mode. |
 | `--target NAME` | Build only this target (repeatable). With subgraphs: `NAME:SUBGRAPH` picks one subgraph's target; a bare name applies to every subgraph that has it. |
@@ -184,6 +185,24 @@ things: commands are truss's own verbs; tasks are yours, registered with
 
 Commands compose with modes and flags: `./truss release test -j8 -v`,
 `./truss run --target server -- --port 8080`.
+
+### What the output looks like
+
+On a terminal, truss prints phase lines with timings and scan-cache counters,
+and samurai's progress is rendered as a live block of the files currently
+compiling — finished files disappear instead of scrolling:
+
+```text
+▸ configure  4 ms · scan 287 hot / 2 cold / 3 skipped
+  [42/301] 14% ▸ CXX src/net/tcp.cpp
+                 ▸ CXX src/net/tls.cpp
+▸ build      2.1 s
+```
+
+Piped output (CI, editors) stays plain and greppable: one line per step,
+no cursor control. Related knobs: `TRUSS_LOG=quiet|warn|info|debug`,
+`TRUSS_PROGRESS=plain` (disable the live block), and the standard
+`NO_COLOR` / `CLICOLOR_FORCE` environment variables.
 
 ## The build script
 

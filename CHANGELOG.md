@@ -19,6 +19,17 @@ a major version.
 - **Scan-skip gate** — a TU with no `import`/`module` in its raw text is
   never handed to the compiler (the keywords cannot be macro-generated), so
   a 300-TU tree of plain TUs now configures in ~5 ms even cold.
+- **Build output** — phase lines with timings and scan-cache counters
+  (`▸ configure  4 ms · scan 287 hot / 2 cold / 3 skipped`), samurai edge
+  descriptions that name the source (`CXX src/net/tcp.cpp`), and a live
+  in-flight progress block on a terminal (finished files disappear; FIFO
+  eviction, compiler diagnostics print verbatim above it). Disable with
+  `TRUSS_PROGRESS=plain`; piped output is unchanged/plain.
+- **Log controls** — `-q/--quiet`, `TRUSS_LOG=quiet|warn|info|debug`, and
+  `NO_COLOR` / `CLICOLOR_FORCE` / `CLICOLOR` are honoured.
+- `proj.compile_commands()` / `./truss compdb` now writes through a temp
+  file and only replaces `compile_commands.json` when its content changed
+  (no mtime churn, no "wrote ..." line on unchanged runs).
 
 ## [1.0.0] — 2026-11-16
 
