@@ -62,11 +62,13 @@ scan entirely and a re-run costs a few milliseconds.
 **The script rebuilds itself.** On startup, truss compares `truss.cpp` (next
 to the executable) *and every header it includes, plus the truss library and
 BMIs it was built against* (a depfile written at bootstrap) with the
-executable. When any of them is newer, truss runs `bootstrap.sh` from the
+executable. When any of them is newer, truss runs the rebuild driver in the
 same directory and re-executes with the same arguments — an edited script or
-a changed header never builds a stale graph. Without a `bootstrap.sh` it
-stops with an error asking for a rebuild instead. `TRUSS_NO_REBUILD=1` turns
-the check off.
+a changed header never builds a stale graph. The driver is a project's
+`bootstrap.sh`, or `./setup.sh build` in a truss checkout (which reuses the
+library/BMIs when only the script changed, so the re-exec costs one TU).
+Without either it stops with an error asking for a rebuild instead.
+`TRUSS_NO_REBUILD=1` turns the check off.
 
 ## Table of contents
 
@@ -935,7 +937,7 @@ truss builds itself (`truss.cpp` at the repo root is its own build script).
 `setup.sh` is the single entry point — plain `clang++`, no build system:
 
 ```sh
-./setup.sh build               # bootstrap libtruss.a + BMI, compile ./truss
+./setup.sh build               # bootstrap libtruss.a + BMI (reused when fresh), compile ./truss
 ./truss debug                  # truss, built by truss
 ./setup.sh test                # unit tests + all example flows
 ```
@@ -943,8 +945,8 @@ truss builds itself (`truss.cpp` at the repo root is its own build script).
 Other useful commands: `./setup.sh unit` (doctest, ASan/UBSan), `./setup.sh
 examples`, `./setup.sh installed`, `./setup.sh amalgam`, `./setup.sh install
 [prefix]`, `./setup.sh docs` (Doxygen API reference → `build/docs/html/`),
-`./setup.sh bench` (build-system comparison fixtures), `./setup.sh add-package`,
-`./setup.sh clean`. All generated output lives under `build/`.
+`./setup.sh bench` (build-system comparison fixtures), `./setup.sh clean`. All
+generated output lives under `build/`.
 
 `./setup.sh dist` produces the shippable CLI, `build/dist/bin/truss`: the
 self-host `truss-dist` target in release mode (`truss init` built in,

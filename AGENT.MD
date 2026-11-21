@@ -64,7 +64,7 @@ This file is the rulebook for any agent/human modifying this repo. Background:
 
 ## 4. Vendoring & packages
 
-- Third-party code truss itself needs → `vendor/` (setup.sh `add-package` symlink flow or
+- Third-party code truss itself needs → `vendor/` (a symlink into your package root or
   git clone pinned to a tag). Currently allowed: `samurai` (ISC); tests use vendored
   `doctest` (MIT, single header in `tests/doctest/`).
   Anything else needs a justification comment in the vendor note file.
@@ -694,13 +694,19 @@ merge_imports string round-trip, read_lines double-open).
   reserved task name. `--` forwards the rest of argv to `run`; `run` honours
   `--target` and builds only the executable it starts.
 - Self-rebuild (`refresh_build_script`, Project ctor, nob-style): compares
-  `<exe dir>/truss.cpp` with the running executable (`/proc/self/exe`, else
-  argv[0]). Newer script + `bootstrap.sh` present ⇒ run it in that dir, set
-  `TRUSS_REBUILT=1`, `execv` with the same argv. No bootstrap.sh ⇒ Config
-  error through `cli_error_` (reported by build()). Still newer after a
-  re-exec (clock skew) ⇒ warning, no loop. `TRUSS_NO_REBUILD=1` disables it.
-  Executables without a truss.cpp next to them (unit tests, installed CLI)
-  are untouched. Not compared: headers the script includes, libtruss/BMIs.
+  `<exe dir>/truss.cpp` **and every prerequisite in `<exe dir>/truss.d`**
+  (headers the script includes + the truss BMIs/libtruss.a, written by
+  `bootstrap.sh` / `setup.sh build` via `-MMD` plus an appended artifact rule)
+  with the running executable (`/proc/self/exe`, else argv[0]). Driver, in
+  preference order: `<dir>/bootstrap.sh`, else `<dir>/setup.sh build` (the
+  truss checkout; bootstrap.sh was folded into setup.sh in phase 11). Run it
+  in that dir, set `TRUSS_REBUILT=1`, `execv` with the same argv. Neither
+  driver ⇒ Config error through `cli_error_` (reported by build()). Still
+  newer after a re-exec (clock skew) ⇒ warning, no loop.
+  `TRUSS_NO_REBUILD=1` disables it. Executables without a truss.cpp next to
+  them (unit tests, installed CLI) are untouched. `setup.sh build` reuses
+  `build/bootstrap` when it is newer than every source, so a script-only edit
+  re-execs in ~0.2 s instead of a full bootstrap.
 - Motivation (user feedback): a stale `./truss` built the old graph silently;
   with a system copy of the new dependency's headers, only the link failed,
   pointing away from the cause. bootstrap.sh now prints
@@ -1014,7 +1020,7 @@ Review round (all verified by ASan/unit suite):
   hoisted; flag-table indexing shared; kGray renamed kCyan (ANSI 36);
   amalgamate uses string::starts_with; init checks the chmod result; setup.sh
   usage() parses the header instead of a fixed line range, cmd_dist uses
-  find -print -quit (SIGPIPE under pipefail), add-package creates nested
+  find -print -quit (SIGPIPE under pipefail), package links create nested
   vendor dirs, cmd_unit compiles echo through job().
 
 Deliberately left (documented, not bugs): the five dep-graph DFS walks are not

@@ -3,22 +3,29 @@
 # Plain clang++/clang only; no build system required (truss builds itself via
 # ./truss once built). All generated output lives under build/.
 #
-#   ./setup.sh build              bootstrap libtruss.a + BMI, compile ./truss (self-host CLI)
-#   ./setup.sh bootstrap          libtruss.a + truss BMIs -> build/bootstrap/
-#   ./setup.sh unit               build + run the doctest unit tests (ASan/UBSan)
-#   ./setup.sh examples           compile + run every example flow end-to-end
-#   ./setup.sh installed          installed-tool flow against a staged prefix
-#   ./setup.sh amalgam            generate build/dist/truss_all.hpp + compile/run fixture
-#   ./setup.sh test               unit + examples + installed + amalgam
+# Typical flow:
+#   ./setup.sh build && ./truss debug && ./truss test
+#
+# build & install:
+#   ./setup.sh build              libtruss.a + BMIs (reused when fresh) + ./truss
 #   ./setup.sh install [prefix]   stage libtruss.a + BMIs + truss CLI (default ./.local)
 #   ./setup.sh dist               portable truss binary (static libstdc++) -> build/dist/bin/truss
-#   ./setup.sh bench              benchmark truss vs xmake/make (build/bench/)
-#   ./setup.sh docs               generate the Doxygen reference (build/docs/)
 #   ./setup.sh clean              delete all generated output
-#   ./setup.sh add-package <n>    symlink a local package dir into vendor/ (PKG_ROOT)
+#
+# tests (also run together by `test`):
+#   ./setup.sh test               unit + examples + installed + amalgam
+#   ./setup.sh unit               doctest suite, ASan/UBSan
+#   ./setup.sh examples           every example flow, end to end
+#   ./setup.sh installed          the installed-tool flow against a staged prefix
+#   ./setup.sh amalgam            single-header drop-in: build + compile/run fixture
+#
+# development:
+#   ./setup.sh bootstrap          library + BMIs only (build/bootstrap/; `build` calls it)
+#   ./setup.sh bench              build-system benchmarks (build/bench/)
+#   ./setup.sh docs               Doxygen reference (build/docs/)
 #
 # Env overrides: CXX (default clang++), CC (default clang),
-#                VCPKG_ROOT (required for the vcpkg example), PKG_ROOT (add-package).
+#                VCPKG_ROOT (required for the vcpkg example).
 set -euo pipefail
 INVOCATION_DIR=$(pwd)
 cd "$(dirname "$0")"
@@ -55,6 +62,17 @@ job() { printf '  %s\n' "$*"; "$@"; }
 
 # --- bootstrap: libtruss.a + module BMIs with plain clang++ -------------------
 cmd_bootstrap() {
+    # serialize against a concurrent `./setup.sh` (or a self-rebuild spawning
+    # `setup.sh build`): the body wipes and recreates $OUT
+    mkdir -p build
+    if command -v flock >/dev/null 2>&1; then
+        ( flock 9; _cmd_bootstrap_impl ) 9>"build/.bootstrap.lock"
+    else
+        _cmd_bootstrap_impl
+    fi
+}
+
+_cmd_bootstrap_impl() {
     need_tools
     rm -rf "$OUT"
     mkdir -p "$BMI" "$OBJ"
@@ -89,11 +107,50 @@ cmd_bootstrap() {
     echo "setup: built $OUT/libtruss.a + $OUT/bmi/truss.pcm"
 }
 
+# Copy the bootstrap outputs a command consumes into $1, under the bootstrap
+# lock: the caller then works from a stable private copy even if another
+# `./setup.sh` starts a fresh bootstrap concurrently.
+snapshot_bootstrap() {
+    local dest="$1"
+    rm -rf "$dest"; mkdir -p "$dest"
+    mkdir -p build
+    if command -v flock >/dev/null 2>&1; then
+        ( flock 9
+          cp "$OUT/libtruss.a" "$dest/"
+          cp "$OUT"/bmi/*.pcm "$dest/"
+          cp "$OBJ"/samu_*.o "$dest/" ) 9>"build/.bootstrap.lock"
+    else
+        cp "$OUT/libtruss.a" "$dest/"
+        cp "$OUT"/bmi/*.pcm "$dest/"
+        cp "$OBJ"/samu_*.o "$dest/"
+    fi
+}
+
 # --- self-host CLI: compile truss.cpp (truss's own build script) --------------
+# The library/BMIs are reused when they are newer than every source they were
+# built from: editing truss.cpp (or snowballing through ./truss's self-rebuild)
+# then costs one translation unit, not the whole bootstrap.
+bootstrap_stale() {
+    [ -f "$OUT/libtruss.a" ] && [ -f "$BMI/truss.pcm" ] && [ -f "$BMI/truss_api.pcm" ] || return 0
+    [ -n "$(find src vendor/samurai src/samu -type f \
+        \( -name '*.cpp' -o -name '*.cppm' -o -name '*.c' -o -name '*.h' \) \
+        -newer "$OUT/libtruss.a" -print -quit)" ]
+}
+
 cmd_build() {
-    cmd_bootstrap
+    if bootstrap_stale; then
+        cmd_bootstrap
+    else
+        echo "setup: reusing $OUT/libtruss.a + BMIs (sources unchanged)"
+    fi
     mapfile -t flags < <(consumer_flags)
-    job "$CXX" -std=c++26 -stdlib=libc++ "${flags[@]}" truss.cpp "$OUT/libtruss.a" -o "$INVOCATION_DIR/truss"
+    local depfile="$INVOCATION_DIR/truss.d"
+    job "$CXX" -std=c++26 -stdlib=libc++ "${flags[@]}" -MMD -MF "$depfile" \
+        "$PWD/truss.cpp" "$OUT/libtruss.a" -o "$INVOCATION_DIR/truss"
+    # second depfile rule (same as the init template): the truss artifacts the
+    # executable was built against, so a rebuilt lib/BMI also invalidates ./truss
+    printf 'truss: %s %s %s\n' \
+        "$PWD/$BMI/truss.pcm" "$PWD/$BMI/truss_api.pcm" "$PWD/$OUT/libtruss.a" >> "$depfile"
     echo "setup: built $INVOCATION_DIR/truss — run './truss debug' to build truss with truss"
 }
 
@@ -101,8 +158,14 @@ cmd_build() {
 cmd_unit() {
     need_tools
     cmd_bootstrap
-    local TOBJ="build/unit-obj" UBMI="build/unit-bmi"
+    # per-process scratch: two `./setup.sh unit` runs (or one racing a
+    # self-rebuild) must never delete each other's objects mid-compile
+    local TOBJ="build/unit-obj.$$" UBMI="build/unit-bmi.$$" TBIN="build/truss-tests.$$"
+    local SNAP="build/unit-snap.$$"
+    trap "rm -rf '$TOBJ' '$UBMI' '$TBIN' '$SNAP'" EXIT
     rm -rf "$TOBJ" "$UBMI"; mkdir -p "$TOBJ" "$UBMI"
+    snapshot_bootstrap "$SNAP"
+    cp "$SNAP"/samu_*.o "$TOBJ"/
     local SAN=(-fsanitize=address,undefined)
     # BMIs are regenerated WITH sanitizers: inline libc++ bodies baked into a
     # non-ASan BMI have no-op container annotations; mixing them with
@@ -134,9 +197,9 @@ cmd_unit() {
             -o "$TOBJ/test_$(basename "${src%.cpp}").o"
     done
     # link: sanitized interface units + sanitized core + samu + tests
-    job "$CXX" "${CXXFLAGS[@]}" "$TOBJ"/*.o "$OBJ"/samu_*.o \
-        -fsanitize=address,undefined -o build/truss-tests
-    ./build/truss-tests
+    job "$CXX" "${CXXFLAGS[@]}" "$TOBJ"/*.o \
+        -fsanitize=address,undefined -o "$TBIN"
+    "$TBIN"
 }
 
 # --- examples: compile each example's build script, run its flows -------------
@@ -176,17 +239,21 @@ cmd_install() {
         prefix="$INVOCATION_DIR/$prefix"
     fi
     cmd_bootstrap
+    local SNAP="build/install-snap.$$"
+    snapshot_bootstrap "$SNAP"
     local lib_dest="$prefix/lib/truss"
     local bin_dest="$prefix/bin"
     mkdir -p "$lib_dest" "$bin_dest"
-    cp "$OUT/libtruss.a" "$lib_dest/libtruss.a"
-    cp "$OUT/bmi/truss.pcm" "$lib_dest/truss.pcm"
-    cp "$OUT/bmi/truss_api.pcm" "$lib_dest/truss_api.pcm"
-    
+    cp "$SNAP/libtruss.a" "$lib_dest/libtruss.a"
+    cp "$SNAP/truss.pcm" "$lib_dest/truss.pcm"
+    cp "$SNAP/truss_api.pcm" "$lib_dest/truss_api.pcm"
+
     # Build the truss CLI (TRUSS_INSTALLED_BIN: `truss init` compiled in)
-    mapfile -t flags < <(consumer_flags)
-    job "$CXX" -std=c++26 -stdlib=libc++ -DTRUSS_INSTALLED_BIN "${flags[@]}" truss.cpp "$OUT/libtruss.a" \
-        -o "$bin_dest/truss"
+    job "$CXX" -std=c++26 -stdlib=libc++ -DTRUSS_INSTALLED_BIN \
+        -fmodule-file=truss="$SNAP/truss.pcm" \
+        -fmodule-file=truss:api="$SNAP/truss_api.pcm" \
+        truss.cpp "$SNAP/libtruss.a" -o "$bin_dest/truss"
+    rm -rf "$SNAP"
     
     echo "setup: staged libtruss.a + truss.pcm + truss_api.pcm into $lib_dest"
     echo "setup: installed truss binary to $bin_dest/truss"
@@ -401,26 +468,6 @@ cmd_clean() {
     echo "setup: cleaned"
 }
 
-cmd_add_package() {
-    local pkg_root="${PKG_ROOT:-$HOME/Documents/libs}"
-    if [ $# -eq 0 ]; then
-        command -v fzf >/dev/null 2>&1 || { echo "setup: fzf required for interactive add-package" >&2; exit 1; }
-        local selected
-        selected=$(ls -1 "$pkg_root" | fzf --multi --prompt="Select packages: ") || true
-        [ -z "$selected" ] && { echo "No packages selected."; exit 0; }
-        while IFS= read -r p; do cmd_add_package "$p"; done <<< "$selected"
-        return
-    fi
-    local package="$1"
-    if [ ! -d "$pkg_root/$package" ]; then
-        echo "setup: '$pkg_root/$package' not found." >&2
-        ls -1 "$pkg_root" | grep -i "$package" >&2 || true
-        exit 1
-    fi
-    mkdir -p "vendor/$(dirname "$package")"
-    ln -sf "$pkg_root/$package" "vendor/$package"
-    echo "setup: linked vendor/$package"
-}
 
 case "${1:-build}" in
     build)     cmd_build ;;
@@ -435,7 +482,6 @@ case "${1:-build}" in
     bench)     cmd_bench ;;
     docs)      cmd_docs ;;
     clean)     cmd_clean ;;
-    add-package) shift; cmd_add_package "$@" ;;
     -h|--help|help) usage ;;
     *) echo "setup: unknown command '$1'" >&2; usage >&2; exit 1 ;;
 esac

@@ -1587,11 +1587,14 @@ std::filesystem::path self_exe(std::span<char* const> argv) {
 }
 
 /* nob-style self-rebuild: when the build script (truss.cpp next to the
- * executable) or a header/BMI it depends on (truss.d) is newer than the executable, a stale build graph would be
- * generated — run bootstrap.sh and re-exec with the same argv. Without a
- * bootstrap.sh, report it (via build()) instead of building the stale graph.
+ * executable) or a header/BMI it depends on (truss.d) is newer than the
+ * executable, a stale build graph would be generated — run the project's
+ * rebuild driver and re-exec with the same argv. The driver is either a
+ * `bootstrap.sh` next to the binary (the init template) or, in a truss
+ * checkout, `setup.sh build` (bootstrap.sh was folded into setup.sh). With
+ * neither, report it (via build()) instead of building the stale graph.
  * TRUSS_NO_REBUILD=1 disables the check; TRUSS_REBUILT guards the re-exec loop. */
-std::optional<Error> refresh_build_script(std::span<char* const> argv) {
+std::optional<Error> refresh_build_script(std::span<char* const> argv, bool dry_run) {
     if (const char* off = std::getenv("TRUSS_NO_REBUILD"); off != nullptr && *off != '\0' && *off != '0')
         return std::nullopt;
     const auto exe = self_exe(argv);
@@ -1607,9 +1610,9 @@ std::optional<Error> refresh_build_script(std::span<char* const> argv) {
     if (ec)
         return std::nullopt;
 
-    /* truss.d (written by bootstrap.sh via -MMD) lists the headers truss.cpp
-     * includes plus the truss BMIs/libtruss.a it was built against; without it
-     * (older projects) only truss.cpp itself is compared. */
+    /* truss.d (written by bootstrap.sh / `setup.sh build` via -MMD) lists the
+     * headers truss.cpp includes plus the truss BMIs/libtruss.a it was built
+     * against; without it (older projects) only truss.cpp itself is compared. */
     std::filesystem::path changed;
     if (script_time > exe_time)
         changed = script;
@@ -1626,27 +1629,47 @@ std::optional<Error> refresh_build_script(std::span<char* const> argv) {
     if (changed.empty())
         return std::nullopt;
 
-    const auto bootstrap = dir / "bootstrap.sh";
-    if (std::getenv("TRUSS_REBUILT") != nullptr) {
-        log::warn(changed.string() + " still looks newer than " + exe.string() + " after a rebuild (clock skew?); continuing");
+    if (dry_run) {
+        /* -n changes nothing: report instead of rebuilding */
+        log::warn(changed.filename().string() + " is newer than " + exe.filename().string()
+                  + "; a dry run does not rebuild it (run ./truss once, or ./setup.sh build)");
         return std::nullopt;
     }
-    if (!std::filesystem::is_regular_file(bootstrap, ec))
+    if (std::getenv("TRUSS_REBUILT") != nullptr) {
+        log::warn(changed.filename().string() + " still looks newer than " + exe.filename().string()
+                  + " after a rebuild (clock skew?); continuing");
+        return std::nullopt;
+    }
+    /* rebuild driver, in preference order: a project's bootstrap.sh, then the
+     * truss checkout's setup.sh (whose `build` verb is the old bootstrap) */
+    const auto bootstrap = dir / "bootstrap.sh";
+    const auto setup = dir / "setup.sh";
+    std::vector<std::string> cmd;
+    std::error_code driver_ec;
+    if (std::filesystem::is_regular_file(bootstrap, driver_ec))
+        cmd = {"sh", bootstrap.string()};
+    else if (std::filesystem::is_regular_file(setup, driver_ec))
+        cmd = {"sh", setup.string(), "build"};
+    if (cmd.empty())
         return Error {
             Error::Kind::Config,
-            "build script is stale: " + changed.string() + " is newer than " + exe.string()
-                + "\nrebuild it first (no bootstrap.sh next to it), or set TRUSS_NO_REBUILD=1 to use it anyway",
+            "build script is stale: " + changed.filename().string() + " is newer than "
+                + exe.filename().string()
+                + "\nrebuild it first (`./setup.sh build` in a truss checkout, or a bootstrap.sh"
+                  " next to the binary), or set TRUSS_NO_REBUILD=1 to use it anyway",
             changed,
         };
 
-    log::info(changed.filename().string() + " changed: rebuilding " + exe.filename().string() + " (bootstrap.sh)");
-    const std::array cmd {std::string("sh"), bootstrap.string()};
+    log::info(changed.filename().string() + " changed: rebuilding " + exe.filename().string()
+              + " (" + std::filesystem::path(cmd[1]).filename().string()
+              + (cmd.size() > 2 ? " " + cmd[2] : "") + ")");
     auto outcome = detail::run_process(cmd, false, dir);
     if (!outcome)
         return outcome.error();
     if (outcome->exit_code != 0)
-        return Error {Error::Kind::Command, "rebuilding the build script failed (bootstrap.sh exited with "
-                                                + std::to_string(outcome->exit_code) + ")"};
+        return Error {Error::Kind::Command,
+                      "rebuilding the build script failed (" + std::filesystem::path(cmd[1]).filename().string()
+                          + " exited with " + std::to_string(outcome->exit_code) + ")"};
 
     /* execv needs a NULL-terminated array; argv spans need not be */
     std::vector<char*> args(argv.begin(), argv.end());
@@ -1696,8 +1719,6 @@ constexpr std::string_view kHelp =
 
 Project::Project(std::string name, std::span<char* const> argv) : name_(std::move(name)) {
     detail::log_init_from_env();
-    if (auto stale = refresh_build_script(argv))
-        cli_error_ = std::move(*stale);
 
     std::error_code ec;
     cwd_ = std::filesystem::current_path(ec);
@@ -1765,7 +1786,14 @@ Project::Project(std::string name, std::span<char* const> argv) : name_(std::mov
         }
         else requested_tasks_.emplace_back(a);
     }
-    
+
+    /* self-rebuild last: --help/--version exit above (they need no graph, and
+     * must not pay a bootstrap), an invalid option is reported as typed, and
+     * -n stays side-effect-free. */
+    if (!cli_error_)
+        if (auto stale = refresh_build_script(argv, dry_run_))
+            cli_error_ = std::move(*stale);
+
     // Auto-discover truss modules from standard installation paths
     truss_module_paths_ = os::find_truss_modules();
 }
