@@ -534,3 +534,31 @@ TEST_CASE("zig e2e: x86_64-windows-gnu shared library produces dll + import lib"
     CHECK(std::filesystem::exists(bld / "bin/x64-windows-zig/libx.dll"));
     CHECK(std::filesystem::exists(bld / "lib/x64-windows-zig/libx.dll.a"));
 }
+
+TEST_CASE("dry run: compile_commands() writes nothing, a normal run writes it") {
+    ScratchDir dir {"compdb-dry"};
+    REQUIRE(detail::write_file("app/main.cpp", "int main() { return 0; }\n").has_value());
+    char prog[] = "truss-tests";
+    char dry[] = "-n";
+    {
+        char* argv[] = {prog, dry};
+        Project proj("compdb-dry", 2, argv);
+        proj.configure(Config().toolchain(Toolchain::LLVM));
+        proj.add_executable("app").sources("app/main.cpp");
+        auto r = proj.build();
+        INFO((r ? "ok" : r.error().message));
+        REQUIRE(r.has_value());
+        auto cc = proj.compile_commands();
+        REQUIRE(cc.has_value());
+        CHECK_FALSE(std::filesystem::exists("compile_commands.json"));
+    }
+    {
+        char* argv[] = {prog};
+        Project proj("compdb-dry", 1, argv);
+        proj.configure(Config().toolchain(Toolchain::LLVM));
+        proj.add_executable("app").sources("app/main.cpp");
+        REQUIRE(proj.build().has_value());
+        REQUIRE(proj.compile_commands().has_value());
+        CHECK(std::filesystem::exists("compile_commands.json"));
+    }
+}

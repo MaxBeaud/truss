@@ -1811,6 +1811,10 @@ std::filesystem::path Project::build_dir() const {
 }
 
 Result<void> Project::compile_commands(const std::filesystem::path& path) {
+    /* -n promises no side effects: a build script that exports the database
+     * after build() (truss.cpp does) must not write it in a dry run either */
+    if (dry_run_)
+        return {};
     // If path is a directory, use compile_commands.json inside it
     auto output_path = path;
     if (std::error_code dir_ec; std::filesystem::is_directory(path, dir_ec)) {
