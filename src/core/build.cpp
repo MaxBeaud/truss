@@ -2367,8 +2367,6 @@ Result<void> Project::build() {
      * once after the first successful one; a failing hook aborts. A dry run
      * reports the graph without side effects, so hooks never fire. */
     bool hooks_pre_done = false, hooks_post_done = false;
-    bool samu_ran = false;
-    long long samu_ms = 0;
     auto run_samu = [&](std::span<const std::string> targets) -> Result<void> {
         if (!hooks_pre_done && !dry_run_) {
             for (auto& fn : pre_build_)
@@ -2379,8 +2377,12 @@ Result<void> Project::build() {
         const auto samu_start = std::chrono::steady_clock::now();
         if (auto r = detail::samu_build(manifest.generic_string(), jobs_, verbose_, dry_run_, explain_, targets); !r)
             return r;
-        samu_ms += ms_since(samu_start);
-        samu_ran = true;
+        /* the phase line belongs to the build, not to the invocation: tests,
+         * `run` output and user tasks must come after it */
+        std::string phase = std::to_string(ms_since(samu_start)) + " ms";
+        if (dry_run_)
+            phase += " \u00b7 dry run";
+        log::step("build", phase);
         if (!hooks_post_done && !dry_run_) {
             for (auto& fn : post_build_)
                 if (auto r = fn(ctx); !r)
@@ -2640,11 +2642,11 @@ Result<void> Project::build() {
                         "machine than the host; configure a runner (e.g. wine for Windows builds, "
                         "qemu for foreign architectures) to execute it",
                     });
+                if (auto r = run_samu(std::span(exe_outputs).first(1)); !r)
+                    return r;
                 if (exe_outputs.size() > 1)
                     log::info("running '" + exe_names.front() + "' (" + std::to_string(exe_outputs.size())
                               + " executables; pick one with --target NAME)");
-                if (auto r = run_samu(std::span(exe_outputs).first(1)); !r)
-                    return r;
                 if (dry_run_) { /* a dry run must not execute the binary */
                     log::info("dry run: would run " + exe_outputs.front());
                     return {};
@@ -2688,12 +2690,6 @@ Result<void> Project::build() {
         }
     }
 
-    if (samu_ran) {
-        std::string phase = std::to_string(samu_ms) + " ms";
-        if (dry_run_)
-            phase += " \u00b7 dry run";
-        log::step("build", phase);
-    }
     return {};
 }
 
