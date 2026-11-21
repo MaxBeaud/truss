@@ -2,7 +2,10 @@ module;
 #include <doctest/doctest.h>
 
 #include <array>
+#include <filesystem>
 #include <string>
+
+#include <unistd.h>
 
 module truss;
 import :api;
@@ -25,6 +28,19 @@ TargetTriple clang_triple() {
 bool contains(std::string_view hay, std::string_view needle) {
     return hay.find(needle) != std::string_view::npos;
 }
+
+/* chdir RAII for the dry-run manifest tests */
+struct ScratchDir {
+    std::filesystem::path prev;
+    explicit ScratchDir(const std::string& name) {
+        prev = std::filesystem::current_path();
+        const auto dir = std::filesystem::temp_directory_path() / ("truss-flags-test-" + name);
+        std::filesystem::remove_all(dir);
+        std::filesystem::create_directories(dir);
+        REQUIRE(chdir(dir.c_str()) == 0);
+    }
+    ~ScratchDir() { chdir(prev.c_str()); }
+};
 
 } // namespace
 
@@ -399,4 +415,125 @@ TEST_CASE("flags: library and framework names are validated, not interpolated") 
     auto r = link(std::array<std::string, 0> {}, bad_fw);
     REQUIRE_FALSE(r.has_value());
     CHECK(r.error().kind == Error::Kind::Config);
+}
+
+TEST_CASE("flags: C standard is per-target and never touches C++ flags") {
+    const auto t = clang_triple();
+    const std::array<std::string, 0> none {};
+    const auto flags_for = [&](CStandard c) {
+        return detail::build_flags(t, BuildMode::Debug, CppStandard::Cpp23, Warnings::Default,
+                                   DebugInfo::Default, Optimization::Default, Sanitizer::Default,
+                                   Lto::Default, Hardening::None, false, none, none, "", none, c);
+    };
+    auto def = flags_for(CStandard::Default);
+    REQUIRE(def.has_value());
+    CHECK(contains(def->compile_c, "-std=gnu17")); /* today's default is unchanged */
+    CHECK(contains(def->compile, "-std=c++23"));
+
+    for (const auto& [c, flag] : {std::pair{CStandard::C99, "-std=c99"},
+                                  std::pair{CStandard::C11, "-std=c11"},
+                                  std::pair{CStandard::C17, "-std=c17"},
+                                  std::pair{CStandard::C23, "-std=c23"}}) {
+        auto r = flags_for(c);
+        INFO(flag);
+        REQUIRE(r.has_value());
+        CHECK(contains(r->compile_c, flag));
+        CHECK_FALSE(contains(r->compile_c, "-std=gnu17"));
+        CHECK_FALSE(contains(r->compile, flag)); /* C++ side untouched */
+    }
+}
+
+TEST_CASE("flags: c_flags() applies to C sources only") {
+    const auto t = clang_triple();
+    const std::array<std::string, 0> none {};
+    auto r = detail::build_flags(t, BuildMode::Debug, CppStandard::Default, Warnings::Default,
+                                 DebugInfo::Default, Optimization::Default, Sanitizer::Default,
+                                 Lto::Default, Hardening::None, false, none, none,
+                                 "-DSHARED=1", none, CStandard::Default, "-DC_ONLY=1 -ffast-math");
+    REQUIRE(r.has_value());
+    CHECK(contains(r->compile, "-DSHARED=1"));
+    CHECK(contains(r->compile_c, "-DSHARED=1"));
+    CHECK(contains(r->compile_c, "-DC_ONLY=1 -ffast-math"));
+    CHECK_FALSE(contains(r->compile, "-DC_ONLY=1"));
+    CHECK_FALSE(contains(r->compile, "-ffast-math"));
+}
+
+TEST_CASE("flags: MSVC accepts C11/C17 and rejects C99/C23") {
+    TargetTriple t = clang_triple();
+    t.family = CompilerFamily::Msvc;
+    t.compiler = "clang-cl";
+    t.ar = "llvm-lib";
+    const std::array<std::string, 0> none {};
+    const auto flags_for = [&](CStandard c) {
+        return detail::build_flags(t, BuildMode::Debug, CppStandard::Default, Warnings::Default,
+                                   DebugInfo::Default, Optimization::Default, Sanitizer::Default,
+                                   Lto::Default, Hardening::None, false, none, none, "", none, c);
+    };
+    auto c11 = flags_for(CStandard::C11);
+    REQUIRE(c11.has_value());
+    CHECK(contains(c11->compile_c, "/std:c11"));
+    auto c17 = flags_for(CStandard::C17);
+    REQUIRE(c17.has_value());
+    CHECK(contains(c17->compile_c, "/std:c17"));
+    for (const auto c : {CStandard::C99, CStandard::C23}) {
+        auto r = flags_for(c);
+        REQUIRE_FALSE(r.has_value());
+        CHECK(r.error().kind == Error::Kind::Config);
+        CHECK(contains(r.error().message, "MSVC has no such C mode"));
+    }
+}
+
+TEST_CASE("sources_in: .ixx interface units are picked up like .cppm") {
+    ScratchDir dir {"ixx"};
+    REQUIRE(detail::write_file("src/mod.ixx", "export module m;\nexport int f() { return 1; }\n").has_value());
+    REQUIRE(detail::write_file("src/main.cpp", "import m;\nint main() { return f(); }\n").has_value());
+    char prog[] = "truss-tests";
+    char dry[] = "-n";
+    char* argv[] = {prog, dry};
+    Project proj("ixx", 2, argv);
+    proj.configure(Config().toolchain(Toolchain::LLVM));
+    proj.add_static_library("m").sources_in("src");
+    auto r = proj.build();
+    INFO((r ? "ok" : r.error().message));
+    REQUIRE(r.has_value());
+    auto manifest = detail::read_file("build/debug/ninja/build.ninja");
+    REQUIRE(manifest.has_value());
+    CHECK(contains(*manifest, "src/mod.ixx"));
+    CHECK(contains(*manifest, "compile_bmi"));
+}
+
+TEST_CASE("c_flags: reaches the C edge in a mixed target, not the C++ edge") {
+    ScratchDir dir {"mixed"};
+    REQUIRE(detail::write_file("src/a.c", "int a(void) { return 1; }\n").has_value());
+    REQUIRE(detail::write_file("src/b.cpp", "int b() { return 2; }\n").has_value());
+    char prog[] = "truss-tests";
+    char dry[] = "-n";
+    char* argv[] = {prog, dry};
+    Project proj("mixed", 2, argv);
+    proj.configure(Config().toolchain(Toolchain::LLVM));
+    proj.add_static_library("mix").sources_in("src")
+        .c_standard(CStandard::C11)
+        .c_flags("-DC_ONLY=1");
+    auto r = proj.build();
+    INFO((r ? "ok" : r.error().message));
+    REQUIRE(r.has_value());
+    auto manifest = detail::read_file("build/debug/ninja/build.ninja");
+    REQUIRE(manifest.has_value());
+    /* one build statement per source: from its `build` line to the blank line
+     * that ends the edge (the flags live in the indented variable block) */
+    const auto edge_for = [&](std::string_view name) {
+        const auto at = manifest->find(std::string(name));
+        REQUIRE(at != std::string::npos);
+        const auto start = manifest->rfind("\nbuild ", at);
+        REQUIRE(start != std::string::npos);
+        const auto end = manifest->find("\n\n", at);
+        REQUIRE(end != std::string::npos);
+        return manifest->substr(start, end - start);
+    };
+    const std::string c_edge = edge_for("src/a.c");
+    const std::string cxx_edge = edge_for("src/b.cpp");
+    CHECK(contains(c_edge, "-std=c11"));
+    CHECK(contains(c_edge, "-DC_ONLY=1"));
+    CHECK_FALSE(contains(cxx_edge, "-DC_ONLY=1"));
+    CHECK_FALSE(contains(cxx_edge, "-std=c11"));
 }

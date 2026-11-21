@@ -927,7 +927,7 @@ Result<void> emit_manifest(const Project& proj, std::vector<ResolvedTarget>& res
         auto cflags = detail::build_flags(r.triple, proj.mode(), t.cpp_standard(), t.warnings(),
                                           t.debug_info(), t.optimization(), t.sanitizer(), t.lto(),
                                           t.hardening(), pic, defines, includes, user_flags,
-                                          usage.system_includes);
+                                          usage.system_includes, t.c_standard(), t.c_flags());
         if (!cflags)
             return std::unexpected(cflags.error());
 

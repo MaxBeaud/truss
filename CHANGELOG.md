@@ -10,6 +10,15 @@ a major version.
 
 ### Added
 
+- **C projects are first-class** — `c_standard(C99|C11|C17|C23)` selects the
+  `.c` standard per target (`Default` stays `gnu17`; MSVC accepts `C11`/`C17`
+  as `/std:c11` / `/std:c17` and rejects `C99`/`C23` with a clear error), and
+  `c_flags("...")` adds raw options for C sources only (C and C++ usually want
+  different ones; `flags()` still covers both). `.ixx` module interface units
+  are now picked up by `sources_in()` like `.cppm`; the README gained a
+  file-format matrix (headers are language-agnostic: never compiled, so the
+  `.h`/`.hpp` distinction is not enforced by design).
+
 - **Module-scan result cache** — compiler scans (~10 ms per TU) are cached
   under `build/<mode>/scan-cache/`, keyed by source path, mtime, size,
   compile flags and compiler identity. An unchanged tree now rescans nothing:

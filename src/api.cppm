@@ -66,6 +66,14 @@ enum class BuildMode { Debug, Release };
 
 /// C++ standard (`Default` = C++23).
 enum class CppStandard { Default = 0, Cpp11, Cpp14, Cpp17, Cpp20, Cpp23, Cpp26 };
+/// C standard for a target's `.c` sources (`Default` = gnu17, today's default).
+enum class CStandard {
+    Default = 0, ///< `-std=gnu17` (GNU extensions on)
+    C99,         ///< `-std=c99`
+    C11,         ///< `-std=c11`
+    C17,         ///< `-std=c17`
+    C23,         ///< `-std=c23` (MSVC has no C23 mode)
+};
 /// Warning level (`Default` = -Wall -Wextra).
 enum class Warnings {
     Default = 0, ///< -Wall -Wextra
@@ -788,7 +796,9 @@ public:
         append_strings(self.source_patterns_, std::forward<R>(patterns));
         return self;
     }
-    /// Every .cpp/.cc/.c under `dir`, recursively.
+    /// Every compilable source under `dir`, recursively (`.cpp`, `.cc`, `.cxx`,
+    /// `.c`, `.cppm`, `.ixx`). Headers are never compiled; see the README's
+    /// file-format matrix.
     template <class Self>
     Self& sources_in(this Self& self, std::string_view dir) {
         std::string d(dir);
@@ -802,7 +812,7 @@ public:
          * double-star patterns keep their leading slash out of comments:
          * doxygen's scanner counts a slash-star-star sequence as a nested
          * comment open) */
-        for (const std::string_view suffix : {"**.cpp", "**.cc", "**.cxx", "**.c", "**.cppm"})
+        for (const std::string_view suffix : {"**.cpp", "**.cc", "**.cxx", "**.c", "**.cppm", "**.ixx"})
             self.source_patterns_.push_back(d + "/" + suffix);
         return self;
     }
@@ -963,6 +973,19 @@ public:
         return self;
     }
     /**
+     * \brief Raw compile flags for this target's **C sources only** (appended
+     * verbatim; repeat calls accumulate). `flags()` still applies to both
+     * languages, so put C-specific options here (`-ffast-math`, `-std=` extras,
+     * C-only defines).
+     */
+    template <class Self>
+    Self& c_flags(this Self& self, std::string_view raw) {
+        if (!self.c_flags_.empty() && !raw.empty())
+            self.c_flags_ += ' ';
+        self.c_flags_ += raw;
+        return self;
+    }
+    /**
      * \brief Raw compile flags for this target *and* every dependent,
      * transitively (CMake's PUBLIC), e.g. `-pthread`, `-fno-rtti` for a library
      * whose ABI needs it. Appended verbatim; repeat calls accumulate.
@@ -986,6 +1009,13 @@ public:
     /// C++ standard (Default = C++23).
     template <class Self>
     Self& cpp_standard(this Self& self, CppStandard s) { self.std_ = s; return self; }
+    /**
+     * \brief C standard for this target's `.c` sources (Default = `gnu17`).
+     * C++ sources are unaffected; MSVC has no C99/C23 mode (Config error) and
+     * accepts `C11`/`C17` as `/std:c11` / `/std:c17`.
+     */
+    template <class Self>
+    Self& c_standard(this Self& self, CStandard s) { self.c_std_ = s; return self; }
     /// Warning level (Default = -Wall -Wextra).
     template <class Self>
     Self& warnings(this Self& self, Warnings w) { self.warnings_ = w; return self; }
@@ -1156,8 +1186,10 @@ public:
     const std::vector<std::string>& frameworks() const { return frameworks_; }
     const std::vector<std::string>& framework_paths() const { return framework_paths_; }
     const std::string& flags() const { return flags_; }
+    const std::string& c_flags() const { return c_flags_; }
     const std::string& linker_flags() const { return linker_flags_; }
     CppStandard cpp_standard() const { return std_; }
+    CStandard c_standard() const { return c_std_; }
     Warnings warnings() const { return warnings_; }
     DebugInfo debug_info() const { return debug_; }
     Optimization optimization() const { return optimization_; }
@@ -1206,8 +1238,9 @@ private:
     std::vector<std::string> include_dirs_, defines_, link_libs_, link_paths_;
     std::vector<std::string> system_include_dirs_, public_defines_, public_flags_;
     std::vector<std::string> frameworks_, framework_paths_;
-    std::string flags_, linker_flags_;
+    std::string flags_, c_flags_, linker_flags_;
     CppStandard std_ {};
+    CStandard c_std_ {};
     Warnings warnings_ {};
     DebugInfo debug_ {};
     Optimization optimization_ {};

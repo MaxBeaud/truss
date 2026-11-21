@@ -67,6 +67,10 @@ Result<std::string> link_name(std::string_view value, std::string_view what) {
 constexpr std::array<std::string_view, 7> kStdFlags {
     "", "-std=c++11", "-std=c++14", "-std=c++17", "-std=c++20", "-std=c++23", "-std=c++26",
 };
+/* C standards (index = CStandard; Default keeps the historical gnu17). */
+constexpr std::array<std::string_view, 5> kCStdFlags {
+    "-std=gnu17", "-std=c99", "-std=c11", "-std=c17", "-std=c23",
+};
 constexpr std::array<std::string_view, 5> kWarningFlags {
     "", "-w", "-Wall", "-Wall -Wextra", "-Wall -Wextra -Wpedantic",
 };
@@ -122,6 +126,10 @@ constexpr std::array<std::string_view, 5> kHardeningLinkFlags {
 constexpr std::array<std::string_view, 7> kStdFlagsMsvc {
     "/std:c++latest", "/std:c++14", "/std:c++14", "/std:c++17", "/std:c++20", "/std:c++latest",
     "/std:c++latest",
+};
+/* MSVC has no C99/C23 mode: C11 and C17 only (validated below). */
+constexpr std::array<std::string_view, 5> kCStdFlagsMsvc {
+    "/std:c17", "", "/std:c11", "/std:c17", "",
 };
 constexpr std::array<std::string_view, 5> kWarningFlagsMsvc {
     "", "/W0", "/W3", "/W4", "/W4",
@@ -368,7 +376,8 @@ Result<FlagSet> build_flags(const TargetTriple& triple, BuildMode mode,
                             bool pic, std::span<const std::string> defines,
                             std::span<const std::string> includes,
                             std::string_view user_flags,
-                            std::span<const std::string> system_includes) {
+                            std::span<const std::string> system_includes,
+                            CStandard c_std, std::string_view user_c_flags) {
     if (auto r = require_supported(triple); !r)
         return std::unexpected(r.error());
 
@@ -377,7 +386,16 @@ Result<FlagSet> build_flags(const TargetTriple& triple, BuildMode mode,
     /* C++ and C variants share everything except the -std flag */
     const auto stdi = static_cast<std::size_t>(std_opt == CppStandard::Default ? CppStandard::Cpp23 : std_opt);
     add(fs.compile, msvc ? kStdFlagsMsvc[stdi] : kStdFlags[stdi]);
-    add(fs.compile_c, msvc ? "/std:c17" : "-std=gnu17");
+    const auto ci = static_cast<std::size_t>(c_std);
+    if (ci >= kCStdFlags.size())
+        return std::unexpected(Error {Error::Kind::Config, "invalid C standard selection"});
+    if (msvc && (c_std == CStandard::C99 || c_std == CStandard::C23))
+        return std::unexpected(Error {
+            Error::Kind::Config,
+            std::string("c_standard(") + (c_std == CStandard::C99 ? "C99" : "C23")
+                + "): MSVC has no such C mode (C11 and C17 are the supported ones)",
+        });
+    add(fs.compile_c, msvc ? kCStdFlagsMsvc[ci] : kCStdFlags[ci]);
     auto add_both = [&](std::string_view f) {
         add(fs.compile, f);
         add(fs.compile_c, f);
@@ -433,6 +451,8 @@ Result<FlagSet> build_flags(const TargetTriple& triple, BuildMode mode,
         add_both(msvc ? "/external:I\"" + i + "\"" : "-isystem " + sh_dq(i));
 
     add_both(user_flags);
+    /* C-only options last, like flags() for both languages */
+    add(fs.compile_c, user_c_flags);
     return fs;
 }
 

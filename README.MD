@@ -78,6 +78,7 @@ Without either it stops with an error asking for a rebuild instead.
 - [The build script](#the-build-script)
   - [Targets](#targets)
   - [Sources & globbing](#sources--globbing)
+  - [File formats](#file-formats)
   - [Usage requirements & propagation](#usage-requirements--propagation)
   - [Compiler options](#compiler-options)
   - [Hardening](#hardening)
@@ -257,8 +258,8 @@ proj.add_executable("app").sources_in("src").depends_on(proj.conan({"zlib/1.3.1"
 ### Sources & globbing
 
 `sources(...)` takes a pattern, a brace list, or any range of strings.
-`sources_in(dir)` is the common case: every `.cpp/.cc/.cxx/.c/.cppm` under
-`dir`, recursively. Patterns are relative to the project root and support:
+`sources_in(dir)` is the common case: every compilable source
+(`.cpp/.cc/.cxx/.c/.cppm/.ixx`) under `dir`, recursively. Patterns are relative to the project root and support:
 
 | Syntax | Meaning |
 |---|---|
@@ -266,6 +267,22 @@ proj.add_executable("app").sources_in("src").depends_on(proj.conan({"zlib/1.3.1"
 | `**` | anything across components (`src/**.cpp` = all C++ under `src/`); as a full component (`**/x.cpp`) it matches whole components only |
 | `?` | exactly one character |
 | `{a,b}` | alternation (`src/*.{cpp,c}`) |
+
+### File formats
+
+Language is decided by extension, per source file; a target may freely mix
+them (a C library and a C++ app can even live in the same target):
+
+| Extension | Compiled as | Module scan | PCH | Unity | Notes |
+|---|---|---|---|---|---|
+| `.cpp` `.cc` `.cxx` | C++ (`compile_cxx`, `$cxx`) | yes | yes | yes | |
+| `.cppm` `.ixx` | module interface unit (BMI + object) | yes | never | never | one interface unit per module name |
+| `.c` | C (`compile_c`, the C driver: `clang`, `gcc`, `zig cc`) | — | never | not batched | links through the C++ driver; `--as-needed` keeps libstdc++ out of pure-C binaries |
+| `.h` `.hpp` `.hh` `.hxx` | never compiled | — | via `pch("header")` | — | headers reach the compiler through `-I`, depfiles and PCH only — the extension is irrelevant to truss (there is deliberately no "no `.h` in C++" policy) |
+
+Anything else is a `Config` error naming the file; prebuilt binaries are not
+sources (use `import_library(...).import_archive(...)`). `sources_in(dir)`
+globs exactly the compilable extensions above (`.cpp/.cc/.cxx/.c/.cppm/.ixx`).
 
 Hidden files (any wildcard-matched component starting with `.`) are skipped.
 A pattern that matches nothing is fine; a *literal* source that doesn't exist
@@ -313,6 +330,7 @@ This is what makes package managers ergonomic: `conan()`/`vcpkg()` return an
 | Method | Values | Default |
 |---|---|---|
 | `cpp_standard(...)` | `Cpp11 … Cpp26` | C++23 |
+| `c_standard(...)` | `C99, C11, C17, C23` (C++ sources unaffected; MSVC: `C11`/`C17` only) | `gnu17` |
 | `warnings(...)` | `None, Minimal, All, Pedantic` | `-Wall -Wextra` |
 | `debug_info(...)` | `None, Minimal, Medium, Full` | Full in debug, none in release |
 | `optimization(...)` | `None, O1, O2, Size, O3` | `-O0` debug, `-O2` release |
@@ -325,7 +343,8 @@ This is what makes package managers ergonomic: `conan()`/`vcpkg()` return an
 | `unity(bool)` | batch sources into 16-source TUs | off (see below) |
 | `cross_target(triple)` | see [Cross-compiling](#cross-compiling--msvc) | host |
 | `is_test(bool)` | mark as a test for the `test` command | false |
-| `flags("...")` | raw compiler flags, verbatim (repeat calls accumulate) | — |
+| `flags("...")` | raw compiler flags, verbatim; applies to C **and** C++ (repeat calls accumulate) | — |
+| `c_flags("...")` | raw flags for this target's **C sources only** (repeat calls accumulate) | — |
 | `linker_flags("...")` | raw linker flags, verbatim (repeat calls accumulate) | — |
 
 `Default` enum values always resolve per mode (e.g. `DebugInfo::Default` →

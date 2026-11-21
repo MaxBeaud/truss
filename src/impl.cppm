@@ -236,7 +236,7 @@ Result<ModuleUnitInfo> scan_module_unit_cached(const std::filesystem::path& cach
 /// \ingroup grp_internals
 struct FlagSet {
     std::string compile;   ///< flags for C++ compile edges
-    std::string compile_c; ///< flags for C compile edges (gnu17 instead of c++XX)
+    std::string compile_c; ///< flags for C compile edges (C standard + c_flags())
 };
 
 /// Link flags split by where they belong: driver-side flags go before the
@@ -269,7 +269,9 @@ Result<FlagSet> build_flags(const TargetTriple& triple, BuildMode mode,
                             bool pic, std::span<const std::string> defines,
                             std::span<const std::string> includes,
                             std::string_view user_flags,
-                            std::span<const std::string> system_includes = {});
+                            std::span<const std::string> system_includes = {},
+                            CStandard c_std = CStandard::Default,
+                            std::string_view user_c_flags = {});
 /// Build the link flag strings (sanitizers/LTO/hardening/stdlib/libs/frameworks).
 /// `static_libs` are linked through `-Wl,-Bstatic ... -Wl,-Bdynamic` (before the
 /// dynamic `libs`, so a static archive's own -l needs resolve to the right);
