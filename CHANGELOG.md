@@ -8,6 +8,14 @@ a major version.
 
 ## [Unreleased]
 
+### Changed
+
+- `./setup.sh install` now defaults to the standard user prefix `~/.local`
+  (binary in `~/.local/bin`, modules in `~/.local/lib/truss`) instead of a
+  `.local/` directory inside the checkout, and warns when that `bin` directory
+  is not on `PATH`. An explicit prefix argument still wins; relative prefixes
+  resolve against the invocation directory.
+
 ### Added
 
 - **Target-level build/artifact switches** — `as_shared(bool)`,

@@ -1012,8 +1012,11 @@ self-host `truss-dist` target in release mode (`truss init` built in,
 dependency is glibc.
 
 `./setup.sh install [prefix]` stages `libtruss.a`, the module BMIs, and the `truss`
-binary into `prefix` (default `.local/` relative to the invocation directory). An
-installed truss automatically discovers its module files from the installation location.
+binary into `prefix` (default `~/.local`, the standard user prefix, so the
+binary lands in `~/.local/bin`; a relative prefix is resolved against the
+invocation directory). It prints a reminder when that `bin` directory is not on
+`PATH`. An installed truss automatically discovers its module files from the
+installation location.
 
 The discovery can be overridden with the `TRUSS_INSTALL_PREFIX` environment variable,
 which should point to the installation prefix (not the lib/truss subdirectory).

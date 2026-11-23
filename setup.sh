@@ -8,7 +8,7 @@
 #
 # build & install:
 #   ./setup.sh build              libtruss.a + BMIs (reused when fresh) + ./truss
-#   ./setup.sh install [prefix]   stage libtruss.a + BMIs + truss CLI (default ./.local)
+#   ./setup.sh install [prefix]   stage libtruss.a + BMIs + truss CLI (default ~/.local)
 #   ./setup.sh dist               portable truss binary (static libstdc++) -> build/dist/bin/truss
 #   ./setup.sh clean              delete all generated output
 #
@@ -237,8 +237,10 @@ cmd_examples() {
 
 # --- installed-tool flow: stage a prefix, build against it --------------------
 cmd_install() {
-    local prefix="${1:-.local}"
-    # If prefix is relative, make it absolute relative to INVOCATION_DIR
+    # The installed-tool default is the standard user prefix (~/.local), so
+    # `truss` lands on PATH (~/.local/bin) instead of inside a checkout.
+    local prefix="${1:-$HOME/.local}"
+    # A relative prefix is still resolved against the invocation dir
     if [[ "$prefix" != /* ]]; then
         prefix="$INVOCATION_DIR/$prefix"
     fi
@@ -261,6 +263,10 @@ cmd_install() {
     
     echo "setup: staged libtruss.a + truss.pcm + truss_api.pcm into $lib_dest"
     echo "setup: installed truss binary to $bin_dest/truss"
+    case ":$PATH:" in
+        *":$bin_dest:"*) ;;
+        *) echo "setup: note: $bin_dest is not on PATH; add it to run 'truss' from anywhere" ;;
+    esac
 }
 
 cmd_installed() {
