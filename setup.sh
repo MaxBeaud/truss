@@ -254,8 +254,8 @@ cmd_install() {
     cp "$SNAP/truss.pcm" "$lib_dest/truss.pcm"
     cp "$SNAP/truss_api.pcm" "$lib_dest/truss_api.pcm"
 
-    # Build the truss CLI (TRUSS_INSTALLED_BIN: `truss init` compiled in)
-    job "$CXX" -std=c++26 -stdlib=libc++ -DTRUSS_INSTALLED_BIN \
+    # Build the truss CLI (truss.cpp carries `truss init` in every build)
+    job "$CXX" -std=c++26 -stdlib=libc++ \
         -fmodule-file=truss="$SNAP/truss.pcm" \
         -fmodule-file=truss:api="$SNAP/truss_api.pcm" \
         truss.cpp "$SNAP/libtruss.a" -o "$bin_dest/truss"

@@ -1,24 +1,24 @@
-// truss's own build script — truss building truss.
+// truss's own build script — truss building truss, and the shipped CLI.
 //
-// Build this script once (xmake `truss-cli` target, or bootstrap.sh artifacts),
-// then `./truss debug` produces build/debug/bin/<triple>/truss — truss compiled
-// by itself. Unit tests (doctest) run through ./setup.sh unit and are not part
-// of the self-host graph.
+// Build the first ./truss with ./setup.sh build (plain clang++), then
+// `./truss debug` rebuilds truss with truss. Unit tests (doctest) run through
+// ./setup.sh unit and are not part of the self-host graph.
+//
+// This file is also the CLI front-end (`truss init`, and the usage printed
+// outside a checkout): cli/init.hpp is compiled into every binary, with its
+// templates #embed'ed (~3 KB). `truss-dist` differs only in static linking.
 import truss;
 
-#ifdef TRUSS_INSTALLED_BIN
 #include <cstdio>
 #include <filesystem>
 #include <span>
 #include <string_view>
 
 #include "cli/init.hpp"
-#endif
 
 int main(int argc, char** argv) {
-#ifdef TRUSS_INSTALLED_BIN
-    /* installed binary: CLI verbs first; outside a truss checkout the
-     * self-build below has nothing to build */
+    /* CLI verbs first; outside a truss checkout the self-build below has
+     * nothing to build */
     const std::span<char* const> args(argv, static_cast<std::size_t>(argc));
     if (args.size() >= 2 && std::string_view(args[1]) == "init")
         return truss::cli::init(args.subspan(2));
@@ -31,7 +31,7 @@ int main(int argc, char** argv) {
                    want_help ? stdout : stderr);
         return args.size() >= 2 && !want_help ? 2 : 0;
     }
-#endif
+
     truss::Project proj{"truss", argc, argv};
 
     /* vendored samurai (C17): samu.c excluded, its main() is replaced by
@@ -57,13 +57,12 @@ int main(int argc, char** argv) {
         .cpp_standard(truss::CppStandard::Cpp26)
         .depends_on(lib);
 
-    /* the shippable binary: `truss init` compiled in, every dependency and
-     * the C++ runtime (libstdc++/libgcc) linked statically -> needs only
-     * glibc at runtime. Build just this one: ./truss release --target truss-dist */
+    /* the shippable binary: same source, every dependency and the C++ runtime
+     * (libstdc++/libgcc) linked statically -> needs only glibc at runtime.
+     * Build just this one: ./truss release --target truss-dist */
     proj.add_executable("truss-dist")
         .sources("truss.cpp")
         .cpp_standard(truss::CppStandard::Cpp26)
-        .defines("TRUSS_INSTALLED_BIN")
         .static_deps()
         .static_stdlib(truss::StaticStdlib::Gcc)
         .depends_on(lib);

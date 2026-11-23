@@ -135,9 +135,9 @@ cd my-app && ./bootstrap.sh && ./truss test
 ```
 
 `bootstrap.sh` is pre-wired to the modules next to the `truss` binary
-(`TRUSS_LIB=... ./bootstrap.sh` overrides it). `init` only exists in installed
-binaries (`-DTRUSS_INSTALLED_BIN`): the templates are `#embed`ded from
-`cli/templates/init/`, so vendored and single-header users never carry them.
+(`TRUSS_LIB=... ./bootstrap.sh` overrides it). `init` is compiled into every
+truss binary: its templates are `#embed`ded from `cli/templates/init/`
+(~3 KB), so nothing extra ships alongside the executable.
 
 **3. Single header (drop-in).** No modules, no link step:
 

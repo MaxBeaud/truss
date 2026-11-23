@@ -55,6 +55,9 @@ A C++26 build-system library: build scripts are ordinary C++ programs
 - `src/core/*.cpp` — implementation units (`module truss;`).
 - Dependency direction, no cycles: `fs/proc/log` ← `target/flags` ←
   `ninja/modules` ← `pkg` ← `build`.
+- `truss.cpp` (repo root) is both truss's build script and the shipped CLI's
+  `main` (`truss init`, outside-checkout usage); there is no separate CLI
+  source. `truss-dist` is the same TU with static linking.
 - Vendored samurai is C17 and **patched only as documented** in
   `vendor/samurai/TRUSS-VENDOR.txt`; all contact goes through `src/samu/shim.c`
   and `src/samu/truss_samu.h`.

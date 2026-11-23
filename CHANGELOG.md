@@ -28,6 +28,9 @@ a major version.
 
 ### Changed
 
+- `truss init` is compiled into every truss binary (templates `#embed`ed,
+  ~3 KB); the internal `TRUSS_INSTALLED_BIN` switch is gone and `truss-dist`
+  now differs from the dev binary only in static linking.
 - `./setup.sh install` defaults to `~/.local` (PATH-visible) and warns when the
   staged `bin` is not on `PATH`.
 - `--for SUBGRAPH` restricts plain builds too, not just `test`/`run`.

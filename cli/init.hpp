@@ -1,10 +1,8 @@
-// truss init — project scaffolding for the installed truss binary.
+// truss init — project scaffolding, compiled into every truss binary.
 //
-// Only compiled into binaries built with -DTRUSS_INSTALLED_BIN (the
-// `truss-dist` self-host target and `./setup.sh install`): vendored and
-// single-header (amalgam) users never pay for the templates. The template
-// files are embedded at compile time with #embed (C++26 / P1967), so the
-// binary is self-contained and the templates stay plain files in the repo
+// The template files are embedded at compile time with #embed (C++26 /
+// P1967) from cli/templates/init/, so the binary is self-contained and the
+// templates stay plain files in the repo
 // (cli/templates/init/*.in, @NAME@ / @IDENT@ / @TRUSS_LIB@ substituted at
 // generation time). Include after `import truss;`.
 #pragma once
