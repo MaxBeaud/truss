@@ -12,11 +12,11 @@ a major version.
 
 - **Target-level build/artifact switches** — `as_shared(bool)`,
   `output_name("name")`, `build_by_default(bool)`, `default_target()`,
-  `symbols_hidden()` and `not_linkable()` (runtime-loaded plugins: a
-  `depends_on()` on one is a Config error). Conflicts are validated
-  (duplicate output names, two default targets per subgraph, non-shared
-  `not_linkable`), and artifact paths are checked for uniqueness after
-  resolution. New `examples/plugin` demonstrates a `dlopen` plugin host.
+  `symbols_hidden()` and `not_linkable()` (a shared library loaded at runtime:
+  `depends_on()` on one is a Config error). Conflicts are validated (duplicate
+  output names, two default targets per subgraph, non-shared `not_linkable`),
+  and artifact paths are checked for uniqueness after resolution. New
+  `examples/dlopen` shows a host loading a shared library by path.
 - `--for SUBGRAPH` now also restricts a plain build (`./truss --for win`), not
   just `test`/`run`.
 - **Scan-cache GC** — `build/<mode>/scan-cache/` is capped (4096 entries; the

@@ -1107,7 +1107,7 @@ public:
     /**
      * \brief Include this target in the implicit `all` build (default true).
      * `false` makes it opt-in: built by `--target NAME` or as a dependency,
-     * never by a bare `./truss`. Useful for optional plugins/tools.
+     * never by a bare `./truss`. Useful for optional tools or libraries.
      */
     template <class Self>
     Self& build_by_default(this Self& self, bool v = true) {

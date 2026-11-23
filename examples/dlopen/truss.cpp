@@ -1,7 +1,7 @@
-// plugin — a runtime plugin system with dlopen: the plugin is built as a
-// shared object but deliberately NOT linked into the host.
+// dlopen — a shared library built as a .so but deliberately NOT linked into
+// the executable: the host opens it at runtime with dlopen(3).
 //
-// Run (from examples/plugin): ./truss run
+// Run (from examples/dlopen): ./truss run
 import truss;
 
 int main(int argc, char** argv) {
@@ -16,8 +16,9 @@ int main(int argc, char** argv) {
         .link_libs("dl")
         .default_target();
 
-    // The plugin: same ABI header, only explicitly exported symbols visible,
-    // and never a link dependency (not_linkable() rejects depends_on()).
+    // The runtime-loaded library: same ABI header, only explicitly exported
+    // symbols visible, and never a link dependency (not_linkable() rejects
+    // depends_on()).
     proj.add_shared_library("plugin_math")
         .sources("plugins/math/plugin.cpp")
         .include_dirs("include")

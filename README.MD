@@ -86,7 +86,6 @@ Without either it stops with an error asking for a rebuild instead.
   - [Unity builds](#unity-builds)
   - [Static linking](#static-linking)
   - [Merged archives](#merged-archives)
-  - [Runtime plugins (dlopen)](#runtime-plugins-dlopen)
   - [User tasks](#user-tasks)
   - [Build hooks](#build-hooks)
 - [Scripting helpers (os / fs / log)](#scripting-helpers-os--fs--log)
@@ -187,6 +186,10 @@ things: commands are truss's own verbs; tasks are yours, registered with
 | `--help` / `-h` / `help` | Print the full usage and exit. |
 | `-- ARGS...` | Everything after `--` is passed to the program started by `run`. |
 
+`run` and `test` build only the artifacts they execute (plus their
+dependencies); a bare `./truss` builds everything in `all` — except targets
+marked `build_by_default(false)`.
+
 Commands compose with modes and flags: `./truss release test -j8 -v`,
 `./truss run --target server -- --port 8080`.
 
@@ -256,7 +259,7 @@ dereferencing:
 proj.add_executable("app").sources_in("src").depends_on(proj.conan({"zlib/1.3.1"}));
 ```
 
-Build- and artifact-level switches (all optional):
+Artifact and build-set switches (all optional):
 
 | Method | Meaning |
 |---|---|
@@ -264,8 +267,31 @@ Build- and artifact-level switches (all optional):
 | `output_name("net")` | Rename the artifact (`libnet.so`, `net.exe`, `libnet.a`, import lib/twin follow). The target stays addressable by its own name in `--target`/`depends_on()`. |
 | `build_by_default(bool = true)` | Include in the implicit `all`. `false` makes it opt-in: only `--target NAME` or a dependency builds it. |
 | `default_target()` | The executable a bare `./truss run` starts (default: the first non-test executable). One per subgraph. |
-| `symbols_hidden()` | `-fvisibility=hidden` (+ inlines-hidden on C++): only explicitly exported symbols are visible. A documented no-op on MSVC, where exports are the model. |
-| `not_linkable()` | The artifact is loaded at runtime, not linked: `depends_on()` on it is a Config error telling you to `dlopen`/`LoadLibrary` it instead. Shared libraries only. |
+| `not_linkable()` | The artifact is loaded at runtime, not linked: `depends_on()` on it is a Config error. Shared libraries only. |
+
+A shared library that no target links is just a normal `add_shared_library()`
+without a `depends_on()` edge — for example a library a host opens with
+`dlopen`/`LoadLibrary`. Combine `not_linkable()` (document the intent and
+reject accidental linking), `symbols_hidden()` (export only the ABI below) and
+optionally `build_by_default(false)` (opt-in builds):
+
+```cpp
+auto& host = proj.add_executable("host")
+                  .sources("src/main.cpp")
+                  .link_libs("dl");        // POSIX; -rdynamic if the library needs host symbols
+
+proj.add_shared_library("plugin_math")     // build/<triple>/lib/libplugin_math.so
+    .sources("src/plugin_math.cpp")
+    .symbols_hidden()                      // only the exported ABI is visible
+    .not_linkable();                       // the host dlopen()s it by path
+```
+
+The library finds its host through whatever path the loader is given;
+`examples/dlopen` computes it from the `bin/` ↔ `lib/` layout. Note that
+`run`/`test` build only the executables they start, so a freshly added
+runtime-loaded library needs one `./truss` (or `./truss --target plugin_math`)
+before the host can load it. Windows builds produce a `.dll` + import lib and
+load through `LoadLibrary` instead.
 
 ### Sources & globbing
 
@@ -357,6 +383,7 @@ This is what makes package managers ergonomic: `conan()`/`vcpkg()` return an
 | `is_test(bool)` | mark as a test for the `test` command | false |
 | `flags("...")` | raw compiler flags, verbatim; applies to C **and** C++ (repeat calls accumulate) | — |
 | `c_flags("...")` | raw flags for this target's **C sources only** (repeat calls accumulate) | — |
+| `symbols_hidden()` | `-fvisibility=hidden` (+ `-fvisibility-inlines-hidden` on C++): export only annotated symbols. No-op on MSVC (exports are the model there) | off |
 | `linker_flags("...")` | raw linker flags, verbatim (repeat calls accumulate) | — |
 
 `Default` enum values always resolve per mode (e.g. `DebugInfo::Default` →
@@ -469,34 +496,6 @@ Members are merged exactly as listed (their own transitive deps are not pulled
 in — `depends_on()` those separately). A merged library needs no sources of its
 own; each member must itself be a static library. MSVC targets are a Config
 error.
-
-### Runtime plugins (dlopen)
-
-A plugin is just a shared library that nothing links — `not_linkable()` makes
-that intent explicit (and turns an accidental `depends_on()` into a clear
-error), `symbols_hidden()` keeps all but the exported ABI private, and
-`build_by_default(false)` makes it opt-in if it should not build every time:
-
-```cpp
-auto& host = proj.add_executable("host")
-                  .sources("src/main.cpp")
-                  .include_dirs("include")
-                  .link_libs("dl")          // POSIX; exported symbols for C++ plugins: linker_flags("-rdynamic")
-                  .default_target();
-
-proj.add_shared_library("plugin_math")   // build/<triple>/lib/libplugin_math.so
-    .sources("plugins/math/plugin.cpp")
-    .include_dirs("include")
-    .symbols_hidden()                    // export only plugin_add()
-    .not_linkable();                     // host dlopen()s it by path
-```
-
-The host finds it through the layout (`bin/<triple>/` → `../lib/<triple>/`) or
-whatever path your loader uses. `./truss run` builds only the executable it
-starts, so build the graph once (`./truss`) before running a freshly added
-plugin; `./truss --target plugin_math` builds just the plugin. Windows
-plugins are `.dll` + import lib and load through `LoadLibrary` instead. See
-`examples/plugin`.
 
 ### User tasks
 
@@ -1032,7 +1031,7 @@ end-to-end:
 | `examples/fetch` | `fetch()` git/tarball packages, pinned in `truss.lock` |
 | `examples/conan` / `examples/vcpkg` | package-manager graphs as one `depends_on()` |
 | `examples/imported` | `import_library("name").import_archive(...)`: linking a prebuilt `.a` with `system_include_dirs()` + deref-free `depends_on()` |
-| `examples/plugin` | runtime plugins: `not_linkable()` + `symbols_hidden()` + `default_target()`, a shared object the host `dlopen`s |
+| `examples/dlopen` | a shared library loaded at runtime: `not_linkable()` + `symbols_hidden()` + `output_name()` + `default_target()`, with the host opening it by path |
 | `examples/cross-host` | a zig cross build with a `for_host()` codegen tool; host↔cross `depends_on()` is a Config error, cross tests build then skip with a warning |
 | `examples/installed` / `examples/amalgam` | consuming an installed truss / the single-header drop-in |
 

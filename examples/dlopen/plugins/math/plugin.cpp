@@ -1,4 +1,5 @@
 // plugin_math — built as a shared object, never linked: the host dlopen()s it.
+// (The name says what it plays here; to truss it is an ordinary shared library.)
 #include "plugin_api.hpp"
 
 namespace {

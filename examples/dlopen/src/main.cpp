@@ -1,4 +1,4 @@
-// host — loads libplugin_math.so at runtime by path and calls its exported ABI.
+// host — opens libplugin_math.so at runtime by path and calls its exported ABI.
 #include "plugin_api.hpp"
 
 #include <cstdio>
@@ -14,7 +14,7 @@ int main() {
         std::fprintf(stderr, "host: cannot locate the executable: %s\n", ec.message().c_str());
         return 1;
     }
-    /* the host lives in build/<mode>/bin/<triple>/, the plugin in lib/<triple>/ */
+    /* the host lives in build/<mode>/bin/<triple>/, the library in lib/<triple>/ */
     const fs::path exe_dir = exe.parent_path();
     const fs::path plugin =
         exe_dir.parent_path().parent_path() / "lib" / exe_dir.filename() / "libplugin_math.so";
