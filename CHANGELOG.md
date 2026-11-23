@@ -8,82 +8,45 @@ a major version.
 
 ## [Unreleased]
 
-### Changed
-
-- `./setup.sh install` now defaults to the standard user prefix `~/.local`
-  (binary in `~/.local/bin`, modules in `~/.local/lib/truss`) instead of a
-  `.local/` directory inside the checkout, and warns when that `bin` directory
-  is not on `PATH`. An explicit prefix argument still wins; relative prefixes
-  resolve against the invocation directory.
-
 ### Added
 
-- **Target-level build/artifact switches** — `as_shared(bool)`,
-  `output_name("name")`, `build_by_default(bool)`, `default_target()`,
-  `symbols_hidden()` and `not_linkable()` (a shared library loaded at runtime:
-  `depends_on()` on one is a Config error). Conflicts are validated (duplicate
-  output names, two default targets per subgraph, non-shared `not_linkable`),
-  and artifact paths are checked for uniqueness after resolution. New
-  `examples/dlopen` shows a host loading a shared library by path.
-- `--for SUBGRAPH` now also restricts a plain build (`./truss --for win`), not
-  just `test`/`run`.
-- **Scan-cache GC** — `build/<mode>/scan-cache/` is capped (4096 entries; the
-  oldest quarter is dropped beyond it) so a long-lived tree cannot accumulate
-  one file per changed TU forever.
-- **C projects are first-class** — `c_standard(C99|C11|C17|C23)` selects the
-  `.c` standard per target (`Default` stays `gnu17`; MSVC accepts `C11`/`C17`
-  as `/std:c11` / `/std:c17` and rejects `C99`/`C23` with a clear error), and
-  `c_flags("...")` adds raw options for C sources only (C and C++ usually want
-  different ones; `flags()` still covers both). `.ixx` module interface units
-  are now picked up by `sources_in()` like `.cppm`; the README gained a
-  file-format matrix (headers are language-agnostic: never compiled, so the
-  `.h`/`.hpp` distinction is not enforced by design).
+- MIT `LICENSE` (2026, Maxime Beaudoin).
+- Target switches, all validated at `build()`: `as_shared()` (library kind),
+  `output_name()` (artifact basename; unique per subgraph), `build_by_default(false)`
+  (opt-in, outside `all`), `default_target()` (the executable `run` starts),
+  `symbols_hidden()` (visibility, no-op on MSVC) and `not_linkable()` (a shared
+  library loaded at runtime: `depends_on()` on it is a Config error).
+  `examples/dlopen` shows the pattern.
+- First-class C: `c_standard(C99…C23)` and `c_flags()` (C sources only; MSVC
+  accepts C11/C17), and `.ixx` is part of `sources_in()`.
+- Module-scan cache and skip gate: unchanged files are neither scanned nor read
+  (300-TU no-op: ~750 ms → ~5 ms); the cache is capped at 4096 entries.
+- Build output: `▸ configure/build` phase lines with scan counters, per-edge
+  source descriptions, a live in-flight block on a terminal (`TRUSS_PROGRESS=plain`
+  disables it), `-q`, `TRUSS_LOG`, `NO_COLOR`/`CLICOLOR_FORCE`; downloads show
+  git/curl progress bars.
 
-- **Module-scan result cache** — compiler scans (~10 ms per TU) are cached
-  under `build/<mode>/scan-cache/`, keyed by source path, mtime, size,
-  compile flags and compiler identity. An unchanged tree now rescans nothing:
-  a no-op `./truss` invocation on a 300-TU project drops from ~750 ms to
-  ~5 ms. Corrupt entries are misses; write failures never fail the build;
-  `clean` (or deleting the directory) forces a rescan.
-- **Scan-skip gate** — a TU with no `import`/`module` in its raw text is
-  never handed to the compiler (the keywords cannot be macro-generated), so
-  a 300-TU tree of plain TUs now configures in ~5 ms even cold.
-- **Build output** — phase lines with timings and scan-cache counters
-  (`▸ configure  4 ms · scan 287 hot / 2 cold / 3 skipped`), samurai edge
-  descriptions that name the source (`CXX src/net/tcp.cpp`), and a live
-  in-flight progress block on a terminal (finished files disappear; FIFO
-  eviction, compiler diagnostics print verbatim above it). Disable with
-  `TRUSS_PROGRESS=plain`; piped output is unchanged/plain.
-- **Log controls** — `-q/--quiet`, `TRUSS_LOG=quiet|warn|info|debug`, and
-  `NO_COLOR` / `CLICOLOR_FORCE` / `CLICOLOR` are honoured.
-- `proj.compile_commands()` / `./truss compdb` now writes through a temp
-  file and only replaces `compile_commands.json` when its content changed
-  (no mtime churn, no "wrote ..." line on unchanged runs).
-- **Download progress** — on a terminal, `fetch()` streams git's and curl's
-  native progress bars (curl runs with `--progress-bar` and without `-s`;
-  git's detached-HEAD advice is suppressed). Piped output still captures the
-  tools' diagnostics for error messages.
+### Changed
+
+- `./setup.sh install` defaults to `~/.local` (PATH-visible) and warns when the
+  staged `bin` is not on `PATH`.
+- `--for SUBGRAPH` restricts plain builds too, not just `test`/`run`.
+- `compile_commands()`/`compdb` and a dry run no longer write anything when the
+  content is unchanged (`-n` writes nothing at all).
+
+### Fixed
+
+- Self-rebuild works in a truss checkout again (`setup.sh build` fallback for
+  the removed `bootstrap.sh`); `setup.sh build` reuses the bootstrap (script-only
+  rebuild 25 s → 0.2 s) and writes `truss.d`, so headers/BMIs are tracked.
+- Concurrent `setup.sh` runs no longer wipe each other's bootstrap/unit objects
+  (flock + per-PID snapshots).
 
 ### Security
 
-- Include directories, system include directories, link paths and framework
-  paths are now escaped for `/bin/sh` inside their quotes (`$`, backtick,
-  `"`, `\`): a path coming from package metadata can no longer smuggle a
-  command substitution into a compile or link line.
-- `link_libs()` / `link_frameworks()` names are validated (letters, digits,
-  `. _ + - /`; no leading `-`) instead of being interpolated — a shell
-  metacharacter is a Config error naming the offending value.
-- `fetch()` refuses git's `ext::` transport (it executes an arbitrary
-  command line).
-- `reload` refuses to replace the executable when running with elevated
-  privileges (euid != uid).
-
-### Performance
-
-- The text scan (module/import discovery by reading each source) is now
-  cached too, keyed by path and validated by (mtime, size): a no-op
-  invocation performs no file reads at all, only stats. Verified by a test
-  that makes the sources unreadable and still builds from the cache.
+- Include/link paths are shell-escaped inside their quotes; link library and
+  framework names are charset-validated; git's `ext::` transport is refused;
+  `reload` refuses to replace the binary with raised privileges.
 
 ## [1.0.0] — 2026-11-16
 
