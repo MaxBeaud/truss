@@ -223,6 +223,13 @@ Result<void> scan_cache_store(const std::filesystem::path& cache_dir, std::strin
                               std::span<const std::string> imports,
                               std::span<const std::string> header_imports);
 
+/// Bound the cache directory: when it holds more than `max_entries` files, the
+/// oldest (by mtime) are removed down to three quarters of that. Entries are
+/// pure derived data, so dropping one only costs a rescan. Best effort.
+/// \ingroup grp_internals
+Result<void> scan_cache_gc(const std::filesystem::path& cache_dir,
+                           std::size_t max_entries = 4096);
+
 /// scan_module_unit() with a (mtime, size)-validated result cache: a no-op
 /// invocation does not even read the sources (one stat per file). The cache is
 /// keyed by source path only (the text scan does not depend on flags).
@@ -271,7 +278,8 @@ Result<FlagSet> build_flags(const TargetTriple& triple, BuildMode mode,
                             std::string_view user_flags,
                             std::span<const std::string> system_includes = {},
                             CStandard c_std = CStandard::Default,
-                            std::string_view user_c_flags = {});
+                            std::string_view user_c_flags = {},
+                            bool symbols_hidden = false);
 /// Build the link flag strings (sanitizers/LTO/hardening/stdlib/libs/frameworks).
 /// `static_libs` are linked through `-Wl,-Bstatic ... -Wl,-Bdynamic` (before the
 /// dynamic `libs`, so a static archive's own -l needs resolve to the right);

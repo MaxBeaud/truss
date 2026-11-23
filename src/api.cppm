@@ -1080,6 +1080,72 @@ public:
         return self;
     }
     /**
+     * \brief Build this library as a shared object (`true`) or a static archive
+     * (`false`) — the counterpart of static_link()'s demotion, e.g. when a
+     * config switch picks the artifact kind. Executables are a Config error.
+     */
+    template <class Self>
+    Self& as_shared(this Self& self, bool v = true) {
+        if (self.kind_ == TargetKind::SharedLibrary || self.kind_ == TargetKind::StaticLibrary) {
+            self.kind_ = v ? TargetKind::SharedLibrary : TargetKind::StaticLibrary;
+            self.static_link_ = false; /* an explicit kind wins over a demotion */
+        }
+        return self;
+    }
+    /**
+     * \brief Override the artifact's basename (default: the target name).
+     * `output_name("net")` produces `libnet.so` / `net.exe` / `libnet.a`; the
+     * target is still addressed by its own name in --target and depends_on().
+     * Must be a bare name (no path separators); two targets writing the same
+     * file is a Config error.
+     */
+    template <class Self>
+    Self& output_name(this Self& self, std::string_view name) {
+        self.output_name_ = std::string(name);
+        return self;
+    }
+    /**
+     * \brief Include this target in the implicit `all` build (default true).
+     * `false` makes it opt-in: built by `--target NAME` or as a dependency,
+     * never by a bare `./truss`. Useful for optional plugins/tools.
+     */
+    template <class Self>
+    Self& build_by_default(this Self& self, bool v = true) {
+        self.build_by_default_ = v;
+        return self;
+    }
+    /**
+     * \brief Make this executable the one `run` starts when no --target is
+     * given (default: the first non-test executable). One per subgraph.
+     */
+    template <class Self>
+    Self& default_target(this Self& self, bool v = true) {
+        self.default_target_ = v;
+        return self;
+    }
+    /**
+     * \brief Hide every symbol except the explicitly exported ones:
+     * `-fvisibility=hidden` (+ `-fvisibility-inlines-hidden` on C++), on every
+     * compiled source of this target. No-op on MSVC targets, where exports are
+     * the model (`__declspec(dllexport)` / .def).
+     */
+    template <class Self>
+    Self& symbols_hidden(this Self& self, bool v = true) {
+        self.symbols_hidden_ = v;
+        return self;
+    }
+    /**
+     * \brief Mark this shared library as loaded at runtime (dlopen /
+     * LoadLibrary), not linked: `depends_on()` on it is a Config error with
+     * that remedy. Implies nothing about `all`; combine with
+     * build_by_default(false) to make it fully opt-in.
+     */
+    template <class Self>
+    Self& not_linkable(this Self& self, bool v = true) {
+        self.not_linkable_ = v;
+        return self;
+    }
+    /**
      * \brief Link every dependency of this executable/shared library statically
      * (transitively): Interface link_libs and this target's own link_libs go
      * through `-Bstatic`, SharedLib deps are linked from a static twin archive
@@ -1202,6 +1268,12 @@ public:
     bool pic() const { return pic_; }
     /// static_link() / static_deps() state (named apart: the setters default their bool).
     bool static_link_enabled() const { return static_link_; }
+    const std::string& output_name() const { return output_name_; }
+    bool is_built_by_default() const { return build_by_default_; }
+    bool is_default_target() const { return default_target_; }
+    bool symbols_hidden() const { return symbols_hidden_; }
+    /// false when not_linkable() marked the target as a runtime-loaded plugin.
+    bool linkable() const { return !not_linkable_; }
     bool static_deps_enabled() const { return static_deps_; }
     StaticStdlib static_stdlib() const { return static_stdlib_; }
     /// First error handed to depends_on(Result) (reported by build()).
@@ -1253,6 +1325,11 @@ private:
     bool pic_ {false};
     bool test_ {false};
     bool static_link_ {false};
+    std::string output_name_;
+    bool build_by_default_ {true};
+    bool default_target_ {false};
+    bool symbols_hidden_ {false};
+    bool not_linkable_ {false};
     /* SharedLib turned into a static archive by static_link(): remembers the
      * original kind so static_link(false) can restore it. Only read from the
      * deducing-this template below, so the module interface TU (where the
@@ -1729,6 +1806,8 @@ public:
     bool verbose() const { return verbose_; }
     /// Targets selected with --target (empty = all).
     const std::vector<std::string>& only_targets() const { return only_targets_; }
+    /// Subgraph selected with --for (empty = all); used by build/test/run.
+    const std::string& for_selector() const { return for_selector_; }
     /// Get the auto-discovered truss module paths.
     const std::vector<std::filesystem::path>& truss_module_paths() const { return truss_module_paths_; }
 

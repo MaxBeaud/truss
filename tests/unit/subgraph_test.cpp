@@ -174,3 +174,34 @@ TEST_CASE("subgraphs: --for and compound --target select subgraphs") {
         CHECK(contains(r.error().message, "unknown --for"));
     }
 }
+
+TEST_CASE("subgraphs: --for narrows a plain build to one subgraph") {
+    if (!os::program_exists("zig")) {
+        MESSAGE("zig not installed, skipping");
+        return;
+    }
+    ScratchDir scratch {"for-build"};
+    write_project();
+    char prog[] = "truss-tests";
+    char dry[] = "-n";
+    char f[] = "--for";
+    char sel[] = "linux";
+    char* argv[] = {prog, dry, f, sel};
+    Project proj("sub-for-build", 4, argv);
+    proj.targets({
+        {"linux", Config{}.toolchain(Toolchain::LLVM)},
+        {"musl", Config{}.toolchain(Toolchain::Zig).target("aarch64-linux-musl")},
+    });
+    proj.add_static_library("core").sources("lib/core.cpp");
+    proj.add_executable("app").sources("app/main.cpp");
+    auto r = proj.build();
+    INFO((r ? "ok" : r.error().message));
+    REQUIRE(r.has_value());
+    const std::string m = *detail::read_file("build/debug/ninja/build.ninja");
+    /* ninja escapes ':' in phony names */
+    const auto at = m.find("default ");
+    REQUIRE(at != std::string::npos);
+    const std::string line = m.substr(at, m.find('\n', at) - at);
+    CHECK(contains(line, "linux$:all"));
+    CHECK_FALSE(contains(line, "all all"));
+}

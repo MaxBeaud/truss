@@ -402,6 +402,31 @@ Result<void> validate(const std::vector<std::unique_ptr<Target>>& targets) {
         if (!path_is_safe(std::filesystem::path(name)))
             return std::unexpected(Error {Error::Kind::Config, "target name '" + name + "' contains unsupported characters"});
 
+        /* output_name(): the artifact basename follows the same rules as a
+         * target name (bare, no platform extension: truss adds it) */
+        if (!t->output_name().empty()) {
+            const std::string& out = t->output_name();
+            if (out.find_first_of("/\\") != std::string::npos || ends_with_any(out, kPlatformExts)
+                || !path_is_safe(std::filesystem::path(out)))
+                return std::unexpected(Error {
+                    Error::Kind::Config,
+                    "target '" + name + "': output_name('" + out + "') must be a bare name "
+                    "(no path separators, no platform extension), e.g. output_name(\"net\")",
+                });
+        }
+        if (t->is_default_target() && (t->kind() != TargetKind::Executable || t->is_test_target()))
+            return std::unexpected(Error {
+                Error::Kind::Config,
+                "target '" + name + "': default_target() marks the executable `run` starts; "
+                "it needs an executable target (and not a test)",
+            });
+        if (!t->linkable() && t->kind() != TargetKind::SharedLibrary)
+            return std::unexpected(Error {
+                Error::Kind::Config,
+                "target '" + name + "': not_linkable() marks a runtime-loaded shared library "
+                "(dlopen/LoadLibrary); create it with add_shared_library()",
+            });
+
         /* flags/defines/dirs land in ninja edge variables (shell-run by
          * samurai): a control character — above all a newline — would end the
          * binding and let the rest inject manifest statements */
@@ -532,7 +557,8 @@ constexpr std::string_view obj_ext(CompilerFamily family) {
  * windows-gnu still wants app.exe), the lib prefix/.lib suffix the family. */
 std::string output_path_for(const Target& t, const std::filesystem::path& build_dir,
                             const std::string& triple_dir, const TargetTriple& triple) {
-    const std::string& name = t.name();
+    /* the artifact basename: output_name() overrides the target name */
+    const std::string name = t.output_name().empty() ? t.name() : t.output_name();
     const bool msvc = triple.family == CompilerFamily::Msvc;
     const bool windows = msvc || triple.os == Os::Windows;
     switch (t.kind()) {
@@ -562,8 +588,9 @@ std::string output_path_for(const Target& t, const std::filesystem::path& build_
 std::string import_lib_path(const Target& t, const std::filesystem::path& build_dir,
                             const std::string& triple_dir, const TargetTriple& triple) {
     const bool msvc = triple.family == CompilerFamily::Msvc;
+    const std::string name = t.output_name().empty() ? t.name() : t.output_name();
     return (build_dir / "lib" / triple_dir /
-            (msvc ? t.name() + ".lib" : "lib" + t.name() + ".dll.a")).generic_string();
+            (msvc ? name + ".lib" : "lib" + name + ".dll.a")).generic_string();
 }
 
 Result<void> emit_manifest(const Project& proj, std::vector<ResolvedTarget>& resolved,
@@ -927,7 +954,8 @@ Result<void> emit_manifest(const Project& proj, std::vector<ResolvedTarget>& res
         auto cflags = detail::build_flags(r.triple, proj.mode(), t.cpp_standard(), t.warnings(),
                                           t.debug_info(), t.optimization(), t.sanitizer(), t.lto(),
                                           t.hardening(), pic, defines, includes, user_flags,
-                                          usage.system_includes, t.c_standard(), t.c_flags());
+                                          usage.system_includes, t.c_standard(), t.c_flags(),
+                                          t.symbols_hidden());
         if (!cflags)
             return std::unexpected(cflags.error());
 
@@ -1516,7 +1544,7 @@ Result<void> emit_manifest(const Project& proj, std::vector<ResolvedTarget>& res
     {
         std::map<std::string, std::vector<std::string>, std::less<>> per_sg;
         for (const auto& r : resolved)
-            if (!r.output.empty())
+            if (!r.output.empty() && r.target->is_built_by_default())
                 per_sg[r.subgraph].push_back(r.output);
         std::vector<std::string> everything;
         for (auto& [sg, outs] : per_sg) {
@@ -1528,7 +1556,11 @@ Result<void> emit_manifest(const Project& proj, std::vector<ResolvedTarget>& res
     }
 
     if (proj.only_targets().empty()) {
-        w.default_targets({"all"});
+        /* --for SUBGRAPH narrows a plain build to that subgraph's phony */
+        if (!proj.for_selector().empty())
+            w.default_targets({proj.for_selector() + ":all"});
+        else
+            w.default_targets({"all"});
     } else {
         /* --target NAME:target picks one subgraph; a bare NAME applies to
          * every subgraph that has it */
@@ -1706,7 +1738,7 @@ constexpr std::string_view kHelp =
     "      --target NAME  build (or run) only NAME; repeatable. With subgraphs\n"
     "                      (proj.targets()): NAME:target picks one subgraph, a\n"
     "                      bare name applies to every subgraph that has it\n"
-    "      --for NAME      with subgraphs: run tasks (test/run) for one subgraph only\n"
+    "      --for NAME      with subgraphs: restrict build/test/run to one subgraph\n"
     "      --build-dir PATH  build root (default: build)\n"
     "  -V, --version    print the truss version\n"
     "  -h, --help       show this help\n"
@@ -2051,6 +2083,14 @@ Result<void> Project::build() {
             return tr.target.empty() ? "the host (" + detail::triple_dir(tr) + ")" : "'" + tr.target + "'";
         };
         for (const Target* dep : t->deps()) {
+            if (!dep->linkable())
+                return std::unexpected(Error {
+                    Error::Kind::Config,
+                    "target '" + t->name() + "' depends_on('" + dep->name() + "'), which is marked "
+                    "not_linkable():\n"
+                    "  that artifact is loaded at runtime (dlopen/LoadLibrary), not linked;\n"
+                    "  drop the depends_on() edge and open it by path instead",
+                });
             if (dep->kind() == TargetKind::Interface ||
                 dep->kind() == TargetKind::ImportedLibrary)
                 continue; /* no artifact: usable from either side */
@@ -2077,6 +2117,12 @@ Result<void> Project::build() {
         if (t->kind() == TargetKind::CustomCommand) {
             const auto& cc = static_cast<const CustomCommand&>(*t);
             if (const Target* tool = cc.used_tool(); tool != nullptr) {
+                if (!tool->linkable())
+                    return std::unexpected(Error {
+                        Error::Kind::Config,
+                        "custom command '" + t->name() + "' uses('" + tool->name() + "'), which is marked "
+                        "not_linkable(): a tool must be an executable to be run",
+                    });
                 const TargetTriple tool_triple = tool->is_for_host()
                                                      ? host_pinned
                                                      : tool->triple_override().value_or(base_triple);
@@ -2307,6 +2353,39 @@ Result<void> Project::build() {
       }
     }
 
+    /* default_target(): at most one executable per subgraph may claim it */
+    {
+        std::map<std::string, std::string, std::less<>> defaults;
+        for (const auto& r : resolved)
+            if (r.target->is_default_target()) {
+                const auto [it, inserted] = defaults.try_emplace(r.subgraph, r.target->name());
+                if (!inserted)
+                    return std::unexpected(Error {
+                        Error::Kind::Config,
+                        "two executables claim default_target() in subgraph '" + r.subgraph +
+                            "': '" + it->second + "' and '" + r.target->name() + "'",
+                    });
+            }
+    }
+
+    /* two targets writing the same artifact: output_name() can now collide */
+    {
+        std::map<std::pair<std::string, std::string>, std::string, std::less<>> owner;
+        for (const auto& r : resolved) {
+            if (r.output.empty())
+                continue;
+            const auto [it, inserted] =
+                owner.try_emplace({r.subgraph, r.output}, r.target->name());
+            if (!inserted)
+                return std::unexpected(Error {
+                    Error::Kind::Config,
+                    "targets '" + it->second + "' and '" + r.target->name() +
+                        "' both write '" + r.output + "' (subgraph '" + r.subgraph +
+                        "'): pick distinct output_name() values",
+                });
+        }
+    }
+
     /* a module name must have exactly one source: two .cppm files declaring
      * the same module would emit two compile_bmi edges for one BMI (samurai
      * refuses the manifest), and across targets the BMI wiring would silently
@@ -2359,6 +2438,10 @@ Result<void> Project::build() {
                    + " skipped";
         log::step("configure", phase);
     }
+    /* derived data, bounded: a long-lived tree must not accumulate one cache
+     * file per changed TU forever (-n changes nothing, so no GC either) */
+    if (!dry_run_)
+        static_cast<void>(detail::scan_cache_gc(bld / "scan-cache"));
 
     /* dispatch tasks */
     const TaskContext ctx {name_, mode_, bld, cwd_, jobs_, verbose_};
@@ -2619,6 +2702,7 @@ Result<void> Project::build() {
                  * executable runs */
                 std::vector<std::string> exe_outputs, exe_names, exe_subgraphs;
                 std::vector<bool> exe_cross;
+                std::size_t exe_default = std::string::npos;
                 for (const auto& r : resolved) {
                     if (r.target->kind() != TargetKind::Executable || r.target->is_test_target())
                         continue;
@@ -2626,10 +2710,23 @@ Result<void> Project::build() {
                         continue;
                     if (!target_selected(r.subgraph, r.target->name()))
                         continue;
+                    if (r.target->is_default_target())
+                        exe_default = exe_outputs.size();
                     exe_outputs.push_back(r.output);
                     exe_names.push_back(r.target->name());
                     exe_subgraphs.push_back(r.subgraph);
                     exe_cross.push_back(!r.triple.target.empty());
+                }
+                /* default_target() decides which executable a bare `run` starts
+                 * (an explicit --target selection keeps its own order) */
+                if (exe_default != std::string::npos && exe_default != 0 && only_targets_.empty()) {
+                    std::swap(exe_outputs[0], exe_outputs[exe_default]);
+                    std::swap(exe_names[0], exe_names[exe_default]);
+                    std::swap(exe_subgraphs[0], exe_subgraphs[exe_default]);
+                    /* vector<bool> proxies are not swappable under libstdc++ */
+                    const bool cross_first = exe_cross[0];
+                    exe_cross[0] = exe_cross[exe_default];
+                    exe_cross[exe_default] = cross_first;
                 }
                 if (exe_outputs.empty())
                     return std::unexpected(Error {Error::Kind::Config, "no executable to run (test executables are excluded)"});

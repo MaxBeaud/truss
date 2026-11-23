@@ -377,7 +377,8 @@ Result<FlagSet> build_flags(const TargetTriple& triple, BuildMode mode,
                             std::span<const std::string> includes,
                             std::string_view user_flags,
                             std::span<const std::string> system_includes,
-                            CStandard c_std, std::string_view user_c_flags) {
+                            CStandard c_std, std::string_view user_c_flags,
+                            bool symbols_hidden) {
     if (auto r = require_supported(triple); !r)
         return std::unexpected(r.error());
 
@@ -453,6 +454,12 @@ Result<FlagSet> build_flags(const TargetTriple& triple, BuildMode mode,
     add_both(user_flags);
     /* C-only options last, like flags() for both languages */
     add(fs.compile_c, user_c_flags);
+    /* symbols_hidden(): exported symbols opt in (dllexport-style discipline).
+     * MSVC exports are the model there, so the knob is a documented no-op. */
+    if (symbols_hidden && !msvc) {
+        add(fs.compile, "-fvisibility=hidden -fvisibility-inlines-hidden");
+        add(fs.compile_c, "-fvisibility=hidden");
+    }
     return fs;
 }
 

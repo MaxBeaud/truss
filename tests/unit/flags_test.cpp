@@ -537,3 +537,29 @@ TEST_CASE("c_flags: reaches the C edge in a mixed target, not the C++ edge") {
     CHECK_FALSE(contains(cxx_edge, "-DC_ONLY=1"));
     CHECK_FALSE(contains(cxx_edge, "-std=c11"));
 }
+
+TEST_CASE("flags: symbols_hidden() hides symbols per language") {
+    const auto t = clang_triple();
+    const std::array<std::string, 0> none {};
+    auto r = detail::build_flags(t, BuildMode::Debug, CppStandard::Default, Warnings::Default,
+                                 DebugInfo::Default, Optimization::Default, Sanitizer::Default,
+                                 Lto::Default, Hardening::None, false, none, none, "", none,
+                                 CStandard::Default, "", true);
+    REQUIRE(r.has_value());
+    CHECK(contains(r->compile, "-fvisibility=hidden"));
+    CHECK(contains(r->compile, "-fvisibility-inlines-hidden"));
+    CHECK(contains(r->compile_c, "-fvisibility=hidden"));
+    CHECK_FALSE(contains(r->compile_c, "-fvisibility-inlines-hidden")); /* C++-only */
+
+    /* MSVC has no equivalent: exports are the model, so the knob is inert */
+    TargetTriple m = t;
+    m.family = CompilerFamily::Msvc;
+    m.compiler = "clang-cl";
+    m.ar = "llvm-lib";
+    auto rmsvc = detail::build_flags(m, BuildMode::Debug, CppStandard::Default, Warnings::Default,
+                                     DebugInfo::Default, Optimization::Default, Sanitizer::Default,
+                                     Lto::Default, Hardening::None, false, none, none, "", none,
+                                     CStandard::Default, "", true);
+    REQUIRE(rmsvc.has_value());
+    CHECK_FALSE(contains(rmsvc->compile, "-fvisibility"));
+}

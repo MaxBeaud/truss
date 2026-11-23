@@ -10,6 +10,18 @@ a major version.
 
 ### Added
 
+- **Target-level build/artifact switches** — `as_shared(bool)`,
+  `output_name("name")`, `build_by_default(bool)`, `default_target()`,
+  `symbols_hidden()` and `not_linkable()` (runtime-loaded plugins: a
+  `depends_on()` on one is a Config error). Conflicts are validated
+  (duplicate output names, two default targets per subgraph, non-shared
+  `not_linkable`), and artifact paths are checked for uniqueness after
+  resolution. New `examples/plugin` demonstrates a `dlopen` plugin host.
+- `--for SUBGRAPH` now also restricts a plain build (`./truss --for win`), not
+  just `test`/`run`.
+- **Scan-cache GC** — `build/<mode>/scan-cache/` is capped (4096 entries; the
+  oldest quarter is dropped beyond it) so a long-lived tree cannot accumulate
+  one file per changed TU forever.
 - **C projects are first-class** — `c_standard(C99|C11|C17|C23)` selects the
   `.c` standard per target (`Default` stays `gnu17`; MSVC accepts `C11`/`C17`
   as `/std:c11` / `/std:c17` and rejects `C99`/`C23` with a clear error), and

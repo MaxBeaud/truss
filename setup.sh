@@ -224,6 +224,10 @@ cmd_examples() {
     VCPKG_ROOT="${VCPKG_ROOT:-$HOME/vcpkg}" run_example vcpkg test
     run_example imported run
     run_example imported test
+    # `run` builds only the executable it starts: build the graph (and thus the
+    # plugin) first, then run the host
+    run_example plugin debug
+    run_example plugin run
     run_example cross-host debug
     run_example cross-host run --target gen
     run_example cross-host test

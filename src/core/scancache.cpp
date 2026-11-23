@@ -4,6 +4,7 @@
 // already handles incremental compilation, so an unchanged tree must cost
 // about nothing here too.
 module;
+#include <algorithm>
 #include <atomic>
 #include <cstdint>
 #include <filesystem>
@@ -192,6 +193,40 @@ Result<void> scan_cache_store(const std::filesystem::path& cache_dir, std::strin
     if (auto r = write_file(cache_dir / (std::string(key) + ".scan"), data); !r)
         return r;
     g_cold.fetch_add(1, std::memory_order_relaxed);
+    return {};
+}
+
+/* Bound the cache directory: a long-lived tree accumulates one small file per
+ * changed TU per mode forever. Beyond the cap, the oldest three quarters are
+ * dropped (they are derived data: a miss costs one rescan). */
+Result<void> scan_cache_gc(const std::filesystem::path& cache_dir, std::size_t max_entries) {
+    std::error_code ec;
+    if (!std::filesystem::is_directory(cache_dir, ec))
+        return {};
+    struct Entry {
+        std::filesystem::file_time_type when;
+        std::filesystem::path path;
+    };
+    std::vector<Entry> entries;
+    for (std::filesystem::directory_iterator it(cache_dir, ec), end; it != end; it.increment(ec)) {
+        if (ec)
+            break;
+        const auto ext = it->path().extension();
+        if (ext != ".scan" && ext != ".text")
+            continue;
+        std::error_code time_ec;
+        const auto when = it->last_write_time(time_ec);
+        if (time_ec)
+            continue;
+        entries.push_back({when, it->path()});
+    }
+    if (entries.size() <= max_entries)
+        return {};
+    std::ranges::sort(entries, [](const Entry& a, const Entry& b) { return a.when < b.when; });
+    const std::size_t keep = max_entries - max_entries / 4; /* three quarters */
+    const std::size_t drop = entries.size() - keep;
+    for (std::size_t i = 0; i < drop; ++i)
+        std::filesystem::remove(entries[i].path, ec);
     return {};
 }
 
