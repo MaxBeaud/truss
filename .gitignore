@@ -22,6 +22,9 @@ examples/*/build/
 examples/imported/prebuilt/*.o
 examples/imported/prebuilt/*.a
 
+# staged installs from `./setup.sh install` (default prefix .local)
+/.local/
+
 # self-rebuild depfile written next to the self-hosted CLI (any invocation dir)
 /truss.d
 **/truss.d
