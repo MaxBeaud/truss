@@ -165,6 +165,7 @@ TEST_CASE("flags: MSVC compile mapping (cl.exe / clang-cl syntax)") {
     CHECK(contains(r->compile, "/Z7"));            /* debug info in .obj, no PDB race */
     CHECK(contains(r->compile, "/Od"));
     CHECK(contains(r->compile, "/utf-8 /EHsc /nologo"));
+    CHECK_FALSE(contains(r->compile_c, "/EHsc"));
     CHECK(contains(r->compile, "/DFOO=1"));
     CHECK(contains(r->compile, "/I\"include\""));
     CHECK_FALSE(contains(r->compile, "-fPIC"));    /* no PIC on Windows */    CHECK_FALSE(contains(r->compile, "-std="));
@@ -359,7 +360,7 @@ TEST_CASE("config: -stdlib= emitted on compile and link when selected") {
                                  Lto::Default, Hardening::None, false, none, none, "");
     REQUIRE(c.has_value());
     CHECK(contains(c->compile, "-stdlib=libc++"));
-    CHECK(contains(c->compile_c, "-stdlib=libc++"));
+    CHECK_FALSE(contains(c->compile_c, "-stdlib=libc++"));
     auto l = detail::link_flags(t, BuildMode::Debug, DebugInfo::Default, Sanitizer::Default,
                                 Lto::Default, Hardening::None, none, none, none, none, "");
     REQUIRE(l.has_value());
@@ -389,6 +390,23 @@ TEST_CASE("flags: include paths are quote-escaped for the shell") {
     CHECK(quoted.find("\\`id\\`") != std::string::npos);
     const bool no_bare_dollar_paren = quoted.find("\"$(") == std::string::npos;
     CHECK(no_bare_dollar_paren); /* every $( is escaped, so no substitution happens */
+
+    /* MSVC cross builds also run through /bin/sh -c on POSIX hosts */
+    TargetTriple msvc {};
+    msvc.os = Os::Windows;
+    msvc.arch = Arch::X64;
+    msvc.family = CompilerFamily::Msvc;
+    msvc.compiler = "clang-cl";
+    msvc.ar = "llvm-lib";
+    auto mr = detail::build_flags(msvc, BuildMode::Debug, CppStandard::Default, Warnings::Default,
+                                  DebugInfo::Default, Optimization::Default, Sanitizer::Default,
+                                  Lto::Default, Hardening::None, false, none, incs, "");
+    REQUIRE(mr.has_value());
+    CHECK(contains(mr->compile, "/I\"odd/\\$(touch pwned)/\\`id\\`\""));
+    auto ml = detail::link_flags(msvc, BuildMode::Debug, DebugInfo::Default, Sanitizer::Default,
+                                 Lto::Default, Hardening::None, incs, none, none, none, "");
+    REQUIRE(ml.has_value());
+    CHECK(contains(ml->linker, "/LIBPATH:\"odd/\\$(touch pwned)/\\`id\\`\""));
 }
 
 TEST_CASE("flags: library and framework names are validated, not interpolated") {

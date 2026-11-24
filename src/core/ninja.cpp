@@ -12,9 +12,11 @@ namespace truss::detail {
 namespace {
 
 /* escaping appends straight into the manifest buffer: the emitter is the
- * per-edge hot path, so no temporary string per token */
+ * per-edge hot path, so no temporary string per token. CR/LF are stripped as
+ * defense-in-depth so no caller can break out of a ninja binding/statement. */
 void append_value(std::string& out, std::string_view v) {
     for (const char c : v) {
+        if (c == '\r' || c == '\n') continue;
         if (c == '$') out += "$$";
         else out += c;
     }
@@ -23,6 +25,7 @@ void append_value(std::string& out, std::string_view v) {
 void append_path(std::string& out, std::string_view p) {
     for (const char c : p) {
         switch (c) {
+        case '\r': case '\n': break;
         case '$': out += "$$"; break;
         case ':': out += "$:"; break;
         case ' ': out += "$ "; break;

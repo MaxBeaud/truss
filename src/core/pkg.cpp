@@ -42,16 +42,18 @@ std::filesystem::path staging_path(const std::filesystem::path& p) {
          + std::to_string(seq.fetch_add(1, std::memory_order_relaxed));
 }
 
-/* Advisory exclusive lock over the lockfile's read-modify-write: two
- * concurrent truss processes must not lose each other's pins. Taken on the
- * lockfile itself; write_lockfile publishes through temp+rename, so a third
- * process opening the renamed file can in principle see a stale inode —
- * self-healing (the pin is re-fetched and rewritten). POSIX only; a no-op
- * elsewhere (single-user machines). */
+/* Advisory exclusive lock over fetch/lockfile updates: taken on a dedicated
+ * sidecar lockfile under build/ that is never unlinked or renamed, so
+ * write_lockfile()'s atomic temp+rename over truss.lock never drops exclusion.
+ * POSIX only; a no-op elsewhere. */
 class lockfile_guard {
 public:
     explicit lockfile_guard(const std::filesystem::path& file, int wait_seconds = 120) {
 #if !defined(_WIN32)
+        if (file.has_parent_path()) {
+            std::error_code dir_ec;
+            std::filesystem::create_directories(file.parent_path(), dir_ec);
+        }
         /* O_CLOEXEC: the guard is held across materialize_fetch, which spawns
          * git/curl/tar — an inherited fd would carry the flock into children
          * that can outlive truss and hold the lock forever */
@@ -69,6 +71,8 @@ public:
                 locked_ = true;
                 return;
             }
+            if (errno == EINTR)
+                continue;
             if (errno != EWOULDBLOCK) { /* a real error, not a held lock */
                 why_ = "flock failed: " + std::string(std::strerror(errno));
                 return;
@@ -156,15 +160,17 @@ Result<void> git_fetch(const std::string& url, const std::string& ref,
     std::filesystem::remove_all(tmp, ec); /* best effort */
     const auto cleanup = [&] { std::filesystem::remove_all(tmp, ec); };
     /* a stalled mirror must not hold the fetch (and the lockfile) forever:
-     * abort transfers crawling under 1 KiB/s for 30 s */
-    const std::vector<std::string> git_slow {"git", "-c", "http.lowSpeedLimit=1024",
+     * abort transfers crawling under 1 KiB/s for 30 s; disable ext:: transport
+     * inside git as defense-in-depth beyond URL validation */
+    const std::vector<std::string> git_slow {"git", "-c", "protocol.ext.allow=never",
+                                             "-c", "http.lowSpeedLimit=1024",
                                              "-c", "http.lowSpeedTime=30",
                                              /* the commit path checks out --detach:
                                               * the wall of advice is pure noise */
                                              "-c", "advice.detachedHead=false"};
     if (!looks_like_commit(ref)) {
         std::vector<std::string> argv = git_slow;
-        argv.insert(argv.end(), {"clone", "--depth", "1", "--branch", ref, url,
+        argv.insert(argv.end(), {"clone", "--depth", "1", "--branch", ref, "--", url,
                                  tmp.generic_string()});
         if (auto r = run_tool(argv, "git clone", timeout_seconds); !r) {
             cleanup(); /* a failed clone must not leave staging garbage */
@@ -178,7 +184,7 @@ Result<void> git_fetch(const std::string& url, const std::string& ref,
             return argv;
         };
         for (const auto& argv : {step({"init", d}),
-                                 step({"-C", d, "remote", "add", "origin", url}),
+                                 step({"-C", d, "remote", "add", "origin", "--", url}),
                                  step({"-C", d, "fetch", "--depth", "1", "origin", ref}),
                                  step({"-C", d, "checkout", "--detach", "FETCH_HEAD"})}) {
             if (auto r = run_tool(argv, "git", timeout_seconds); !r) {
@@ -209,17 +215,20 @@ Result<void> git_fetch(const std::string& url, const std::string& ref,
     return {};
 }
 
-Result<void> tarball_fetch(const std::string& url, const std::string& sha256,
-                           const std::filesystem::path& cache_file, int timeout_seconds) {
+Result<void> tarball_fetch(const std::string& pkg_name, const std::string& url,
+                           const std::string& sha256, const std::filesystem::path& cache_file,
+                           int timeout_seconds) {
     std::error_code ec;
     if (std::filesystem::exists(cache_file, ec)) {
-        /* verify the cached bytes too: an entry written by an interrupted or
-         * raced earlier run must not be reused unchecked forever */
+        /* verify the cached bytes on every run: an entry written by an
+         * interrupted, raced, or corrupted cache must never be reused unchecked */
         auto actual = fs::sha256_file(cache_file);
         if (actual && *actual == sha256)
             return {};
+        log::warn("cached tarball for '" + pkg_name + "' failed sha256 verification; re-downloading");
         std::filesystem::remove(cache_file, ec); /* corrupt or unreadable: refetch */
     }
+    log::info("fetching " + pkg_name + " (" + url + ")");
     const std::filesystem::path tmp = staging_path(cache_file);
     /* -s would silence the progress meter too: on a terminal the bar is the
      * point, so only -f (fail on HTTP errors) and -L (follow redirects) apply */
@@ -234,7 +243,7 @@ Result<void> tarball_fetch(const std::string& url, const std::string& sha256,
      * captured stream would collect carriage-return spam) */
     if (progress_to_terminal())
         curl.insert(curl.end(), "--progress-bar");
-    curl.insert(curl.end(), {"-o", tmp.generic_string(), url});
+    curl.insert(curl.end(), {"-o", tmp.generic_string(), "--", url});
     if (auto r = run_tool(curl, "curl", timeout_seconds); !r) {
         std::filesystem::remove(tmp, ec);
         return r;
@@ -288,10 +297,12 @@ Result<void> verify_no_escaping_links(const std::filesystem::path& dest) {
                 it_err = it->path();
                 break;
             }
+            const auto within = [&](const std::string& resolved) {
+                return resolved == dest_str || resolved.starts_with(dest_str + "/");
+            };
             const bool escapes = target.is_absolute() ?
                                      /* absolute link target: escapes unless it stays inside */
-                                     !std::filesystem::weakly_canonical(target, ec).generic_string()
-                                          .starts_with(dest_str + "/") :
+                                     !within(std::filesystem::weakly_canonical(target, ec).generic_string()) :
                                      [&] {
                                          /* compare like with like: canonicalize the link's
                                           * parent too, or a symlinked project path (macOS
@@ -301,9 +312,8 @@ Result<void> verify_no_escaping_links(const std::filesystem::path& dest) {
                                              it->path().parent_path(), pc);
                                          if (pc)
                                              return true; /* cannot resolve: refuse the package */
-                                         return !std::filesystem::path((parent / target).lexically_normal())
-                                                       .generic_string()
-                                                       .starts_with(dest_str + "/");
+                                         return !within(std::filesystem::path((parent / target).lexically_normal())
+                                                            .generic_string());
                                      }();
             if (ec)
                 return std::unexpected(Error {Error::Kind::Io, "cannot read symlink in package", it->path()});
@@ -315,6 +325,24 @@ Result<void> verify_no_escaping_links(const std::filesystem::path& dest) {
                     it->path(),
                 });
             it.disable_recursion_pending();
+        } else {
+            /* reject special files (FIFOs, sockets, device nodes) that have no
+             * place inside a fetched source package */
+            std::error_code st_ec;
+            const auto st = std::filesystem::symlink_status(it->path(), st_ec);
+            if (st_ec) {
+                it_err = it->path();
+                ec = st_ec;
+                break;
+            }
+            const auto ft = st.type();
+            if (ft != std::filesystem::file_type::regular && ft != std::filesystem::file_type::directory)
+                return std::unexpected(Error {
+                    Error::Kind::Fetch,
+                    "refusing package: '" + it->path().lexically_relative(dest).generic_string() +
+                        "' is a special file (only regular files, directories, and internal symlinks are allowed)",
+                    it->path(),
+                });
         }
     }
     if (ec)
@@ -351,7 +379,8 @@ bool has_top_level_sources(const std::filesystem::path& dir) {
         if (!it->is_regular_file(ec))
             continue;
         const std::string ext = it->path().extension().generic_string();
-        if (ext == ".cpp" || ext == ".cc" || ext == ".cxx" || ext == ".c" || ext == ".cppm")
+        if (ext == ".cpp" || ext == ".cc" || ext == ".cxx" || ext == ".c"
+            || ext == ".cppm" || ext == ".ixx")
             return true;
     }
     return false;
@@ -368,12 +397,19 @@ namespace detail {
  * write in place, so normal builds never hit this. */
 Result<void> copy_tree(const std::filesystem::path& from, const std::filesystem::path& to) {
     std::error_code ec;
+    const auto from_canon = std::filesystem::weakly_canonical(from, ec);
+    if (ec)
+        return std::unexpected(Error {Error::Kind::Io, "cannot resolve source directory", from});
+    std::string from_str = from_canon.generic_string();
+    while (from_str.size() > 1 && from_str.back() == '/')
+        from_str.pop_back();
     std::filesystem::create_directories(to, ec);
     if (ec)
         return std::unexpected(Error {Error::Kind::Io, "cannot create directory", to});
-    for (auto it = std::filesystem::recursive_directory_iterator(from, ec);
-         it != std::filesystem::recursive_directory_iterator {}; it.increment(ec)) {
-        if (ec)
+    std::error_code iter_ec;
+    for (auto it = std::filesystem::recursive_directory_iterator(from, iter_ec);
+         it != std::filesystem::recursive_directory_iterator {}; it.increment(iter_ec)) {
+        if (iter_ec)
             break;
         const std::filesystem::path rel = it->path().lexically_relative(from);
         if (rel.empty())
@@ -393,9 +429,13 @@ Result<void> copy_tree(const std::filesystem::path& from, const std::filesystem:
             auto target = std::filesystem::read_symlink(it->path(), ec);
             if (ec)
                 return std::unexpected(Error {Error::Kind::Io, "cannot read symlink", it->path()});
+            std::error_code pc;
+            const auto parent = std::filesystem::weakly_canonical(it->path().parent_path(), pc);
             const std::string resolved =
-                (it->path().parent_path() / target).lexically_normal().generic_string();
-            if (!resolved.starts_with(from.generic_string() + "/"))
+                pc ? std::string {}
+                   : (parent / target).lexically_normal().generic_string();
+            const bool inside = !pc && (resolved == from_str || resolved.starts_with(from_str + "/"));
+            if (!inside)
                 return std::unexpected(Error {
                     Error::Kind::Fetch,
                     "refusing package: '" + rel.generic_string() +
@@ -404,6 +444,9 @@ Result<void> copy_tree(const std::filesystem::path& from, const std::filesystem:
                     it->path(),
                 });
             it.disable_recursion_pending();
+            std::error_code st_ec;
+            if (std::filesystem::symlink_status(dest, st_ec).type() != std::filesystem::file_type::not_found && !st_ec)
+                continue; /* skip_existing semantics for symlinks too */
             std::filesystem::create_symlink(target, dest, ec);
             if (ec)
                 return std::unexpected(Error {Error::Kind::Io, "cannot create symlink", dest});
@@ -423,6 +466,8 @@ Result<void> copy_tree(const std::filesystem::path& from, const std::filesystem:
             }
         }
     }
+    if (iter_ec)
+        return std::unexpected(Error {Error::Kind::Io, "copy_tree failed: " + iter_ec.message(), from});
     std::error_code git_ec;
     std::filesystem::remove_all(to / ".git", git_ec); /* older materializations may have it */
     return {};
@@ -505,6 +550,13 @@ Result<void> validate_fetch(const std::string& pkg_name, const FetchOptions& opt
     return {};
 }
 
+std::string lowercase_copy(std::string_view s) {
+    std::string out(s);
+    for (char& c : out)
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return out;
+}
+
 /* cache + materialize (no lockfile I/O): worker-thread safe — every job
  * touches its own dest, caches are per-package, log lines are single printfs */
 Result<void> materialize_fetch(const std::string& pkg_name, const FetchOptions& opts,
@@ -519,7 +571,11 @@ Result<void> materialize_fetch(const std::string& pkg_name, const FetchOptions& 
                     c = '_';
             return s;
         }();
-        const std::filesystem::path git_cache = root / "git" / pkg_name / flat_tag;
+        /* include a short hash of (url, tag) so switching repo URLs or tags
+         * like release/1.0 vs release_1.0 never collide in the shared cache */
+        const std::string cache_id =
+            flat_tag + "-" + detail::sha256_bytes(opts.git + "\n" + opts.tag).substr(0, 12);
+        const std::filesystem::path git_cache = root / "git" / pkg_name / cache_id;
         if (!std::filesystem::exists(git_cache, ec)) {
             log::info("fetching " + pkg_name + " (" + opts.git + " @ " + opts.tag + ")");
             if (auto r = detail::make_dirs(git_cache.parent_path()); !r)
@@ -532,43 +588,55 @@ Result<void> materialize_fetch(const std::string& pkg_name, const FetchOptions& 
         std::filesystem::remove_all(dest, ec);
         return detail::copy_tree(git_cache, dest);
     }
+    const std::string sha256 = lowercase_copy(opts.sha256);
     std::string ext {".tar.gz"};
     for (std::string_view cand : {".tar.gz", ".tgz", ".tar.xz", ".txz", ".tar.bz2", ".tar"})
         if (opts.url.ends_with(cand)) {
             ext = std::string(cand);
             break;
         }
-    const std::filesystem::path tar_cache = root / "tarballs" / (opts.sha256 + ext);
+    const std::filesystem::path tar_cache = root / "tarballs" / (sha256 + ext);
     if (auto r = detail::make_dirs(tar_cache.parent_path()); !r)
         return std::unexpected(r.error());
-    if (!std::filesystem::exists(tar_cache, ec)) {
-        log::info("fetching " + pkg_name + " (" + opts.url + ")");
-        if (auto r = tarball_fetch(opts.url, opts.sha256, tar_cache, opts.timeout); !r)
-            return std::unexpected(r.error());
-    }
-    std::filesystem::remove_all(dest, ec);
-    if (auto r = detail::make_dirs(dest); !r)
+    /* always enter tarball_fetch so existing cached tarballs are re-verified
+     * against their expected sha256 on every run */
+    if (auto r = tarball_fetch(pkg_name, opts.url, sha256, tar_cache, opts.timeout); !r)
         return std::unexpected(r.error());
-    if (auto r = extract_tarball(tar_cache, dest); !r) {
-        /* a refused tarball must not leave a (partly escaped) tree behind */
-        std::filesystem::remove_all(dest, ec);
+    /* extract into a sibling staging dir, verify symlinks and non-emptiness,
+     * then atomically publish into `dest` so an aborted/refused extraction
+     * never leaves a partial tree at `dest` */
+    if (dest.has_parent_path())
+        if (auto r = detail::make_dirs(dest.parent_path()); !r)
+            return std::unexpected(r.error());
+    const std::filesystem::path stage = staging_path(dest);
+    std::filesystem::remove_all(stage, ec);
+    if (auto r = detail::make_dirs(stage); !r)
+        return std::unexpected(r.error());
+    if (auto r = extract_tarball(tar_cache, stage); !r) {
+        std::filesystem::remove_all(stage, ec);
         return r;
     }
     /* --strip-components=1 silently drops root-level members: an archive
      * without the expected single top-level directory extracts to nothing */
     bool empty = true;
-    for (auto it = std::filesystem::directory_iterator(dest, ec);
+    for (auto it = std::filesystem::directory_iterator(stage, ec);
          empty && it != std::filesystem::directory_iterator {}; it.increment(ec)) {
         if (ec) break;
         empty = false;
     }
     if (empty) {
-        std::filesystem::remove_all(dest, ec);
+        std::filesystem::remove_all(stage, ec);
         return std::unexpected(Error {
             Error::Kind::Fetch,
             "tarball '" + opts.url + "' extracted nothing (truss strips one wrapper "
             "directory; the archive's members must sit inside a single top-level directory)",
         });
+    }
+    std::filesystem::remove_all(dest, ec);
+    std::filesystem::rename(stage, dest, ec);
+    if (ec) {
+        std::filesystem::remove_all(stage, ec);
+        return std::unexpected(Error {Error::Kind::Io, "could not publish extracted package", dest});
     }
     return {};
 }
@@ -585,6 +653,8 @@ Result<Package> Project::fetch(std::string_view name, const FetchOptions& opts) 
 }
 
 Result<std::vector<Package>> Project::fetch_all(std::vector<std::pair<std::string, FetchOptions>> requests) {
+    if (requests.empty())
+        return std::vector<Package> {};
     for (const auto& [name, opts] : requests)
         if (auto r = validate_fetch(name, opts); !r)
             return std::unexpected(r.error());
@@ -605,14 +675,15 @@ Result<std::vector<Package>> Project::fetch_all(std::vector<std::pair<std::strin
         Result<void> outcome {};
     };
     const std::filesystem::path lock_file = cwd_ / "truss.lock";
-    /* held across the pool: the final read-modify-write below must be atomic
-     * against concurrent truss processes (see lockfile_guard). Failing loudly
-     * when the lock cannot be taken beats silently racing on the pins. */
-    const lockfile_guard lock_guard(lock_file);
+    /* dedicated sidecar lockfile under build/: never unlinked or renamed, so
+     * write_lockfile()'s atomic rename over truss.lock cannot break exclusion
+     * and offline/empty runs never create an empty truss.lock in the repo */
+    const std::filesystem::path sidecar_lock = build_dir() / ".truss-fetch.lock";
+    const lockfile_guard lock_guard(sidecar_lock);
     if (!lock_guard.locked())
         return std::unexpected(Error {
             Error::Kind::Io,
-            "fetch_all: cannot lock " + lock_file.generic_string() + " — "
+            "fetch_all: cannot lock " + sidecar_lock.generic_string() + " — "
                 + lock_guard.why() + " (concurrent fetches would corrupt the pin file)",
         });
     auto lock = detail::read_lockfile(lock_file);
@@ -622,7 +693,9 @@ Result<std::vector<Package>> Project::fetch_all(std::vector<std::pair<std::strin
     for (auto& [name, opts] : requests) {
         Job job;
         job.name = name;
-        job.pin = opts.git.empty() ? opts.sha256 : opts.tag;
+        /* pin git packages by url@tag (changing the repo URL must invalidate
+         * the pin) and tarballs by lowercase sha256 */
+        job.pin = opts.git.empty() ? lowercase_copy(opts.sha256) : (opts.git + "@" + opts.tag);
         job.dest = build_dir() / "packages" / name;
         const auto pin_it = lock.find(lock_key(name));
         /* the completion marker (written after a full materialize) must be
@@ -719,7 +792,7 @@ Result<TargetRef> Project::add_subdirectory(const std::filesystem::path& dir) {
         target = &lib;
     } else if (has_top_level_sources(abs)) {
         auto& lib = add_static_library(name);
-        lib.sources(rel + "/*.{c,cpp,cc,cxx}"); /* root-layout: top-level sources only */
+        lib.sources(rel + "/*.{c,cpp,cc,cxx,cppm,ixx}"); /* root-layout: top-level sources only */
         target = &lib;
     } else {
         target = &add_interface_library(name); /* header-only */
@@ -807,13 +880,13 @@ Result<TargetRef> Project::conan(std::string_view conanfile) {
         return std::unexpected(r.error());
     const std::filesystem::path spec_path = out / "truss-spec.json";
 
-    /* configure skip: sha256 of the conanfile + a cached usage-requirements
-     * spec; unchanged input with surviving package dirs means re-running
-     * conan install could not change anything (~1-3 s saved per invocation) */
+    /* configure skip: sha256 of the conanfile + build_type + cached spec;
+     * unchanged input with surviving package dirs skips conan install (~1-3 s) */
+    const std::string build_type = mode_ == BuildMode::Release ? "Release" : "Debug";
     std::string fingerprint;
     if (const std::string cf_file = conanfile_in(cf); !cf_file.empty())
         if (auto fp = fs::sha256_file(cf_file); fp)
-            fingerprint = *fp;
+            fingerprint = *fp + "-" + build_type;
 
     std::vector<std::string> includes, link_paths, libs, defines;
     const auto apply_spec = [&](const nlohmann::json& spec) -> Result<TargetRef> {
@@ -863,7 +936,7 @@ Result<TargetRef> Project::conan(std::string_view conanfile) {
     log::info("conan install " + cf.generic_string());
     const std::vector<std::string> argv {"conan", "install", cf.generic_string(),
                                          "--format=json", "--output-folder", out.generic_string(),
-                                         "--build=missing"};
+                                         "-s", "build_type=" + build_type, "--build=missing"};
     auto outcome = detail::run_process_stdout(argv, 900);
     if (!outcome)
         return std::unexpected(outcome.error());
@@ -890,25 +963,73 @@ Result<TargetRef> Project::conan(std::string_view conanfile) {
              | std::ranges::to<std::vector>();
     };
 
-    for (const auto& [id, node] : j["graph"]["nodes"].items()) {
+    /* Traverse nodes in topological order (post-order reversed from root "0")
+     * so GNU ld sees consumers before providers instead of string-sorted IDs
+     * ("1", "10", "2"). Also collect named Conan 2 components, not just "root". */
+    const auto& nodes = j["graph"]["nodes"];
+    std::vector<std::string> topo_post;
+    std::unordered_set<std::string> visited;
+    auto dfs_node = [&](this const auto& self, const std::string& id) -> void {
+        if (!visited.insert(id).second || !nodes.contains(id))
+            return;
+        const auto& node = nodes[id];
+        if (node.contains("dependencies") && node["dependencies"].is_object()) {
+            std::vector<std::string> dep_ids;
+            for (const auto& [dep_id, _] : node["dependencies"].items())
+                dep_ids.push_back(dep_id);
+            std::ranges::sort(dep_ids);
+            for (const auto& dep_id : dep_ids)
+                self(dep_id);
+        }
+        topo_post.push_back(id);
+    };
+    if (nodes.contains("0"))
+        dfs_node("0");
+    /* any remaining disconnected nodes in deterministic key order */
+    {
+        std::vector<std::string> remaining;
+        for (const auto& [id, _] : nodes.items())
+            if (!visited.contains(id))
+                remaining.push_back(id);
+        std::ranges::sort(remaining);
+        for (const auto& id : remaining)
+            dfs_node(id);
+    }
+
+    std::unordered_set<std::string> seen_inc, seen_lp, seen_lib, seen_def;
+    const auto push_unique = [](std::vector<std::string>& dst, std::unordered_set<std::string>& seen,
+                                const std::string& v) {
+        if (seen.insert(v).second)
+            dst.push_back(v);
+    };
+    const auto collect_cpp_info = [&](const nlohmann::json& ci, const std::filesystem::path& pkg_folder) {
+        if (!ci.is_object())
+            return;
+        for (const auto& d : dir_array(ci, "includedirs", pkg_folder))
+            push_unique(includes, seen_inc, d);
+        for (const auto& d : dir_array(ci, "libdirs", pkg_folder))
+            push_unique(link_paths, seen_lp, d);
+        for (const auto& l : json_str_array(ci, "libs"))
+            push_unique(libs, seen_lib, l);
+        for (const auto& l : json_str_array(ci, "system_libs"))
+            push_unique(libs, seen_lib, l);
+        for (const auto& d : json_str_array(ci, "defines"))
+            push_unique(defines, seen_def, d);
+    };
+    for (const auto& id : std::views::reverse(topo_post)) {
+        const auto& node = nodes[id];
         /* skip the consumer root node: it has no package folder */
-        std::filesystem::path pkg_folder;
         if (!node.contains("package_folder") || !node["package_folder"].is_string())
             continue;
-        pkg_folder = node["package_folder"].get<std::string>();
-        if (!node.contains("cpp_info") || !node["cpp_info"].contains("root"))
+        const std::filesystem::path pkg_folder = node["package_folder"].get<std::string>();
+        if (!node.contains("cpp_info") || !node["cpp_info"].is_object())
             continue;
-        const auto& root = node["cpp_info"]["root"];
-        for (const auto& d : dir_array(root, "includedirs", pkg_folder))
-            includes.push_back(d);
-        for (const auto& d : dir_array(root, "libdirs", pkg_folder))
-            link_paths.push_back(d);
-        for (const auto& l : json_str_array(root, "libs"))
-            libs.push_back(l);
-        for (const auto& l : json_str_array(root, "system_libs"))
-            libs.push_back(l);
-        for (const auto& d : json_str_array(root, "defines"))
-            defines.push_back(d);
+        const auto& cpp_info = node["cpp_info"];
+        if (cpp_info.contains("root"))
+            collect_cpp_info(cpp_info["root"], pkg_folder);
+        for (const auto& [comp_name, comp] : cpp_info.items())
+            if (comp_name != "root")
+                collect_cpp_info(comp, pkg_folder);
     }
 
     nlohmann::json spec {
@@ -972,18 +1093,24 @@ Result<TargetRef> Project::vcpkg(std::vector<std::string> packages) {
     if (!os::program_exists(exe))
         return std::unexpected(Error {Error::Kind::Toolchain, "vcpkg not found (put it on PATH or set VCPKG_ROOT)"});
 
-    const std::filesystem::path manifest = cwd_ / "vcpkg.json";
+    /* When packages are listed inline, generate vcpkg.json under build/ (never
+     * dirtying the source tree, and always picking up edits to packages); when
+     * empty, consume the user's own vcpkg.json in cwd_. */
+    std::filesystem::path manifest_dir = cwd_;
+    std::filesystem::path manifest = cwd_ / "vcpkg.json";
     std::error_code ec;
-    if (!std::filesystem::exists(manifest, ec)) {
-        if (packages.empty())
-            return std::unexpected(Error {
-                Error::Kind::Config, "vcpkg: no vcpkg.json in the project root and no packages listed",
-            });
+    if (!packages.empty()) {
+        manifest_dir = build_dir() / "packages" / "vcpkg_generated";
+        manifest = manifest_dir / "vcpkg.json";
         const nlohmann::json body {
             {"name", name_}, {"version", "1.0.0"}, {"dependencies", packages},
         };
-        if (auto r = detail::write_file(manifest, body.dump(2) + "\n"); !r)
+        if (auto r = detail::write_file_if_changed(manifest, body.dump(2) + "\n"); !r)
             return std::unexpected(r.error());
+    } else if (!std::filesystem::exists(manifest, ec)) {
+        return std::unexpected(Error {
+            Error::Kind::Config, "vcpkg: no vcpkg.json in the project root and no packages listed",
+        });
     }
 
     const TargetTriple triple = host_triple();
@@ -1025,11 +1152,11 @@ Result<TargetRef> Project::vcpkg(std::vector<std::string> packages) {
     } else {
         log::info("vcpkg install (" + triplet + ")");
         /* manifest mode is auto-detected from vcpkg.json in the process cwd:
-         * pass the project root explicitly instead of assuming they match */
+         * pass manifest_dir explicitly instead of assuming it equals cwd */
         const std::vector<std::string> argv {exe, "install", "--triplet", triplet,
                                              "--x-install-root", install_root.generic_string(),
                                              "--no-print-usage"};
-        auto outcome = detail::run_process(argv, false, cwd_, 900);
+        auto outcome = detail::run_process(argv, false, manifest_dir, 900);
         if (!outcome)
             return std::unexpected(outcome.error());
         if (outcome->exit_code != 0)
@@ -1041,7 +1168,10 @@ Result<TargetRef> Project::vcpkg(std::vector<std::string> packages) {
     auto& iface = add_interface_library("vcpkg");
     if (std::filesystem::is_directory(tdir / "include", ec))
         iface.system_include_dirs((tdir / "include").generic_string());
-    const std::filesystem::path libdir = tdir / "lib";
+    const std::filesystem::path libdir =
+        (mode_ == BuildMode::Debug && std::filesystem::is_directory(tdir / "debug" / "lib", ec))
+            ? (tdir / "debug" / "lib")
+            : (tdir / "lib");
     if (std::filesystem::is_directory(libdir, ec)) {
         iface.link_paths(libdir.generic_string());
         std::vector<std::string> names;
@@ -1054,7 +1184,7 @@ Result<TargetRef> Project::vcpkg(std::vector<std::string> packages) {
                 continue; /* skip pkgconfig/ and other subdirs */
             const std::string fn = it->path().filename().generic_string();
             std::string base;
-            if (fn.ends_with(".a") || fn.contains(".so"))
+            if (fn.ends_with(".a") || fn.ends_with(".so") || fn.contains(".so."))
                 base = fn.starts_with("lib") ? fn.substr(3) : fn;
             else
                 continue;
@@ -1065,6 +1195,7 @@ Result<TargetRef> Project::vcpkg(std::vector<std::string> packages) {
             if (!base.empty() && seen.insert(base).second)
                 names.push_back(base);
         }
+        std::ranges::sort(names); /* deterministic manifest order */
         if (auto r = check_spec_values(names, "library"); !r)
             return std::unexpected(r.error());
         for (const auto& n : names)

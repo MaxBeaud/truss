@@ -10,6 +10,7 @@
  */
 module;
 #include <cstddef>
+#include <cstdint>
 #include <filesystem>
 #include <functional>
 #include <map>
@@ -164,6 +165,11 @@ Result<std::pair<std::string, std::vector<std::string>>>
 resolve_module_imports(const ModuleUnitInfo& u, const std::map<std::string, std::string, std::less<>>& bmis,
                        const std::map<std::string, std::vector<std::string>, std::less<>>& module_imports);
 
+/// Locate the `clang-scan-deps` binary matching `compiler` (checking sibling
+/// directory and matching `-NN` version suffix before falling back to PATH).
+/// \ingroup grp_internals
+std::optional<std::filesystem::path> find_clang_scan_deps(std::string_view compiler);
+
 /// Authoritative import closure for one TU via the compiler's p1689 output:
 /// clang through clang-scan-deps, GCC through -fdeps-format=p1689r5 — one TU
 /// per invocation, ~10 ms per TU.
@@ -215,13 +221,28 @@ Result<std::optional<std::pair<std::vector<std::string>, std::vector<std::string
 scan_cache_lookup(const std::filesystem::path& cache_dir, std::string_view key,
                   const std::string& source);
 
+/// Snapshot of a source file's (mtime, size) taken BEFORE scanning, so a
+/// mid-scan edit never gets its new mtime stamped onto a stale scan result.
+/// \ingroup grp_internals
+struct ScanSourceStat {
+    std::int64_t mtime {};
+    std::uintmax_t size {};
+    bool ok {};
+};
+
+/// Capture (mtime, size) for a source path before launching a compiler scan.
+/// \ingroup grp_internals
+ScanSourceStat scan_cache_stat(const std::string& source);
+
 /// Store a successful scan result (atomic replace; parents created). Failures
 /// are ignored by callers — a read-only build dir must not fail the build.
+/// Pass `pre_stat` captured before scanning to avoid a mid-scan TOCTOU race.
 /// \ingroup grp_internals
 Result<void> scan_cache_store(const std::filesystem::path& cache_dir, std::string_view key,
                               const std::string& source,
                               std::span<const std::string> imports,
-                              std::span<const std::string> header_imports);
+                              std::span<const std::string> header_imports,
+                              std::optional<ScanSourceStat> pre_stat = std::nullopt);
 
 /// Bound the cache directory: when it holds more than `max_entries` files, the
 /// oldest (by mtime) are removed down to three quarters of that. Entries are

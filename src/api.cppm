@@ -280,7 +280,7 @@ public:
             }
             return *this;
         }
-        iterator operator++(int) { const iterator tmp = *this; ++*this; return tmp; }
+        void operator++(int) { ++*this; }
         friend bool operator==(const iterator& it, std::default_sentinel_t) {
             return !it.handle_ || it.handle_.done();
         }
@@ -293,11 +293,13 @@ public:
     explicit generator(handle_t h) : handle_(h) {}
     generator(const generator&) = delete;
     generator& operator=(const generator&) = delete;
-    generator(generator&& other) noexcept : handle_(std::exchange(other.handle_, {})) {}
+    generator(generator&& other) noexcept
+        : handle_(std::exchange(other.handle_, {})), started_(std::exchange(other.started_, false)) {}
     generator& operator=(generator&& other) noexcept {
         if (this != &other) {
             if (handle_) handle_.destroy();
             handle_ = std::exchange(other.handle_, {});
+            started_ = std::exchange(other.started_, false);
         }
         return *this;
     }
@@ -306,13 +308,16 @@ public:
     }
 
     iterator begin() {
-        if (!handle_) /* moved-from generator: empty range, no null-handle resume */
+        if (!handle_ || handle_.done()) /* moved-from or exhausted: empty range */
             return iterator {};
-        handle_.resume();
-        if (handle_.done()) {
-            if (handle_.promise().exception)
-                std::rethrow_exception(handle_.promise().exception);
-            return iterator {};
+        if (!started_) {
+            started_ = true;
+            handle_.resume();
+            if (handle_.done()) {
+                if (handle_.promise().exception)
+                    std::rethrow_exception(handle_.promise().exception);
+                return iterator {};
+            }
         }
         return iterator {handle_};
     }
@@ -320,6 +325,7 @@ public:
 
 private:
     handle_t handle_ {};
+    bool started_ {false};
 };
 
 /// A compiler target: host by default, cross-compilable by override.
@@ -655,7 +661,8 @@ std::string generic_str(const std::filesystem::path&);
 } // namespace fs
 
 /**
- * \brief Colored stderr-free logging on truss's own channel.
+ * \brief Colored logging on truss's own stderr channel (keeps stdout clean for
+ * `truss run` and piped program output).
  * Use from task() bodies and build-script helpers for output consistent
  * with truss's own messages.
  */
@@ -1086,9 +1093,11 @@ public:
      */
     template <class Self>
     Self& as_shared(this Self& self, bool v = true) {
+        self.as_shared_called_ = true;
         if (self.kind_ == TargetKind::SharedLibrary || self.kind_ == TargetKind::StaticLibrary) {
             self.kind_ = v ? TargetKind::SharedLibrary : TargetKind::StaticLibrary;
-            self.static_link_ = false; /* an explicit kind wins over a demotion */
+            self.static_link_ = false;   /* an explicit kind wins over a demotion */
+            self.demoted_shared_ = false;
         }
         return self;
     }
@@ -1268,6 +1277,8 @@ public:
     bool pic() const { return pic_; }
     /// static_link() / static_deps() state (named apart: the setters default their bool).
     bool static_link_enabled() const { return static_link_; }
+    /// True when as_shared() was called on this target (for build()-time validation).
+    bool as_shared_called() const { return as_shared_called_; }
     const std::string& output_name() const { return output_name_; }
     bool is_built_by_default() const { return build_by_default_; }
     bool is_default_target() const { return default_target_; }
@@ -1335,6 +1346,7 @@ private:
      * deducing-this template below, so the module interface TU (where the
      * template is never instantiated) would flag it as unused. */
     [[maybe_unused]] bool demoted_shared_ {false};
+    bool as_shared_called_ {false};
     bool static_deps_ {false};
     StaticStdlib static_stdlib_ {};
     bool for_host_ {false};
@@ -1694,7 +1706,7 @@ public:
      * Every target is built for every subgraph (outputs land in their
      * per-triple directories); `./truss test` runs each subgraph's tests with
      * that subgraph's runner; `--for NAME` narrows tasks to one subgraph and
-     * `--target NAME:target` (or a bare target name = every subgraph that has
+     * `--target SUBGRAPH:NAME` (or a bare target name = every subgraph that has
      * it) selects build targets. Mutually exclusive with configure() (a Config
      * error when both are used). Subgraph names follow target-name rules and
      * must be unique; two subgraphs may not share a triple (their outputs
@@ -1808,8 +1820,8 @@ public:
     const std::vector<std::string>& only_targets() const { return only_targets_; }
     /// Subgraph selected with --for (empty = all); used by build/test/run.
     const std::string& for_selector() const { return for_selector_; }
-    /// Get the auto-discovered truss module paths.
-    const std::vector<std::filesystem::path>& truss_module_paths() const { return truss_module_paths_; }
+    /// Get the auto-discovered truss module paths (probed lazily on first call).
+    const std::vector<std::filesystem::path>& truss_module_paths() const;
 
 private:
     template <class T>
@@ -1848,7 +1860,8 @@ private:
     std::optional<std::filesystem::path> build_root_;
     std::optional<Error> cli_error_;
     std::vector<std::string> subdir_target_names_; /* created by add_subdirectory */
-    std::vector<std::filesystem::path> truss_module_paths_; /* auto-discovered truss module paths */
+    mutable std::vector<std::filesystem::path> truss_module_paths_; /* lazily discovered truss module paths */
+    mutable bool truss_module_paths_loaded_ {false};
 };
 
 /** \} */ // grp_api

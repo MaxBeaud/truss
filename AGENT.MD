@@ -109,7 +109,7 @@ A C++26 build-system library: build scripts are ordinary C++ programs
   makes `depends_on()`/`uses()` a Config error; `as_shared()` picks the library
   kind. `symbols_hidden()` is a compile flag (no-op on MSVC).
 - CLI: `./truss [debug|release] [command...] [-j N] [-q] [-v] [-n] [--explain]
-  [--target NAME[:SUBGRAPH]] [--for SUBGRAPH] [--build-dir PATH] [-- ARGS...]`.
+  [--target [SUBGRAPH:]NAME] [--for SUBGRAPH] [--build-dir PATH] [-- ARGS...]`.
   Built-in commands: `test`, `run`, `clean`, `compdb`, `reload`; user tasks run
   via `task NAME`. `--for` narrows `build`/`test`/`run` to one subgraph.
   `run`/`test` build only what they execute; a bare `./truss` builds `all`.

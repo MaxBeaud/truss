@@ -224,3 +224,106 @@ TEST_CASE("scan cache: gc keeps the newest entries under the cap") {
     CHECK(newest_survived);
     std::filesystem::remove_all(dir);
 }
+
+TEST_CASE("targetopts: as_shared() and merge() reject invalid target kinds and cycles") {
+    ScratchDir dir {"invalid-opts"};
+    REQUIRE(detail::write_file("src/a.cpp", "int main() { return 0; }\n").has_value());
+    REQUIRE(detail::write_file("src/lib.cpp", "int f() { return 1; }\n").has_value());
+    char prog[] = "truss-tests";
+    char dry[] = "-n";
+    char* argv[] = {prog, dry};
+
+    {
+        Project proj("exe-shared", 2, argv);
+        proj.add_executable("app").sources("src/a.cpp").as_shared();
+        auto r = proj.build();
+        REQUIRE_FALSE(r.has_value());
+        CHECK(r.error().kind == Error::Kind::Config);
+        CHECK(contains(r.error().message, "as_shared"));
+    }
+    {
+        Project proj("exe-merge", 2, argv);
+        auto& lib = proj.add_static_library("core").sources("src/lib.cpp");
+        proj.add_executable("app").sources("src/a.cpp").merge(lib);
+        auto r = proj.build();
+        REQUIRE_FALSE(r.has_value());
+        CHECK(r.error().kind == Error::Kind::Config);
+        CHECK(contains(r.error().message, "merge"));
+    }
+    {
+        Project proj("self-merge", 2, argv);
+        auto& lib = proj.add_static_library("core").sources("src/lib.cpp");
+        lib.merge(lib);
+        auto r = proj.build();
+        REQUIRE_FALSE(r.has_value());
+        CHECK(r.error().kind == Error::Kind::Config);
+        CHECK(contains(r.error().message, "cycle"));
+    }
+    {
+        Project proj("ctrl-cflags", 2, argv);
+        proj.add_executable("app").sources("src/a.cpp").c_flags("-O2\nbuild evil: phony");
+        auto r = proj.build();
+        REQUIRE_FALSE(r.has_value());
+        CHECK(r.error().kind == Error::Kind::Config);
+        CHECK(contains(r.error().message, "control characters"));
+    }
+}
+
+TEST_CASE("tasks and dry-run: task builds before running; -n performs no side effects") {
+    ScratchDir dir {"task-build-dry"};
+    REQUIRE(detail::write_file("src/main.cpp", "int main() { return 0; }\n").has_value());
+    char prog[] = "truss-tests", task[] = "task", run_t[] = "check", dry[] = "-n", clean[] = "clean";
+
+    /* ./truss task check builds app first */
+    bool built_before_task = false;
+    {
+        char* argv[] = {prog, task, run_t};
+        Project proj("task-build", 3, argv);
+        proj.configure(Config().toolchain(Toolchain::LLVM));
+        proj.add_executable("app").sources("src/main.cpp");
+        proj.task("check", [&](const TaskContext&) -> Result<void> {
+            built_before_task = std::filesystem::exists("build/debug/bin/x64-linux-clang/app");
+            return {};
+        });
+        auto r = proj.build();
+        INFO((r ? "ok" : r.error().message));
+        REQUIRE(r.has_value());
+        CHECK(built_before_task);
+    }
+
+    /* -n task check does not invoke the task body */
+    bool ran_under_dry = false;
+    {
+        char* argv[] = {prog, dry, task, run_t};
+        Project proj("task-dry", 4, argv);
+        proj.configure(Config().toolchain(Toolchain::LLVM));
+        proj.add_executable("app").sources("src/main.cpp");
+        proj.task("check", [&](const TaskContext&) -> Result<void> {
+            ran_under_dry = true;
+            return {};
+        });
+        REQUIRE(proj.build().has_value());
+        CHECK_FALSE(ran_under_dry);
+    }
+
+    /* -n clean does not delete build/debug */
+    {
+        char* argv[] = {prog, dry, clean};
+        Project proj("clean-dry", 3, argv);
+        REQUIRE(proj.build().has_value());
+        CHECK(std::filesystem::exists("build/debug"));
+    }
+}
+
+TEST_CASE("samu: compile failure returns a Command error in-process instead of exit(1)") {
+    ScratchDir dir {"compile-fail"};
+    REQUIRE(detail::write_file("src/broken.cpp", "int main() { return undefined_symbol; }\n").has_value());
+    char prog[] = "truss-tests";
+    char* argv[] = {prog};
+    Project proj("compile-fail", 1, argv);
+    proj.configure(Config().toolchain(Toolchain::LLVM));
+    proj.add_executable("app").sources("src/broken.cpp");
+    auto r = proj.build();
+    REQUIRE_FALSE(r.has_value());
+    CHECK(r.error().kind == Error::Kind::Command);
+}

@@ -267,7 +267,7 @@ std::vector<std::filesystem::path> find_truss_modules() {
     };
 
     // Check TRUSS_INSTALL_PREFIX environment variable first
-    if (const char* prefix = std::getenv("TRUSS_INSTALL_PREFIX"))
+    if (const char* prefix = std::getenv("TRUSS_INSTALL_PREFIX"); prefix != nullptr && *prefix != '\0')
         try_add(std::filesystem::path(prefix) / "lib" / "truss");
 
     // Get the directory of the current truss executable
@@ -282,10 +282,10 @@ std::vector<std::filesystem::path> find_truss_modules() {
                                       "/usr/local/lib/truss", "/usr/lib/truss",
                                       "/usr/lib64/truss"}) {
         std::string path_str = std::string(path_template);
-        // Expand $HOME (skip the candidate when HOME is unset: a cwd-relative
-        // ~/.local would silently point somewhere else)
+        // Expand $HOME (skip the candidate when HOME is unset or empty: a
+        // cwd-relative or root-relative /.local would point somewhere else)
         if (path_str.starts_with("$HOME")) {
-            if (home == nullptr)
+            if (home == nullptr || *home == '\0')
                 continue;
             path_str.replace(0, 5, home);
         }

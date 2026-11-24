@@ -14,7 +14,11 @@ module;
 #include <fcntl.h>
 #include <spawn.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
+#if defined(__linux__)
+#include <sys/syscall.h>
+#endif
 
 module truss;
 import :api;
@@ -59,7 +63,29 @@ Result<ProcOutcome> run_impl(std::span<const std::string> argv, int capture_mode
     cargv.push_back(nullptr);
 
     ProcOutcome outcome;
-    int pipe_fd[2] = {-1, -1};
+    struct pipe_guard {
+        int fds[2] {-1, -1};
+        void close_read() {
+            if (fds[0] != -1) {
+                ::close(fds[0]);
+                fds[0] = -1;
+            }
+        }
+        void close_write() {
+            if (fds[1] != -1) {
+                ::close(fds[1]);
+                fds[1] = -1;
+            }
+        }
+        ~pipe_guard() {
+            close_read();
+            close_write();
+        }
+        pipe_guard() = default;
+        pipe_guard(const pipe_guard&) = delete;
+        pipe_guard& operator=(const pipe_guard&) = delete;
+    } pipe;
+    int (&pipe_fd)[2] = pipe.fds;
     /* RAII over posix_spawn_file_actions_t / posix_spawnattr_t: every early
      * return below stays leak-proof without hand-written destroy calls */
     struct actions_guard {
@@ -128,7 +154,6 @@ Result<ProcOutcome> run_impl(std::span<const std::string> argv, int capture_mode
     const int rc = posix_spawnp(&pid, cargv[0], &actions, &attr, cargv.data(), environ);
 
     if (rc != 0) {
-        if (pipe_fd[0] != -1) { close(pipe_fd[0]); close(pipe_fd[1]); }
         return std::unexpected(Error {
             Error::Kind::Command,
             std::string("failed to spawn '") + cargv[0] + "': " + std::strerror(rc),
@@ -146,11 +171,16 @@ Result<ProcOutcome> run_impl(std::span<const std::string> argv, int capture_mode
     };
     /* reap without blocking where possible; the child's exit status lands in
      * outcome.exit_code. Returns true once reaped. A waitpid failure (other
-     * than a plain "still running") yields exit_code -1: no reliable status. */
+     * than EINTR or a plain "still running") yields exit_code -1. */
     const auto reap = [&](bool block) -> bool {
         int status = 0;
-        const int waited = waitpid(pid, &status, block ? 0 : WNOHANG);
+        pid_t waited = 0;
+        do {
+            waited = waitpid(pid, &status, block ? 0 : WNOHANG);
+        } while (waited < 0 && errno == EINTR && block);
         if (waited < 0) {
+            if (errno == EINTR)
+                return false; /* non-blocking poll interrupted: retry on next tick */
             outcome.exit_code = -1; /* waitpid failed outright: no reliable status */
             return true;
         }
@@ -165,7 +195,7 @@ Result<ProcOutcome> run_impl(std::span<const std::string> argv, int capture_mode
     bool reaped = false;
     bool timed_out = false;
     if (capture_mode && pipe_fd[1] != -1) {
-        close(pipe_fd[1]);
+        pipe.close_write();
         std::array<char, 64 * 1024> buf; /* 64 KiB: fewer read syscalls on chatty captures */
         /* a runaway child must not grow the buffer without end: past the cap
          * the pipe is drained (so the child never blocks) but dropped */
@@ -218,10 +248,16 @@ Result<ProcOutcome> run_impl(std::span<const std::string> argv, int capture_mode
                     outcome.output.append(buf.data(), static_cast<std::size_t>(n));
             }
         }
-        close(pipe_fd[0]);
+        pipe.close_read();
     } else if (timeout_seconds <= 0) {
         reaped = reap(true); /* no deadline: a plain blocking wait, no polling */
     } else {
+        /* Linux pidfd_open + poll wakes immediately when the child exits with
+         * zero polling sleep; fall back to nanosleep if unavailable. */
+        int pidfd = -1;
+#if defined(__linux__) && defined(SYS_pidfd_open)
+        pidfd = static_cast<int>(::syscall(SYS_pidfd_open, pid, 0u));
+#endif
         for (;;) {
             reaped = reap(false);
             if (reaped)
@@ -229,11 +265,22 @@ Result<ProcOutcome> run_impl(std::span<const std::string> argv, int capture_mode
             if (expired()) {
                 timed_out = true;
                 kill_group();
-                reap(true); /* SIGKILL: immediate */
+                reaped = reap(true); /* SIGKILL: immediate */
                 break;
             }
-            ::usleep(20 * 1000);
+            if (pidfd >= 0) {
+                const auto rem = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    deadline - std::chrono::steady_clock::now()).count();
+                const int wait_ms = rem <= 0 ? 0 : (rem > 1000 ? 1000 : static_cast<int>(rem));
+                pollfd pfd {pidfd, POLLIN, 0};
+                ::poll(&pfd, 1, wait_ms);
+            } else {
+                const struct timespec ts {0, 20 * 1000 * 1000};
+                ::nanosleep(&ts, nullptr);
+            }
         }
+        if (pidfd >= 0)
+            ::close(pidfd);
     }
     if (!reaped)
         reap(true); /* blocking: the child has exited (or was just SIGKILLed) */

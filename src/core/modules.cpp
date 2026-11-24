@@ -79,22 +79,44 @@ std::string strip_non_code(std::string_view s) {
             while (i < stop)
                 blank(s[i++]);
         } else if (c == '"' || c == '\'') { /* plain string or char literal */
-            /* an apostrophe is a digit separator only right after a digit
-             * (1'000, 0x1'b): L'a' / u'a' are (encoding-prefixed) literals */
-            if (c == '\'' && i > 0 && std::isdigit(static_cast<unsigned char>(s[i - 1]))) {
+            /* an apostrophe is a digit separator after any hex/dec digit
+             * (1'000, 0xdead'beef) — EXCEPT right after a `u8` char-literal
+             * prefix (u8'a'), where the '8' is part of the encoding prefix */
+            const auto is_ident = [](char ch) {
+                return static_cast<bool>(std::isalnum(static_cast<unsigned char>(ch))) || ch == '_';
+            };
+            const bool is_u8_prefix =
+                i >= 2 && s[i - 1] == '8' && s[i - 2] == 'u'
+                && (i == 2 || !is_ident(s[i - 3]));
+            if (c == '\'' && i > 0 && std::isxdigit(static_cast<unsigned char>(s[i - 1]))
+                && !is_u8_prefix) {
                 out += c;
                 ++i;
                 continue;
             }
-            blank(s[i++]);
+            /* keep outer '"' quotes on plain strings (blanking their contents)
+             * so `import "hdr.h";` remains recognizable as a header-unit import
+             * while `import` inside string text is still erased */
+            if (c == '"') {
+                out += '"';
+                ++i;
+            } else {
+                blank(s[i++]);
+            }
             while (i < s.size() && s[i] != c) {
                 const bool esc = s[i] == '\\' && i + 1 < s.size();
                 blank(s[i++]);
                 if (esc && i < s.size())
                     blank(s[i++]);
             }
-            if (i < s.size())
-                blank(s[i++]); /* closing quote */
+            if (i < s.size()) {
+                if (c == '"') {
+                    out += '"';
+                    ++i;
+                } else {
+                    blank(s[i++]); /* closing quote */
+                }
+            }
         } else {
             out += c;
             ++i;
@@ -112,17 +134,17 @@ Result<ModuleUnitInfo> scan_module_unit(const std::string& path) {
 
     ModuleUnitInfo info;
     info.path = path;
-    std::string s = std::move(*text);
+    const std::string raw = std::move(*text);
     /* cheap pre-filter on the RAW text first: a file that never mentions
      * module/import anywhere (the majority of TUs) skips the strip+scan
      * work entirely (the strip can only remove matches, never add them) */
     info.mentions_module_syntax =
-        s.find("module") != std::string::npos || s.find("import") != std::string::npos;
+        raw.find("module") != std::string::npos || raw.find("import") != std::string::npos;
     if (!info.mentions_module_syntax)
         return info;
-    /* comments and string/char/raw literals are blanked: module and import
-     * statements only count when they are real code */
-    s = strip_non_code(s);
+    /* comments and string/char/raw literals are blanked (1-to-1 length
+     * preserving): module and import statements only count when real code */
+    const std::string s = strip_non_code(raw);
 
     /* Hand-rolled line scan (replaced two std::regex passes — the ECMAScript
      * engine cost microseconds per attempted line on the configure hot path).
@@ -170,7 +192,13 @@ Result<ModuleUnitInfo> scan_module_unit(const std::string& path) {
                  * wiring — but they are recorded so the build can say so
                  * explicitly instead of failing opaquely at compile time */
                 if (!cap.empty() && (cap.front() == '<' || cap.front() == '"')) {
-                    info.header_imports.emplace_back(cap);
+                    /* strip_non_code preserves byte offsets 1:1 and blanks the
+                     * interior of `"..."`, so read the original header spelling
+                     * from `raw` for clear diagnostics */
+                    std::string_view orig(raw.data() + i, semi - i);
+                    while (!orig.empty() && (orig.back() == ' ' || orig.back() == '\t' || orig.back() == '\r'))
+                        orig.remove_suffix(1);
+                    info.header_imports.emplace_back(orig);
                 } else if (!cap.empty() && cap.front() != ';'
                            && cap.front() != ' ' && cap.front() != '\t') {
                     /* split partition lists like `import :a, :b;` */
@@ -327,6 +355,34 @@ resolve_module_imports(const ModuleUnitInfo& u, const std::map<std::string, std:
     return std::make_pair(flags, order);
 }
 
+std::optional<std::filesystem::path> find_clang_scan_deps(std::string_view compiler) {
+    /* Extract the first token (driver path/name), then prefer a version-matched
+     * clang-scan-deps in the compiler's directory before falling back to PATH. */
+    std::string_view driver = compiler.substr(0, compiler.find(' '));
+    if (driver.empty())
+        return os::find_program("clang-scan-deps");
+    const std::filesystem::path p(driver);
+    const std::string base = p.filename().generic_string();
+    std::string ver_suffix;
+    if (const auto dash = base.rfind('-'); dash != std::string::npos && dash + 1 < base.size()) {
+        const std::string_view tail = std::string_view(base).substr(dash + 1);
+        if (std::ranges::all_of(tail, [](char c) { return c >= '0' && c <= '9'; }))
+            ver_suffix = "-" + std::string(tail);
+    }
+    if (p.has_parent_path()) {
+        const std::filesystem::path dir = p.parent_path();
+        if (!ver_suffix.empty())
+            if (auto found = os::find_program((dir / ("clang-scan-deps" + ver_suffix)).generic_string()))
+                return found;
+        if (auto found = os::find_program((dir / "clang-scan-deps").generic_string()))
+            return found;
+    }
+    if (!ver_suffix.empty())
+        if (auto found = os::find_program("clang-scan-deps" + ver_suffix))
+            return found;
+    return os::find_program("clang-scan-deps");
+}
+
 /* Authoritative import list for one TU via the compiler's p1689 output.
  * clang: clang-scan-deps over a single-entry compilation database (this clang
  * build leaves "primary-output" empty in multi-TU CDB scans, so rules could
@@ -369,19 +425,36 @@ scan_deps_requires(const std::string& compiler, std::string_view compile_flags,
         const auto shell_tokens = [](std::string_view line) {
             std::vector<std::string> out;
             std::string tok;
-            bool in_quote = false, have_tok = false;
+            bool in_dquote = false, in_squote = false, have_tok = false;
             for (std::size_t k = 0; k < line.size(); ++k) {
                 const char c = line[k];
-                if (in_quote) {
-                    if (c == '"')
-                        in_quote = false;
-                    else if (c == '\\' && k + 1 < line.size())
-                        tok += line[++k];
+                if (in_squote) {
+                    if (c == '\'')
+                        in_squote = false;
                     else
                         tok += c;
                     have_tok = true;
+                } else if (in_dquote) {
+                    if (c == '"')
+                        in_dquote = false;
+                    else if (c == '\\' && k + 1 < line.size()) {
+                        const char n = line[k + 1];
+                        /* POSIX /bin/sh inside double quotes: backslash escapes
+                         * only ", \, $, `, and newline; other backslashes stay */
+                        if (n == '"' || n == '\\' || n == '$' || n == '`')
+                            tok += line[++k];
+                        else if (n == '\n')
+                            ++k;
+                        else
+                            tok += c;
+                    } else
+                        tok += c;
+                    have_tok = true;
                 } else if (c == '"') {
-                    in_quote = true;
+                    in_dquote = true;
+                    have_tok = true;
+                } else if (c == '\'') {
+                    in_squote = true;
                     have_tok = true;
                 } else if (c == '\\') {
                     if (k + 1 < line.size())
@@ -441,8 +514,10 @@ scan_deps_requires(const std::string& compiler, std::string_view compile_flags,
         if (auto r = write_file(cdb, nlohmann::json {entry}.dump()); !r)
             return std::unexpected(r.error());
 
+        const auto scanner = find_clang_scan_deps(compiler);
+        const std::string scan_exe = scanner ? scanner->generic_string() : std::string {"clang-scan-deps"};
         const std::vector<std::string> argv {
-            "clang-scan-deps", "--format=p1689", "-compilation-database=" + cdb.generic_string(),
+            scan_exe, "--format=p1689", "-compilation-database=" + cdb.generic_string(),
         };
         auto outcome = run_process_stdout(argv);
         std::error_code rm_ec;

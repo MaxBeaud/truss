@@ -39,7 +39,7 @@ bool color_enabled() {
         if (const char* clicolor = std::getenv("CLICOLOR"); clicolor != nullptr
             && std::strcmp(clicolor, "0") == 0)
             return false;
-        return ::isatty(STDOUT_FILENO) != 0;
+        return ::isatty(STDERR_FILENO) != 0;
     }();
     return enabled;
 }
@@ -49,11 +49,12 @@ bool level_enabled(int level) { return level >= g_min_level.load(std::memory_ord
 void log_line(const char* color, const char* level, std::string_view msg, int severity) {
     if (!level_enabled(severity))
         return;
+    const char* ptr = msg.empty() ? "" : msg.data();
     if (color_enabled())
-        std::printf("%s%s: %.*s%s\n", color, level, static_cast<int>(msg.size()), msg.data(), kReset);
+        std::fprintf(stderr, "%s%s: %.*s%s\n", color, level, static_cast<int>(msg.size()), ptr, kReset);
     else
-        std::printf("%s: %.*s\n", level, static_cast<int>(msg.size()), msg.data());
-    std::fflush(stdout);
+        std::fprintf(stderr, "%s: %.*s\n", level, static_cast<int>(msg.size()), ptr);
+    std::fflush(stderr);
 }
 
 } // namespace
@@ -110,12 +111,13 @@ void step(std::string_view name, std::string_view detail) {
     std::string padded(name);
     if (padded.size() < 10)
         padded.append(10 - padded.size(), ' ');
+    const char* ptr = detail.empty() ? "" : detail.data();
     if (color)
-        std::printf("%s%s\u25b8%s %s%s%s %.*s%s\n", kBold, kCyan, kReset, kBold, padded.c_str(), kReset,
-                    static_cast<int>(detail.size()), detail.data(), kReset);
+        std::fprintf(stderr, "%s%s\u25b8%s %s%s%s %.*s%s\n", kBold, kCyan, kReset, kBold, padded.c_str(), kReset,
+                     static_cast<int>(detail.size()), ptr, kReset);
     else
-        std::printf("-> %s %.*s\n", padded.c_str(), static_cast<int>(detail.size()), detail.data());
-    std::fflush(stdout);
+        std::fprintf(stderr, "-> %s %.*s\n", padded.c_str(), static_cast<int>(detail.size()), ptr);
+    std::fflush(stderr);
 }
 
 } // namespace truss::log

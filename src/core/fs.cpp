@@ -2,6 +2,7 @@ module;
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cerrno>
 #include <coroutine>
 #include <cstdint>
 #include <cstring>
@@ -12,7 +13,6 @@ module;
 #include <limits>
 #include <map>
 #include <optional>
-#include <regex>
 #include <span>
 #include <sstream>
 #include <string>
@@ -72,47 +72,69 @@ void expand_braces(std::string_view pattern, std::vector<std::string>& out, size
     }
 }
 
-/* --- convert one brace-free glob to an ECMAScript regex over the whole
- * relative path. `**` crosses '/', `*`/`?` do not. --- */
-std::string glob_to_regex(std::string_view pattern) {
-    std::string r = "^";
-    for (size_t i = 0; i < pattern.size();) {
+// --- linear-time DP matcher for one brace-free glob over the whole path.
+// `**` crosses '/', `*`/`?` do not. A full double-star component matches zero
+// or more whole path components (never a partial name). Zero exceptions, no
+// regex backtracking. ---
+bool glob_match(std::string_view pattern, std::string_view text) {
+    const std::size_t m = pattern.size();
+    const std::size_t n = text.size();
+    std::vector<std::uint8_t> dp(n + 1, 0);
+    dp[0] = 1;
+    for (std::size_t i = 0; i < m;) {
         const char c = pattern[i];
-        switch (c) {
-        case '*':
-            if (i + 1 < pattern.size() && pattern[i + 1] == '*') {
-                if ((i == 0 || pattern[i - 1] == '/') && i + 2 < pattern.size() && pattern[i + 2] == '/') {
-                    /* a full double-star component followed by a slash: zero or
-                     * more whole components (never a partial name), so "a" +
-                     * double-star + "/b" matches a/b and a/x/b but not a/xb,
-                     * and a leading double-star does not swallow fox.cpp */
-                    r += "(?:[^/]+/)*";
+        if (c == '*') {
+            if (i + 1 < m && pattern[i + 1] == '*') {
+                if ((i == 0 || pattern[i - 1] == '/') && i + 2 < m && pattern[i + 2] == '/') {
+                    // full double-star component: zero or more whole components
+                    for (std::size_t j = 0; j < n; ++j) {
+                        if (!dp[j] || text[j] == '/')
+                            continue;
+                        const std::size_t slash = text.find('/', j);
+                        if (slash != std::string_view::npos)
+                            dp[slash + 1] = 1;
+                    }
                     i += 3;
                 } else {
-                    r += ".*";
+                    /* partial `**`: matches zero or more of any char */
                     i += 2;
-                    if (i < pattern.size() && pattern[i] == '/') ++i; // "**/" consumes separator
+                    if (i < m && pattern[i] == '/')
+                        ++i;
+                    bool seen = false;
+                    for (std::size_t j = 0; j <= n; ++j) {
+                        if (dp[j])
+                            seen = true;
+                        else if (seen)
+                            dp[j] = 1;
+                    }
                 }
             } else {
-                r += "[^/]*";
+                /* single `*`: zero or more non-'/' chars */
+                for (std::size_t j = 0; j < n; ++j)
+                    if (dp[j] && text[j] != '/')
+                        dp[j + 1] = 1;
                 ++i;
             }
-            break;
-        case '?': r += "[^/]"; ++i; break;
-        case '.': case '+': case '(': case ')': case '[': case ']':
-        case '^': case '$': case '|': case '\\':
-            r += '\\'; r += c; ++i; break;
-        default: r += c; ++i; break;
+        } else if (c == '?') {
+            for (std::size_t j = n; j > 0; --j)
+                dp[j] = (dp[j - 1] && text[j - 1] != '/') ? 1 : 0;
+            dp[0] = 0;
+            ++i;
+        } else {
+            for (std::size_t j = n; j > 0; --j)
+                dp[j] = (dp[j - 1] && text[j - 1] == c) ? 1 : 0;
+            dp[0] = 0;
+            ++i;
         }
     }
-    r += '$';
-    return r;
+    return dp[n] != 0;
 }
 
 bool is_hidden(const std::filesystem::path& rel) {
     for (const auto& part : rel) {
         const auto& s = part.native(); /* reference: no per-component copy */
-        if (!s.empty() && s.front() == '.') return true;
+        if (!s.empty() && s.front() == '.' && s != "." && s != "..")
+            return true;
     }
     return false;
 }
@@ -122,6 +144,10 @@ bool is_hidden(const std::filesystem::path& rel) {
 std::filesystem::path literal_prefix(const std::string_view pattern) {
     std::filesystem::path out;
     size_t i = 0;
+    if (!pattern.empty() && pattern.front() == '/') {
+        out = "/";
+        i = 1;
+    }
     while (i < pattern.size()) {
         const size_t slash = pattern.find('/', i);
         const std::string_view comp = pattern.substr(i, slash == std::string_view::npos ? std::string_view::npos : slash - i);
@@ -145,29 +171,31 @@ Result<std::vector<std::filesystem::path>> glob(std::string_view pattern) {
 }
 
 Result<std::vector<std::filesystem::path>> glob_multi(std::span<const std::string> patterns) {
-    /* brace-expand every pattern, then compile one regex per alternative */
+    /* brace-expand every pattern; literal patterns bypass directory walks via
+     * a direct stat, magic patterns share one walk per distinct literal root */
     std::vector<std::string> expanded;
     for (const auto& p : patterns)
         expand_braces(p, expanded);
 
-    std::vector<std::regex> regexes;
-    regexes.reserve(expanded.size());
+    std::vector<std::filesystem::path> matches;
+    std::vector<std::string> magic_patterns;
     std::vector<std::filesystem::path> roots;
+    std::error_code ec;
     for (const auto& p : expanded) {
-        regexes.emplace_back(glob_to_regex(p));
-        /* scan from the magic-free prefix, not from the whole tree; a fully
-         * literal pattern scans its parent directory instead of itself */
+        if (!has_glob_magic(p)) {
+            const std::filesystem::path fp(p);
+            if (std::filesystem::is_regular_file(fp, ec) || std::filesystem::is_symlink(fp, ec))
+                matches.push_back(fp);
+            continue;
+        }
+        magic_patterns.push_back(p);
         std::filesystem::path base = literal_prefix(p);
-        if (base == p)
-            base = base.parent_path();
         if (base.empty())
             base = ".";
         if (std::ranges::find(roots, base) == roots.end())
             roots.push_back(base);
     }
 
-    std::vector<std::filesystem::path> matches;
-    std::error_code ec;
     for (const auto& base : roots) {
         if (!std::filesystem::is_directory(base, ec))
             continue; // a missing (or non-directory) base simply matches nothing
@@ -177,21 +205,22 @@ Result<std::vector<std::filesystem::path>> glob_multi(std::span<const std::strin
         const std::filesystem::recursive_directory_iterator end {};
         for (; it != end; it.increment(ec)) {
             if (ec) break;
-            /* lexically_relative (pure path arithmetic) instead of relative():
-             * the latter weakly-canonicalizes both sides, i.e. syscalls per
-             * entry; the iterator builds its paths from base, so the lexical
-             * form is exact and free */
-            const std::filesystem::path rel = it->path().lexically_relative(".");
-            if (rel.empty()) continue;
-            if (is_hidden(rel)) {
+            // check hiddenness only on components BELOW the literal prefix:
+            // explicit ../vendor/*.cpp or .gen/*.cpp prefixes stay valid
+            // while wildcard-discovered dotfiles/dotdirs are skipped
+            const std::filesystem::path under_base = it->path().lexically_relative(base);
+            if (is_hidden(under_base)) {
                 if (it->is_directory(ec))
                     it.disable_recursion_pending();
                 continue;
             }
             if (!it->is_regular_file(ec) && !it->is_symlink(ec)) continue;
+            const std::filesystem::path rel =
+                base == "." ? it->path().lexically_relative(".") : it->path();
+            if (rel.empty()) continue;
             const std::string rel_str = path_str(rel);
-            for (const auto& re : regexes) {
-                if (std::regex_match(rel_str, re)) {
+            for (const auto& pat : magic_patterns) {
+                if (glob_match(pat, rel_str)) {
                     matches.push_back(rel);
                     break;
                 }
@@ -254,9 +283,8 @@ Result<std::string> read_file(const std::filesystem::path& p) {
         s.resize(static_cast<std::size_t>(size));
         in.read(s.data(), size);
         s.resize(static_cast<std::size_t>(in.gcount()));
-    } else if (size == 0) { // empty regular file: nothing to read
-        return s;
-    } else { // unseekable: stream it out
+    } else { // empty file or unseekable / zero-reported pseudo-file (/proc, /sys)
+        in.clear();
         std::ostringstream ss;
         ss << in.rdbuf();
         s = ss.str();
@@ -279,10 +307,16 @@ Result<void> write_file(const std::filesystem::path& p, std::string_view data) {
      * under a pid+counter name: concurrent writers stay apart and a
      * pre-placed symlink at a guessed name is never followed. */
     static std::atomic<unsigned> tmp_seq {0};
-    std::filesystem::path tmp = p;
-    tmp += ".truss-tmp." + std::to_string(getpid()) + "."
-         + std::to_string(tmp_seq.fetch_add(1, std::memory_order_relaxed));
-    const int fd = ::open(tmp.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0666);
+    std::filesystem::path tmp;
+    int fd = -1;
+    for (int attempt = 0; attempt < 64; ++attempt) {
+        tmp = p;
+        tmp += ".truss-tmp." + std::to_string(getpid()) + "."
+             + std::to_string(tmp_seq.fetch_add(1, std::memory_order_relaxed));
+        fd = ::open(tmp.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0666);
+        if (fd != -1 || errno != EEXIST)
+            break;
+    }
     if (fd == -1)
         return std::unexpected(Error {Error::Kind::Io, "failed to open file for writing", p});
     {
@@ -298,7 +332,10 @@ Result<void> write_file(const std::filesystem::path& p, std::string_view data) {
             }
             written += static_cast<std::size_t>(n);
         }
-        ::close(fd);
+        if (::close(fd) != 0) {
+            std::filesystem::remove(tmp, ec);
+            return std::unexpected(Error {Error::Kind::Io, "failed to close file after writing", p});
+        }
     }
     std::filesystem::rename(tmp, p, ec);
     if (ec) {

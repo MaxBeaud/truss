@@ -145,3 +145,22 @@ TEST_CASE("has_glob_magic") {
     CHECK(detail::has_glob_magic("a{b,c}"));
     CHECK_FALSE(detail::has_glob_magic("plain/path.cpp"));
 }
+
+TEST_CASE("glob: explicit parent (..) and hidden prefixes work; unbalanced brace does not throw") {
+    ScratchDir s("glob-edge");
+    s.touch("sibling/a.cpp");
+    s.touch("sibling/.secret.cpp");
+    s.touch("work/.gen/g.cpp");
+    s.touch("work/.gen/.hidden.cpp");
+    s.touch("work/foo{2.cpp");
+    s.touch("work/lit.cpp");
+    REQUIRE(::chdir("work") == 0);
+    /* ../ sibling path is not swallowed as a hidden component */
+    CHECK(s.glob_strs("../sibling/*.cpp") == std::vector<std::string>{"../sibling/a.cpp"});
+    /* explicit hidden prefix dir works while dotfiles underneath stay skipped */
+    CHECK(s.glob_strs(".gen/*.cpp") == std::vector<std::string>{".gen/g.cpp"});
+    /* unbalanced '{' is matched literally without throwing regex_error */
+    CHECK(s.glob_strs("foo{2.cpp") == std::vector<std::string>{"foo{2.cpp"});
+    /* literal path fast-path */
+    CHECK(s.glob_strs("lit.cpp") == std::vector<std::string>{"lit.cpp"});
+}

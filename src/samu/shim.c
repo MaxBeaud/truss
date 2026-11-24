@@ -47,7 +47,7 @@ getbuilddir(void)
 	if (!builddir)
 		return NULL;
 	if (osmkdirs(builddir, false) < 0)
-		exit(1);
+		fatal("failed to create builddir '%s'", builddir->s);
 	return builddir->s;
 }
 
@@ -78,6 +78,7 @@ truss_samu_build(const struct truss_samu_options *o)
 	char *builddir;
 	struct node *n;
 	int tries = 0, i;
+	jmp_buf fatal_jmp;
 
 	buildopts.maxfail = o->maxfail == 0 ? 1 : (o->maxfail < 0 ? (size_t)-1 : (size_t)o->maxfail);
 	buildopts.verbose = o->verbose;
@@ -88,6 +89,14 @@ truss_samu_build(const struct truss_samu_options *o)
 	set_default_jobs();
 
 	setvbuf(stdout, NULL, _IOLBF, 0);
+
+	if (setjmp(fatal_jmp) != 0) {
+		truss_samu_fatal_jmp = NULL;
+		logclose();
+		depsclose();
+		return 1;
+	}
+	truss_samu_fatal_jmp = &fatal_jmp;
 
 retry:
 	/* (re-)initialize global graph, environment, and parse structures */
@@ -133,6 +142,7 @@ retry:
 	}
 	build();
 
+	truss_samu_fatal_jmp = NULL;
 	logclose();
 	depsclose();
 
@@ -142,27 +152,62 @@ retry:
 int
 truss_samu_compdb(const char *manifest, const char *outpath)
 {
-	FILE *f;
-	int saved, rc;
+	FILE * volatile f = NULL;
+	volatile int saved = -1;
+	int rc;
+	jmp_buf fatal_jmp;
+	const struct tool *compdb_tool;
 	char *argv[] = {"compdb", "compile_cxx", "compile_c", "compile_bmi",
 	                "compile_bmi_gcc", "compile_pch",
 	                "compile_cxx_msvc", "compile_c_msvc"};
+
+	if (setjmp(fatal_jmp) != 0) {
+		truss_samu_fatal_jmp = NULL;
+		if (saved >= 0) {
+			fflush(stdout);
+			dup2(saved, 1);
+			close(saved);
+		}
+		if (f)
+			fclose(f);
+		return -1;
+	}
+	truss_samu_fatal_jmp = &fatal_jmp;
 
 	graphinit();
 	envinit();
 	parseinit();
 	parse(manifest, rootenv);
 
-	f = fopen(outpath, "w");
-	if (!f)
+	compdb_tool = toolget("compdb");
+	if (!compdb_tool) {
+		truss_samu_fatal_jmp = NULL;
 		return -1;
+	}
+
+	f = fopen(outpath, "w");
+	if (!f) {
+		truss_samu_fatal_jmp = NULL;
+		return -1;
+	}
 	saved = dup(1);
+	if (saved < 0) {
+		fclose(f);
+		truss_samu_fatal_jmp = NULL;
+		return -1;
+	}
 	fflush(stdout);
-	dup2(fileno(f), 1);
-	rc = toolget("compdb")->run((int)(sizeof(argv) / sizeof(argv[0])), argv);
+	if (dup2(fileno(f), 1) < 0) {
+		close(saved);
+		fclose(f);
+		truss_samu_fatal_jmp = NULL;
+		return -1;
+	}
+	rc = compdb_tool->run((int)(sizeof(argv) / sizeof(argv[0])), argv);
 	fflush(stdout);
 	dup2(saved, 1);
 	close(saved);
 	fclose(f);
+	truss_samu_fatal_jmp = NULL;
 	return rc;
 }

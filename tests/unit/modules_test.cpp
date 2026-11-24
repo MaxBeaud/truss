@@ -538,3 +538,39 @@ TEST_CASE("scan cache: a no-op build never even opens the sources") {
     INFO((second ? "ok" : second.error().message));
     CHECK(second.has_value());
 }
+
+TEST_CASE("scan_module_unit: quoted header units, u8 char literals, and hex digit separators") {
+    ChainDir dir {"lexer-edges"};
+    REQUIRE(detail::write_file(
+                "quoted_hdr.cpp",
+                "import \"foo.h\";\n"
+                "import <vector>;\n")
+                .has_value());
+    auto q = detail::scan_module_unit("quoted_hdr.cpp");
+    REQUIRE(q.has_value());
+    CHECK(q->header_imports == std::vector<std::string> {"\"foo.h\"", "<vector>"});
+
+    REQUIRE(detail::write_file(
+                "literals.cpp",
+                "constexpr char8_t c = u8'a';\n"
+                "constexpr unsigned x = 0xdead'beef;\n"
+                "import math;\n")
+                .has_value());
+    auto lit = detail::scan_module_unit("literals.cpp");
+    REQUIRE(lit.has_value());
+    CHECK(lit->imports == std::vector<std::string> {"math"});
+}
+
+TEST_CASE("scan cache: corrupt huge timestamp is a safe miss (no UB)") {
+    ChainDir dir {"corrupt-ts"};
+    REQUIRE(detail::write_file("a.cpp", "import math;\n").has_value());
+    const std::filesystem::path cdir = "cache";
+    const std::string key = detail::scan_cache_key("/proj", "clang++", "-std=c++23", "a.cpp");
+    REQUIRE(detail::write_file(
+                cdir / (key + ".scan"),
+                "truss-scan-cache 1\n999999999999999999999999999999 13\ni\tmath\n")
+                .has_value());
+    auto miss = detail::scan_cache_lookup(cdir, key, "a.cpp");
+    REQUIRE(miss.has_value());
+    CHECK_FALSE(miss->has_value());
+}

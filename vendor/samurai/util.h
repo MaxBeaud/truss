@@ -1,4 +1,10 @@
 #pragma once
+#include <setjmp.h>
+
+/* truss patch: when non-NULL, fatal() longjmps back to the in-process shim
+ * instead of calling exit(1), keeping C++ destructors and TTY state intact. */
+extern jmp_buf *truss_samu_fatal_jmp;
+
 struct buffer {
 	char *data;
 	size_t len, cap;

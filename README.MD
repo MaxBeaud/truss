@@ -154,7 +154,7 @@ or the cross toolchains below. POSIX hosts only (Linux is the tested one).
 ## Command line
 
 ```
-./truss [debug|release] [command...] [-j N] [-q] [-v] [-n] [--explain] [--target NAME[:SUBGRAPH]] [--for SUBGRAPH] [--build-dir PATH]
+./truss [debug|release] [command...] [-j N] [-q] [-v] [-n] [--explain] [--target [SUBGRAPH:]NAME] [--for SUBGRAPH] [--build-dir PATH]
 ```
 
 truss has **built-in commands** and your **user tasks** — they are different
@@ -179,7 +179,7 @@ things: commands are truss's own verbs; tasks are yours, registered with
 | `-v` | Echo every command samurai runs (disables the live progress block). |
 | `-n` | Dry run: print what *would* run, change nothing (no hooks fire, no test/run binary executes). |
 | `--explain` | Print *why* each edge is (re)built — samurai's explain mode. |
-| `--target NAME` | Build only this target (repeatable). With subgraphs: `NAME:SUBGRAPH` picks one subgraph's target; a bare name applies to every subgraph that has it. |
+| `--target NAME` | Build only this target (repeatable). With subgraphs: `SUBGRAPH:NAME` picks one subgraph's target (e.g. `win:app`); a bare name applies to every subgraph that has it. |
 | `--for SUBGRAPH` | With subgraphs: restrict `build`/`test`/`run` to one subgraph. |
 | `--build-dir PATH` | Relocate the build root (default `./build`). |
 | `--version` / `-V` | Print truss version and exit. |

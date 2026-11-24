@@ -4,6 +4,7 @@ module;
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <expected>
 #include <filesystem>
 #include <span>
@@ -12,6 +13,8 @@ module;
 #include <thread>
 #include <vector>
 
+#include <fcntl.h>
+#include <sys/ioctl.h>
 #include <unistd.h>
 
 #include "../samu/truss_samu.h"
@@ -43,15 +46,23 @@ public:
 
     void run() {
         std::string pending;
+        std::size_t cursor = 0;
         char buf[8192];
         for (;;) {
             const ssize_t n = ::read(in_, buf, sizeof buf);
             if (n > 0) {
                 pending.append(buf, static_cast<std::size_t>(n));
                 std::size_t nl = 0;
-                while ((nl = pending.find('\n')) != std::string::npos) {
-                    line(std::string_view(pending).substr(0, nl));
-                    pending.erase(0, nl + 1);
+                while ((nl = pending.find('\n', cursor)) != std::string::npos) {
+                    line(std::string_view(pending).substr(cursor, nl - cursor));
+                    cursor = nl + 1;
+                }
+                if (cursor == pending.size()) {
+                    pending.clear();
+                    cursor = 0;
+                } else if (cursor >= 4096) {
+                    pending.erase(0, cursor);
+                    cursor = 0;
                 }
                 continue;
             }
@@ -59,30 +70,46 @@ public:
                 continue;
             break;
         }
-        if (!pending.empty())
-            line(pending);
-        clear();
-        if (cursor_hidden_)
-            emit("\x1b[?25h"); /* show the cursor again */
+        if (cursor < pending.size())
+            line(std::string_view(pending).substr(cursor));
+        std::string fin;
+        append_clear(fin);
+        if (cursor_hidden_) {
+            fin += "\x1b[?25h"; /* show the cursor again */
+            cursor_hidden_ = false;
+        }
+        emit(fin);
     }
 
 private:
     void emit(std::string_view s) {
         while (!s.empty()) {
             const ssize_t n = ::write(out_, s.data(), s.size());
-            if (n <= 0)
+            if (n < 0) {
+                if (errno == EINTR)
+                    continue;
+                return;
+            }
+            if (n == 0)
                 return;
             s.remove_prefix(static_cast<std::size_t>(n));
         }
     }
 
-    void clear() {
+    std::size_t term_cols() const {
+        struct winsize ws {};
+        if (::ioctl(out_, TIOCGWINSZ, &ws) == 0 && ws.ws_col >= 20)
+            return static_cast<std::size_t>(ws.ws_col);
+        return 80;
+    }
+
+    void append_clear(std::string& frame) {
         if (drawn_ == 0)
             return;
-        emit("\r");
+        frame += '\r';
         for (std::size_t i = 0; i < drawn_; ++i)
-            emit("\x1b[1A");
-        emit("\x1b[J"); /* erase the block, leave earlier output alone */
+            frame += "\x1b[1A";
+        frame += "\x1b[J"; /* erase the block, leave earlier output alone */
         drawn_ = 0;
     }
 
@@ -122,51 +149,78 @@ private:
         std::string_view desc;
         if (!is_status(s, started, total, desc)) {
             /* job output / any foreign line: never hide it behind the block */
-            clear();
-            emit(s);
-            emit("\n");
+            std::string frame;
+            append_clear(frame);
+            frame.append(s);
+            frame.push_back('\n');
+            emit(frame);
             return;
         }
         in_flight_.emplace_back(desc);
         if (in_flight_.size() > max_lines_)
-            in_flight_.erase(in_flight_.begin());
+            in_flight_.pop_front();
         started_ = started;
         total_ = total;
         redraw();
     }
 
     void redraw() {
-        clear();
-        std::string head = "  \x1b[2m[\x1b[0m" + std::to_string(started_) + "/"
-                         + std::to_string(total_) + "\x1b[2m]\x1b[0m ";
+        const std::size_t cols = term_cols();
+        /* prefix "  ▸ " is 4 columns wide; keep every job line single-row so
+         * \x1b[1A cursor math stays exact even on narrow terminals */
+        const std::size_t max_job = cols > 5 ? cols - 5 : 15;
+        std::string frame;
+        frame.reserve(256 + in_flight_.size() * 80);
+        frame += "\x1b[?2026h"; /* DEC synchronized output: single flicker-free frame */
+        append_clear(frame);
+        frame += "  \x1b[2m[\x1b[0m" + std::to_string(started_) + "/"
+               + std::to_string(total_) + "\x1b[2m]\x1b[0m ";
         if (total_ != 0) {
             const std::size_t pct = (100 * started_) / total_;
-            head += "\x1b[2;36m" + std::to_string(pct) + "%\x1b[0m ";
+            frame += "\x1b[2;36m" + std::to_string(pct) + "%\x1b[0m ";
         }
-        emit(head);
-        emit("\n");
+        frame += '\n';
         ++drawn_;
         for (const auto& job : in_flight_) {
-            emit("  \x1b[2m\u25b8\x1b[0m ");
-            emit(job);
-            emit("\n");
+            frame += "  \x1b[2m\u25b8\x1b[0m ";
+            if (job.size() > max_job) {
+                frame.append(job, 0, max_job - 1);
+                frame += "\u2026";
+            } else {
+                frame += job;
+            }
+            frame += '\n';
             ++drawn_;
         }
         if (!cursor_hidden_) {
-            emit("\x1b[?25l"); /* hide the cursor while the block is live */
+            frame += "\x1b[?25l"; /* hide the cursor while the block is live */
             cursor_hidden_ = true;
         }
+        frame += "\x1b[?2026l";
+        emit(frame);
     }
 
     int in_ {};
     int out_ {};
     std::size_t max_lines_ {};
-    std::vector<std::string> in_flight_;
+    std::deque<std::string> in_flight_;
     std::size_t started_ {};
     std::size_t total_ {};
     std::size_t drawn_ {};
     bool cursor_hidden_ {};
 };
+
+int samu_cloexec_pipe(int fds[2]) {
+#if defined(__APPLE__)
+    if (::pipe(fds) != 0)
+        return -1;
+    ::fcntl(fds[0], F_SETFD, FD_CLOEXEC);
+    ::fcntl(fds[1], F_SETFD, FD_CLOEXEC);
+    return 0;
+#else
+    return ::pipe2(fds, O_CLOEXEC);
+#endif
+}
 
 /* TRUSS_PROGRESS=plain disables the live block (also implied by -v, -n,
  * --explain and by stdout not being a terminal). */
@@ -212,11 +266,13 @@ Result<void> samu_build(std::string_view manifest, int jobs, bool verbose,
     }
 
     /* live view: samurai's stdout goes through a pipe pumped by a reader
-     * thread; our real stdout is saved and restored afterwards */
+     * thread; our real stdout is saved and restored afterwards. Both `saved`
+     * and the pipe ends are CLOEXEC so samurai's compiler children never
+     * inherit them (dup2 clears CLOEXEC on fd 1 for the write end). */
     std::fflush(stdout);
-    const int saved = ::dup(STDOUT_FILENO);
+    const int saved = ::fcntl(STDOUT_FILENO, F_DUPFD_CLOEXEC, 0);
     int fds[2] {-1, -1};
-    if (saved < 0 || ::pipe(fds) != 0) {
+    if (saved < 0 || samu_cloexec_pipe(fds) != 0) {
         if (saved >= 0)
             ::close(saved);
         return std::unexpected(Error {Error::Kind::Io, "cannot create the progress pipe"});
@@ -237,10 +293,10 @@ Result<void> samu_build(std::string_view manifest, int jobs, bool verbose,
         });
         rc = truss_samu_build(&opts);
         std::fflush(stdout);      /* push samurai's buffered lines into the pipe */
-        ::dup2(saved, STDOUT_FILENO);
-        ::close(fds[0]);          /* EOF for the pump */
-        /* jthread joins here; it renders to `saved` until the pipe drains */
+        ::dup2(saved, STDOUT_FILENO); /* closes the write end -> delivers EOF to pump */
+        /* jthread joins here; it drains the pipe to EOF before we close fds[0] */
     }
+    ::close(fds[0]);
     ::close(saved);
     if (rc != 0)
         return std::unexpected(Error {Error::Kind::Command, "samurai build failed", std::filesystem::path(manifest_str)});

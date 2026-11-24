@@ -6,6 +6,7 @@
 module;
 #include <algorithm>
 #include <atomic>
+#include <charconv>
 #include <cstdint>
 #include <filesystem>
 #include <optional>
@@ -31,13 +32,7 @@ std::atomic<std::size_t> g_hot {0};
 std::atomic<std::size_t> g_cold {0};
 std::atomic<std::size_t> g_skipped {0};
 
-struct StatInfo {
-    std::int64_t mtime {}; /* file_time_type ticks, exact */
-    std::uintmax_t size {};
-    bool ok {};
-};
-
-StatInfo stat_of(const std::filesystem::path& p) {
+ScanSourceStat stat_of(const std::filesystem::path& p) {
     std::error_code ec;
     const auto mtime = std::filesystem::last_write_time(p, ec);
     if (ec)
@@ -49,11 +44,25 @@ StatInfo stat_of(const std::filesystem::path& p) {
 }
 
 /* the compiler binary's identity: an in-place upgrade (same path) must not
- * keep serving results computed by the old compiler */
-StatInfo compiler_stat(const std::string& compiler) {
-    if (auto found = os::find_program(compiler); found.has_value())
+ * keep serving results computed by the old compiler. Multi-token drivers like
+ * `zig c++` stat their executable token (`zig`). */
+ScanSourceStat compiler_stat(std::string_view compiler) {
+    const std::string_view exe = compiler.substr(0, compiler.find(' '));
+    if (auto found = os::find_program(exe); found.has_value())
         return stat_of(*found);
     return {}; /* bare name not on PATH: the key still carries the name */
+}
+
+template <class T>
+bool parse_exact_int(std::string_view s, T& out) {
+    if (s.empty())
+        return false;
+    T v {};
+    const auto [end, ec] = std::from_chars(s.data(), s.data() + s.size(), v);
+    if (ec != std::errc {} || end != s.data() + s.size())
+        return false;
+    out = v;
+    return true;
 }
 
 } // namespace
@@ -73,13 +82,17 @@ void scan_cache_note_skipped() { g_skipped.fetch_add(1, std::memory_order_relaxe
 
 std::string scan_cache_key(const std::string& cwd, const std::string& compiler,
                            std::string_view compile_flags, const std::string& source) {
-    const StatInfo cc = compiler_stat(compiler);
+    const ScanSourceStat cc = compiler_stat(compiler);
     /* the scanner is a separate binary for clang: its version matters too
      * (zig drives clang-scan-deps not at all, so it is not part of its key) */
-    const std::string compiler_base = std::filesystem::path(compiler).filename().string();
-    StatInfo scanner {};
-    if (family_from_compiler_name(compiler) == CompilerFamily::Clang && compiler_base != "zig")
-        scanner = compiler_stat("clang-scan-deps");
+    const std::string_view exe = std::string_view(compiler).substr(0, compiler.find(' '));
+    const std::string exe_base = std::filesystem::path(exe).filename().string();
+    const bool zig = exe_base == "zig" || exe_base == "zig.exe";
+    ScanSourceStat scanner {};
+    if (family_from_compiler_name(compiler) == CompilerFamily::Clang && !zig) {
+        if (auto found = find_clang_scan_deps(compiler); found.has_value())
+            scanner = stat_of(*found);
+    }
 
     std::string material;
     material.reserve(cwd.size() + source.size() + compile_flags.size() + compiler.size() + 128);
@@ -105,7 +118,7 @@ scan_cache_lookup(const std::filesystem::path& cache_dir, std::string_view key,
     auto text = read_file(file);
     if (!text)
         return std::optional<std::pair<std::vector<std::string>, std::vector<std::string>>> {};
-    const StatInfo now = stat_of(source);
+    const ScanSourceStat now = stat_of(source);
     if (!now.ok)
         return std::optional<std::pair<std::vector<std::string>, std::vector<std::string>>> {};
 
@@ -129,23 +142,12 @@ scan_cache_lookup(const std::filesystem::path& cache_dir, std::string_view key,
     const auto space = stamp.find(' ');
     if (space == std::string_view::npos)
         return miss();
-    const auto parse_i64 = [](std::string_view s, std::int64_t& out) {
-        if (s.empty())
-            return false;
-        std::int64_t v = 0;
-        for (char c : s) {
-            if (c < '0' || c > '9')
-                return false;
-            v = v * 10 + (c - '0');
-        }
-        out = v;
-        return true;
-    };
     std::int64_t mtime = 0;
-    std::int64_t size = 0;
-    if (!parse_i64(stamp.substr(0, space), mtime) || !parse_i64(stamp.substr(space + 1), size))
+    std::uintmax_t size = 0;
+    if (!parse_exact_int(stamp.substr(0, space), mtime)
+        || !parse_exact_int(stamp.substr(space + 1), size))
         return miss();
-    if (mtime != now.mtime || static_cast<std::uintmax_t>(size) != now.size)
+    if (mtime != now.mtime || size != now.size)
         return miss(); /* the source changed: rescan */
 
     std::pair<std::vector<std::string>, std::vector<std::string>> out;
@@ -164,11 +166,14 @@ scan_cache_lookup(const std::filesystem::path& cache_dir, std::string_view key,
         std::move(out)};
 }
 
+ScanSourceStat scan_cache_stat(const std::string& source) { return stat_of(source); }
+
 Result<void> scan_cache_store(const std::filesystem::path& cache_dir, std::string_view key,
                               const std::string& source,
                               std::span<const std::string> imports,
-                              std::span<const std::string> header_imports) {
-    const StatInfo now = stat_of(source);
+                              std::span<const std::string> header_imports,
+                              std::optional<ScanSourceStat> pre_stat) {
+    const ScanSourceStat now = pre_stat ? *pre_stat : stat_of(source);
     if (!now.ok)
         return {};
     std::string data;
@@ -197,28 +202,35 @@ Result<void> scan_cache_store(const std::filesystem::path& cache_dir, std::strin
 }
 
 /* Bound the cache directory: a long-lived tree accumulates one small file per
- * changed TU per mode forever. Beyond the cap, the oldest three quarters are
- * dropped (they are derived data: a miss costs one rescan). */
+ * changed TU per mode forever. Beyond the cap, the oldest quarter is dropped
+ * (derived data: a miss costs one rescan). Count entries before statting so
+ * under-cap directories pay zero last_write_time() syscalls. */
 Result<void> scan_cache_gc(const std::filesystem::path& cache_dir, std::size_t max_entries) {
     std::error_code ec;
     if (!std::filesystem::is_directory(cache_dir, ec))
         return {};
-    struct Entry {
-        std::filesystem::file_time_type when;
-        std::filesystem::path path;
-    };
-    std::vector<Entry> entries;
+    std::vector<std::filesystem::path> paths;
     for (std::filesystem::directory_iterator it(cache_dir, ec), end; it != end; it.increment(ec)) {
         if (ec)
             break;
         const auto ext = it->path().extension();
         if (ext != ".scan" && ext != ".text")
             continue;
+        paths.push_back(it->path());
+    }
+    if (paths.size() <= max_entries)
+        return {};
+    struct Entry {
+        std::filesystem::file_time_type when;
+        std::filesystem::path path;
+    };
+    std::vector<Entry> entries;
+    entries.reserve(paths.size());
+    for (auto& p : paths) {
         std::error_code time_ec;
-        const auto when = it->last_write_time(time_ec);
-        if (time_ec)
-            continue;
-        entries.push_back({when, it->path()});
+        const auto when = std::filesystem::last_write_time(p, time_ec);
+        if (!time_ec)
+            entries.push_back({when, std::move(p)});
     }
     if (entries.size() <= max_entries)
         return {};
@@ -251,7 +263,7 @@ Result<ModuleUnitInfo> scan_module_unit_cached(const std::filesystem::path& cach
                                                const std::string& source) {
     const std::string key = text_key(source);
     const auto file = cache_dir / (key + ".text");
-    const StatInfo now = stat_of(source);
+    const ScanSourceStat now = stat_of(source);
     if (now.ok) {
         if (auto text = read_file(file); text) {
             std::size_t pos = 0;
@@ -267,22 +279,12 @@ Result<ModuleUnitInfo> scan_module_unit_cached(const std::filesystem::path& cach
             bool ok = next() == "truss-text-scan 1";
             const std::string_view stamp = next();
             const auto space = stamp.find(' ');
-            std::uintmax_t mtime = 0;
+            std::int64_t mtime = 0;
             std::uintmax_t size = 0;
-            const auto parse = [](std::string_view v, std::uintmax_t& out) {
-                if (v.empty())
-                    return false;
-                out = 0;
-                for (char c : v) {
-                    if (c < '0' || c > '9')
-                        return false;
-                    out = out * 10 + static_cast<std::uintmax_t>(c - '0');
-                }
-                return true;
-            };
             if (ok && space != std::string_view::npos
-                && parse(stamp.substr(0, space), mtime) && parse(stamp.substr(space + 1), size))
-                ok = static_cast<std::int64_t>(mtime) == now.mtime && size == now.size;
+                && parse_exact_int(stamp.substr(0, space), mtime)
+                && parse_exact_int(stamp.substr(space + 1), size))
+                ok = mtime == now.mtime && size == now.size;
             else
                 ok = false;
             ModuleUnitInfo info;
@@ -309,10 +311,11 @@ Result<ModuleUnitInfo> scan_module_unit_cached(const std::filesystem::path& cach
     auto info = scan_module_unit(source);
     if (!info)
         return info;
-    /* best effort: a read-only build dir just rescans next time */
-    if (const StatInfo stamp = stat_of(source); stamp.ok) {
+    /* stamp with `now` captured BEFORE reading (avoids stamping a mid-scan
+     * edit's new mtime onto the old scan result); best effort on read-only dirs */
+    if (now.ok) {
         std::string data = "truss-text-scan 1\n";
-        data += std::to_string(stamp.mtime) + " " + std::to_string(stamp.size) + "\n";
+        data += std::to_string(now.mtime) + " " + std::to_string(now.size) + "\n";
         data += std::string("n\t") + (info->mentions_module_syntax ? "1" : "0") + "\n";
         if (!info->module_name.empty())
             data += "m\t" + info->module_name + "\n";

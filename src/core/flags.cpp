@@ -401,12 +401,16 @@ Result<FlagSet> build_flags(const TargetTriple& triple, BuildMode mode,
         add(fs.compile, f);
         add(fs.compile_c, f);
     };
-    /* -stdlib= is a clang driver flag; GCC's default is libstdc++ (no flag)
-     * and GCC+libc++ is rejected earlier, so only clang gets it. */
+    /* -stdlib= is a clang C++ driver flag; GCC's default is libstdc++ (no flag)
+     * and GCC+libc++ is rejected earlier. Keep it off C compiles (clang warns
+     * -Wunused-command-line-argument, breaking -Werror on mixed C/C++ targets). */
     if (triple.stdlib != StdLib::Default && !msvc && triple.family == CompilerFamily::Clang)
-        add_both(triple.stdlib == StdLib::Libcxx ? "-stdlib=libc++" : "-stdlib=libstdc++");
+        add(fs.compile, triple.stdlib == StdLib::Libcxx ? "-stdlib=libc++" : "-stdlib=libstdc++");
     add_both(target_flag(triple));
-    if (msvc) add_both("/utf-8 /EHsc /nologo");
+    if (msvc) {
+        add(fs.compile, "/utf-8 /EHsc /nologo");
+        add(fs.compile_c, "/utf-8 /nologo"); /* C++ exception model: C++ sources only */
+    }
     const auto wi = static_cast<std::size_t>(resolve_warnings(warnings));
     add_both(msvc ? kWarningFlagsMsvc[wi] : kWarningFlags[wi]);
     const auto di = static_cast<std::size_t>(resolve_debug(mode, debug));
@@ -443,13 +447,15 @@ Result<FlagSet> build_flags(const TargetTriple& triple, BuildMode mode,
 
     for (const auto& d : defines)
         if (!d.empty()) add_both((msvc ? "/D" : "-D") + d);
+    /* truss runs on POSIX hosts where samurai executes MSVC cross rules
+     * through /bin/sh -c too, so MSVC paths need sh_dq() escaping as well. */
     for (const auto& i : includes)
-        add_both(msvc ? "/I\"" + i + "\"" : "-I" + sh_dq(i));
+        add_both(msvc ? "/I" + sh_dq(i) : "-I" + sh_dq(i));
     /* system dirs after -I (searched later); MSVC needs /external:W0 to
      * actually silence them */
     if (msvc && !system_includes.empty()) add_both("/external:W0");
     for (const auto& i : system_includes)
-        add_both(msvc ? "/external:I\"" + i + "\"" : "-isystem " + sh_dq(i));
+        add_both(msvc ? "/external:I" + sh_dq(i) : "-isystem " + sh_dq(i));
 
     add_both(user_flags);
     /* C-only options last, like flags() for both languages */
@@ -498,7 +504,7 @@ Result<LinkFlags> link_flags(const TargetTriple& triple, BuildMode mode, DebugIn
         }
         if (di != static_cast<std::size_t>(DebugInfo::None))
             add(lf.linker, "/DEBUG");
-        for (const auto& p : link_paths) add(lf.linker, "/LIBPATH:\"" + p + "\"");
+        for (const auto& p : link_paths) add(lf.linker, "/LIBPATH:" + sh_dq(p));
         for (const auto& l : libs) {
             /* link_libs("foo.lib") must not become foo.lib.lib */
             const std::string_view base = std::string_view(l).ends_with(".lib")

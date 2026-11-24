@@ -57,6 +57,11 @@ void process(const std::filesystem::path& path) {
 
         if (line.starts_with("#include \"")) {
             const auto end = line.find('"', 10);
+            if (end == std::string::npos) {
+                std::fprintf(stderr, "amalgamate: malformed #include in %s: %s\n",
+                             path.string().c_str(), line.c_str());
+                std::exit(1);
+            }
             const std::filesystem::path inc = line.substr(10, end - 10);
             /* search: including file's dir, then the repo's include roots
              * (mirrors -Ivendor/samurai used for the shim) */
@@ -158,7 +163,8 @@ int main() {
     for (const auto& inc : system_includes)
         out << inc << '\n';
     out << '\n' << body << "#endif // TRUSS_ALL_HPP\n";
-    std::printf("amalgamate: wrote build/dist/truss_all.hpp (%zu bytes)\n",
-                body.size() + system_includes.size() * 30);
+    out.flush();
+    std::printf("amalgamate: wrote build/dist/truss_all.hpp (%lld bytes)\n",
+                static_cast<long long>(out.tellp()));
     return 0;
 }

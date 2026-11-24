@@ -1,6 +1,8 @@
 module;
 #include <doctest/doctest.h>
 
+#include <cctype>
+#include <cstdlib>
 #include <filesystem>
 #include <map>
 #include <string>
@@ -218,4 +220,62 @@ TEST_CASE("fetch: tarball whose symlink escapes the package dir is refused") {
     std::filesystem::remove_all("pkgsrc");
     std::filesystem::remove_all("build");
     std::filesystem::remove("evil.tar.gz");
+}
+
+TEST_CASE("fetch: corrupted cached tarball is re-verified and re-downloaded; uppercase sha256 works") {
+    const auto scratch = std::filesystem::temp_directory_path() / "truss-corrupt-cache";
+    std::filesystem::remove_all(scratch);
+    std::filesystem::create_directories(scratch);
+    ChdirTo into_scratch {scratch};
+    REQUIRE(detail::write_file("pkgsrc/good/hello.txt", "ok\n").has_value());
+    auto tar = os::capture({"tar", "-czf", "good.tar.gz", "-C", "pkgsrc", "good"});
+    REQUIRE(tar.has_value());
+    auto sha = fs::sha256_file("good.tar.gz");
+    REQUIRE(sha.has_value());
+    std::string upper_sha = *sha;
+    for (char& c : upper_sha)
+        c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+    const std::string url = "file://" + (std::filesystem::current_path() / "good.tar.gz").string();
+
+    /* point XDG_CACHE_HOME into scratch so we can corrupt the cached tarball safely */
+    const auto old_xdg = os::env("XDG_CACHE_HOME");
+    const auto fake_cache = scratch / "cache";
+    ::setenv("XDG_CACHE_HOME", fake_cache.c_str(), 1);
+    const auto restore_xdg = [&] {
+        if (old_xdg) ::setenv("XDG_CACHE_HOME", old_xdg->c_str(), 1);
+        else ::unsetenv("XDG_CACHE_HOME");
+    };
+
+    /* pre-populate a CORRUPTED cache entry at the exact expected path */
+    const auto cached_tar = fake_cache / "truss" / "tarballs" / (*sha + ".tar.gz");
+    REQUIRE(detail::write_file(cached_tar, "corrupted bytes!").has_value());
+
+    char prog[] = "truss-tests";
+    char* argv[] = {prog};
+    Project proj("good", 1, argv);
+    auto r = proj.fetch("good", FetchOptions {.url = url, .sha256 = upper_sha});
+    restore_xdg();
+    INFO((r ? "ok" : r.error().message));
+    REQUIRE(r.has_value());
+    CHECK(detail::read_file(r->dir / "hello.txt").value() == "ok\n");
+    CHECK(fs::sha256_file(cached_tar).value() == *sha);
+    std::filesystem::remove_all(scratch);
+}
+
+TEST_CASE("copy_tree: allows root-pointing symlink and trailing slash on source") {
+    const auto root = std::filesystem::temp_directory_path() / "truss-copytree-sym";
+    std::filesystem::remove_all(root);
+    std::filesystem::create_directories(root / "src/sub");
+    REQUIRE(detail::write_file(root / "src/a.h", "int a();\n").has_value());
+    std::error_code ec;
+    std::filesystem::create_symlink("..", root / "src/sub/top", ec);
+    REQUIRE_FALSE(ec);
+
+    const auto dest = root / "dest";
+    /* trailing slash on source path must not falsely reject internal symlinks */
+    REQUIRE(detail::copy_tree(std::filesystem::path(root.string() + "/src/"), dest).has_value());
+    CHECK(std::filesystem::is_symlink(dest / "sub/top", ec));
+    /* re-running copy_tree over existing dest skips existing symlinks cleanly */
+    REQUIRE(detail::copy_tree(root / "src", dest).has_value());
+    std::filesystem::remove_all(root);
 }

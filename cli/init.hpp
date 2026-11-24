@@ -102,14 +102,49 @@ inline bool valid_name(std::string_view name) {
     return true;
 }
 
-/* C++ namespace from the project name: '-' -> '_', leading digit prefixed */
+/* C++ namespace from the project name: '-' -> '_', leading digit prefixed,
+ * C++ keywords suffixed with '_' so `truss init class` produces valid C++. */
 inline std::string identifier(std::string_view name) {
     std::string id(name);
     for (char& c : id)
         if (c == '-') c = '_';
-    if (id.front() >= '0' && id.front() <= '9')
+    if (!id.empty() && id.front() >= '0' && id.front() <= '9')
         id.insert(0, "_");
+    static constexpr std::array<std::string_view, 79> kKeywords {
+        "alignas", "alignof", "and", "and_eq", "asm", "auto", "bitand", "bitor", "bool", "break",
+        "case", "catch", "char", "char8_t", "char16_t", "char32_t", "class", "compl", "concept",
+        "const", "consteval", "constexpr", "constinit", "const_cast", "continue", "co_await",
+        "co_return", "co_yield", "decltype", "default", "delete", "do", "double", "dynamic_cast",
+        "else", "enum", "explicit", "export", "extern", "false", "float", "for", "friend", "goto",
+        "if", "import", "inline", "int", "long", "module", "mutable", "namespace", "new", "noexcept",
+        "not", "not_eq", "nullptr", "operator", "or", "or_eq", "private", "protected", "public",
+        "register", "reinterpret_cast", "requires", "return", "short", "signed", "sizeof", "static",
+        "static_assert", "static_cast", "struct", "switch", "template", "this", "thread_local",
+        "throw",
+    };
+    static constexpr std::array<std::string_view, 18> kKeywords2 {
+        "true", "try", "typedef", "typeid", "typename", "union", "unsigned", "using", "virtual",
+        "void", "volatile", "wchar_t", "while", "xor", "xor_eq", "final", "override", "truss",
+    };
+    for (const auto kw : kKeywords)
+        if (id == kw)
+            return id + "_";
+    for (const auto kw : kKeywords2)
+        if (id == kw)
+            return id + "_";
     return id;
+}
+
+/* Escape a path for interpolation inside double quotes in sh (`bootstrap.sh`). */
+inline std::string sh_dq_escape(std::string_view s) {
+    std::string out;
+    out.reserve(s.size());
+    for (const char c : s) {
+        if (c == '"' || c == '\\' || c == '$' || c == '`')
+            out.push_back('\\');
+        out.push_back(c);
+    }
+    return out;
 }
 
 } // namespace init_detail
@@ -136,15 +171,21 @@ inline int init(std::span<char* const> args) {
 
     const std::filesystem::path dir {name};
     std::error_code ec;
-    if (std::filesystem::exists(dir, ec) && !std::filesystem::is_empty(dir, ec)) {
-        log::error("init: '" + std::string(name) + "' already exists and is not empty");
-        return 1;
+    if (std::filesystem::exists(dir, ec)) {
+        if (!std::filesystem::is_directory(dir, ec)) {
+            log::error("init: '" + std::string(name) + "' already exists and is not a directory");
+            return 1;
+        }
+        if (!std::filesystem::is_empty(dir, ec)) {
+            log::error("init: '" + std::string(name) + "' already exists and is not empty");
+            return 1;
+        }
     }
 
     /* the installed modules this binary ships with; bootstrap.sh keeps a
      * TRUSS_LIB override for when the install moves */
     const auto modules = os::find_truss_modules();
-    std::string truss_lib = modules.empty() ? std::string {} : fs::generic_str(modules.front());
+    std::string truss_lib = modules.empty() ? std::string {} : sh_dq_escape(fs::generic_str(modules.front()));
     if (truss_lib.empty()) {
         truss_lib = "$HOME/.local/lib/truss";
         log::warn("init: no installed truss modules found; bootstrap.sh defaults to " + truss_lib);

@@ -31,6 +31,8 @@ warn(const char *fmt, ...)
 	va_end(ap);
 }
 
+jmp_buf *truss_samu_fatal_jmp = NULL;
+
 void
 fatal(const char *fmt, ...)
 {
@@ -39,6 +41,8 @@ fatal(const char *fmt, ...)
 	va_start(ap, fmt);
 	vwarn(fmt, ap);
 	va_end(ap);
+	if (truss_samu_fatal_jmp)
+		longjmp(*truss_samu_fatal_jmp, 1);
 	exit(1);
 }
 

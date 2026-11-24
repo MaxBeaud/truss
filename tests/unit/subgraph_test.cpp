@@ -205,3 +205,30 @@ TEST_CASE("subgraphs: --for narrows a plain build to one subgraph") {
     CHECK(contains(line, "linux$:all"));
     CHECK_FALSE(contains(line, "all all"));
 }
+
+TEST_CASE("subgraphs: pch() and CustomCommand default outputs do not collide across subgraphs") {
+    if (!os::program_exists("g++")) {
+        MESSAGE("g++ not installed, skipping");
+        return;
+    }
+    ScratchDir scratch {"pch-gen-sub"};
+    REQUIRE(detail::write_file("inc/pch.hpp", "#pragma once\ninline int k() { return 1; }\n").has_value());
+    REQUIRE(detail::write_file("src/main.cpp", "int main() { return 0; }\n").has_value());
+    char prog[] = "truss-tests", dry[] = "-n";
+    char* argv[] = {prog, dry};
+    Project proj("sub-pch", 2, argv);
+    proj.targets({
+        {"clang", Config{}.toolchain(Toolchain::LLVM)},
+        {"gcc", Config{}.toolchain(Toolchain::GCC)},
+    });
+    auto& gen = proj.add_custom_command("stamp").command({"echo", "ok"});
+    proj.add_executable("app").sources("src/main.cpp").pch("inc/pch.hpp").depends_on(gen);
+    auto r = proj.build();
+    INFO((r ? "ok" : r.error().message));
+    REQUIRE(r.has_value());
+    const std::string m = *detail::read_file("build/debug/ninja/build.ninja");
+    CHECK(contains(m, "pch/x64-linux-clang/app/pch.hpp.pch"));
+    CHECK(contains(m, "pch/x64-linux-gcc/app/pch.hpp.gch"));
+    CHECK(contains(m, "gen/x64-linux-clang/stamp/output"));
+    CHECK(contains(m, "gen/x64-linux-gcc/stamp/output"));
+}
