@@ -83,10 +83,10 @@ Result<void> write_lockfile(const std::filesystem::path& file,
 
 /* Glob relative to cwd. `*` within one path component, `**` across
  * components, `?` one char, `{a,b}` alternation. Hidden entries are skipped.
- * Results are sorted and deduplicated. glob_multi brace-expands every
- * pattern, compiles one regex per alternative, then walks each distinct
- * magic-free literal prefix exactly once (sources_in adds six patterns that
- * share one walk). */
+ * Results are sorted and deduplicated. glob_multi and glob_batch brace-expand
+ * every pattern, match with a linear-time DP matcher, cap recursion depth when
+ * no `**` is present, and share one tree walk per distinct (non-subsumed)
+ * magic-free literal prefix. */
 
 /// Glob with a single pattern (convenience wrapper over glob_multi).
 /// \ingroup grp_internals
@@ -94,6 +94,13 @@ Result<std::vector<std::filesystem::path>> glob(std::string_view pattern);
 /// Glob several patterns with one tree walk per distinct scan root.
 /// \ingroup grp_internals
 Result<std::vector<std::filesystem::path>> glob_multi(std::span<const std::string> patterns);
+/// Glob multiple pattern groups in one shared filesystem pass, capping
+/// recursion depth per root, subsuming child roots under deeper ancestor walks,
+/// and optionally skipping exclude_dir unless a pattern explicitly targets it.
+/// \ingroup grp_internals
+Result<std::vector<std::vector<std::filesystem::path>>> glob_batch(
+    std::span<const std::vector<std::string>> groups,
+    const std::filesystem::path& exclude_dir = {});
 /// True when a pattern contains glob magic (`*`, `?` or `{a,b}`).
 /// \ingroup grp_internals
 bool has_glob_magic(std::string_view pattern);

@@ -40,7 +40,7 @@ page explains the architecture around them.
 
 | Unit | Role |
 |---|---|
-| `src/core/fs.cpp` | glob engine (brace expansion -> linear-time DP matcher, literal-prefix walk, hidden entries skipped), file helpers, `walk`/`read_lines` coroutines (`truss::generator`; libc++ lacks `std::generator`), native FIPS-180-4 sha256, `find_library` system dirs, truss.lock parsing |
+| `src/core/fs.cpp` | glob engine (brace expansion -> linear-time DP matcher, depth-capped literal-prefix walks shared across targets with ancestor subsumption, hidden entries and `build_root` skipped), file helpers, `walk`/`read_lines` coroutines (`truss::generator`; libc++ lacks `std::generator`), native FIPS-180-4 sha256, `find_library` system dirs, truss.lock parsing |
 | `src/core/modules.cpp` | module scanner: non-code blanking (comments/strings/raw strings) + hand-rolled line scan; BMI name resolution; per-compiler authoritative p1689 scanning (clang-scan-deps / GCC `-fdeps-format`); per-target module-mapper files for GCC's CMI paths |
 | `src/core/scancache.cpp` | `build/<mode>/scan-cache/` store: keys a compiler scan result by (cwd, source, compiling flags, compiler binary size+mtime, cache format) and validates it against the source's (mtime, size); corrupt/truncated entries are misses, store failures never fail the build, and the hot/cold/skipped counters feed the phase log |
 | `src/core/flags.cpp` | enum-indexed flag tables per compiler family (GCC/Clang/MSVC), triple/Config resolution, launcher detection, BMI-config flags |

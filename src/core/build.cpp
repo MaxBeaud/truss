@@ -329,9 +329,10 @@ private:
     std::unordered_set<std::string> gen_outputs_;
 };
 
-Result<std::vector<std::string>> resolve_sources(const Target& t) {
-    std::vector<std::string> files;
-    std::vector<std::string> magic;
+Result<std::vector<std::string>> finalize_sources(
+    const Target& t,
+    std::vector<std::string> files,
+    const std::vector<std::filesystem::path>& globbed) {
     const auto screen = [&](const std::string& f) -> Result<void> {
         /* source paths become compile-edge inputs and depfile entries: hold
          * them to the same bar as every other manifest path (a filename
@@ -346,29 +347,8 @@ Result<std::vector<std::string>> resolve_sources(const Target& t) {
             });
         return {};
     };
-    for (const auto& pattern : t.source_patterns()) {
-        if (!detail::has_glob_magic(pattern)) {
-            std::filesystem::path p(pattern);
-            std::error_code ec;
-            if (!std::filesystem::is_regular_file(p, ec))
-                return std::unexpected(Error {
-                    Error::Kind::Config,
-                    "source file '" + pattern + "' not found for target '" + t.name() + "'",
-                    p,
-                });
-            files.emplace_back(p.generic_string());
-        } else {
-            magic.push_back(pattern);
-        }
-    }
-    /* one tree walk per scan root for all glob patterns (sources_in adds six) */
-    if (!magic.empty()) {
-        auto globbed = detail::glob_multi(magic);
-        if (!globbed)
-            return std::unexpected(globbed.error());
-        for (const auto& f : *globbed)
-            files.push_back(f.generic_string());
-    }
+    for (const auto& f : globbed)
+        files.push_back(f.generic_string());
 
     for (const auto& removed : t.removed_sources())
         std::erase(files, removed);
@@ -2183,20 +2163,45 @@ Result<void> Project::build() {
         }
     }
 
-    /* resolve sources & text-scan module syntax ONCE per Target (sources are
-     * identical across subgraphs, so multi-triple builds avoid Kx redundant
-     * filesystem walks and scan-cache reads) */
+    /* resolve sources & text-scan module syntax ONCE across all targets and
+     * subgraphs (one shared filesystem pass dedupes roots, caps recursion
+     * depth, and skips build_root unless explicitly targeted) */
     struct TargetSources {
         std::vector<std::string> files;
         std::map<std::string, detail::ModuleUnitInfo, std::less<>> text_scans;
     };
     const std::filesystem::path scan_cache = bld / "scan-cache";
+    const std::filesystem::path build_root = build_root_.has_value() ? *build_root_ : cwd_ / "build";
     std::vector<TargetSources> target_sources(targets_.size());
+    std::vector<std::vector<std::string>> magic_groups(targets_.size());
     for (std::size_t ti = 0; ti < targets_.size(); ++ti) {
         const auto& t = targets_[ti];
         if (t->kind() == TargetKind::ImportedLibrary || t->kind() == TargetKind::CustomCommand)
             continue;
-        auto rs = resolve_sources(*t);
+        for (const auto& pattern : t->source_patterns()) {
+            if (!detail::has_glob_magic(pattern)) {
+                std::filesystem::path p(pattern);
+                std::error_code ec;
+                if (!std::filesystem::is_regular_file(p, ec))
+                    return std::unexpected(Error {
+                        Error::Kind::Config,
+                        "source file '" + pattern + "' not found for target '" + t->name() + "'",
+                        p,
+                    });
+                target_sources[ti].files.emplace_back(p.generic_string());
+            } else {
+                magic_groups[ti].push_back(pattern);
+            }
+        }
+    }
+    auto globbed_groups = detail::glob_batch(magic_groups, build_root);
+    if (!globbed_groups)
+        return std::unexpected(globbed_groups.error());
+    for (std::size_t ti = 0; ti < targets_.size(); ++ti) {
+        const auto& t = targets_[ti];
+        if (t->kind() == TargetKind::ImportedLibrary || t->kind() == TargetKind::CustomCommand)
+            continue;
+        auto rs = finalize_sources(*t, std::move(target_sources[ti].files), (*globbed_groups)[ti]);
         if (!rs)
             return std::unexpected(rs.error());
         target_sources[ti].files = std::move(*rs);

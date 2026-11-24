@@ -139,24 +139,320 @@ bool is_hidden(const std::filesystem::path& rel) {
     return false;
 }
 
-/* Longest leading run of magic-free components; lets us scan a small subtree
- * instead of the whole tree. */
-std::filesystem::path literal_prefix(const std::string_view pattern) {
-    std::filesystem::path out;
-    size_t i = 0;
+struct PatternPlan {
+    std::filesystem::path base;   // "." when no leading literal components
+    std::optional<int> max_depth; // nullopt = unlimited (pattern contains "**")
+};
+
+/* Split an expanded (brace-free) glob pattern into its longest leading run of
+ * magic-free components (`base`) and the max directory depth below `base` that
+ * can ever match (nullopt when the suffix contains `**`). */
+PatternPlan analyze_pattern(const std::string_view pattern) {
+    std::filesystem::path base;
+    std::size_t i = 0;
     if (!pattern.empty() && pattern.front() == '/') {
-        out = "/";
+        base = "/";
         i = 1;
     }
+    std::size_t suffix_start = i;
     while (i < pattern.size()) {
-        const size_t slash = pattern.find('/', i);
-        const std::string_view comp = pattern.substr(i, slash == std::string_view::npos ? std::string_view::npos : slash - i);
-        if (comp.find_first_of("*?{") != std::string_view::npos) break;
-        if (!comp.empty()) out /= comp;
-        if (slash == std::string_view::npos) break;
+        const std::size_t slash = pattern.find('/', i);
+        const std::string_view comp =
+            pattern.substr(i, slash == std::string_view::npos ? std::string_view::npos : slash - i);
+        if (comp.find_first_of("*?{") != std::string_view::npos)
+            break;
+        if (!comp.empty())
+            base /= comp;
+        if (slash == std::string_view::npos) {
+            suffix_start = pattern.size();
+            break;
+        }
         i = slash + 1;
+        suffix_start = i;
     }
+    if (base.empty())
+        base = ".";
+
+    const std::string_view suffix = pattern.substr(suffix_start);
+    if (suffix.find("**") != std::string_view::npos)
+        return {std::move(base), std::nullopt};
+
+    /* `*` and `?` never cross `/`: matching entries live at a fixed depth
+     * below `base`, equal to (non-empty components in suffix) - 1. */
+    int components = 0;
+    std::size_t pos = 0;
+    while (pos < suffix.size()) {
+        const std::size_t slash = suffix.find('/', pos);
+        const std::size_t end = slash == std::string_view::npos ? suffix.size() : slash;
+        if (end > pos)
+            ++components;
+        if (slash == std::string_view::npos)
+            break;
+        pos = slash + 1;
+    }
+    return {std::move(base), components > 0 ? components - 1 : 0};
+}
+
+std::optional<int> merge_depth(std::optional<int> a, std::optional<int> b) {
+    if (!a || !b)
+        return std::nullopt;
+    return std::max(*a, *b);
+}
+
+std::filesystem::path norm_abs(const std::filesystem::path& p, const std::filesystem::path& cwd) {
+    std::filesystem::path out = (p.is_absolute() ? p : (cwd / p)).lexically_normal();
+    /* lexically_normal() on "/a/b/." leaves a trailing empty component ("/a/b/");
+     * strip it unless out is the root "/". */
+    if (out.has_relative_path() && out.filename().empty())
+        out = out.parent_path();
     return out;
+}
+
+/* If `target` is strictly inside `ancestor` (both normalized absolute paths),
+ * returns the relative path from `ancestor` to `target`; otherwise empty. */
+std::filesystem::path strict_subpath(const std::filesystem::path& ancestor,
+                                     const std::filesystem::path& target) {
+    const std::filesystem::path rel = target.lexically_relative(ancestor);
+    if (rel.empty() || rel == "." || rel.is_absolute())
+        return {};
+    if (*rel.begin() == "..")
+        return {};
+    return rel;
+}
+
+/* Returns the relative path from `anc_base` to `child_base` if walking
+ * `anc_base` yields byte-for-byte identical match strings for entries under
+ * `child_base`, without skipping any component as hidden or backtracking. */
+std::optional<std::pair<std::filesystem::path, int>> syntactic_child_rel(
+    const std::filesystem::path& anc_base,
+    const std::filesystem::path& child_base) {
+    if (anc_base == child_base || anc_base.is_absolute() != child_base.is_absolute())
+        return std::nullopt;
+    const std::string anc_str = path_str(anc_base);
+    const std::string child_str = path_str(child_base);
+    std::string rel_str;
+    if (anc_base == ".") {
+        if (child_str.empty() || child_str == "." || child_str == ".."
+            || child_str.starts_with("./") || child_str.starts_with("../"))
+            return std::nullopt;
+        rel_str = child_str;
+    } else if (anc_base == "/") {
+        if (!child_str.starts_with('/') || child_str.size() <= 1)
+            return std::nullopt;
+        rel_str = child_str.substr(1);
+    } else {
+        if (child_str.size() <= anc_str.size() + 1 || !child_str.starts_with(anc_str)
+            || child_str[anc_str.size()] != '/')
+            return std::nullopt;
+        rel_str = child_str.substr(anc_str.size() + 1);
+    }
+    const std::filesystem::path rel(rel_str);
+    int depth_diff = 0;
+    for (const auto& part : rel) {
+        const auto& s = part.native();
+        if (s.empty() || s == "." || s == ".." || s.front() == '.')
+            return std::nullopt;
+        ++depth_diff;
+    }
+    if (depth_diff == 0)
+        return std::nullopt;
+    return std::pair {rel, depth_diff};
+}
+
+Result<std::vector<std::vector<std::filesystem::path>>> glob_groups_impl(
+    std::span<const std::span<const std::string>> groups,
+    const std::filesystem::path& exclude_dir) {
+    std::vector<std::vector<std::filesystem::path>> results(groups.size());
+
+    struct Consumer {
+        std::size_t group_idx {0};
+        std::string sub_prefix; // non-empty when subsumed from a child root
+        std::vector<std::string> patterns;
+    };
+    struct WalkRoot {
+        std::filesystem::path base;
+        std::filesystem::path abs_base;
+        std::filesystem::path skip_rel;
+        std::optional<int> max_depth;
+        std::vector<Consumer> consumers;
+        bool subsumed {false};
+    };
+
+    std::vector<WalkRoot> walks;
+    std::map<std::string, std::size_t> root_index;
+    std::error_code ec;
+
+    for (std::size_t g = 0; g < groups.size(); ++g) {
+        std::vector<std::string> expanded;
+        for (const auto& p : groups[g])
+            expand_braces(p, expanded);
+
+        for (const auto& p : expanded) {
+            if (!has_glob_magic(p)) {
+                const std::filesystem::path fp(p);
+                if (std::filesystem::is_regular_file(fp, ec) || std::filesystem::is_symlink(fp, ec))
+                    results[g].push_back(fp);
+                continue;
+            }
+            auto plan = analyze_pattern(p);
+            const std::string key = path_str(plan.base);
+            auto [it, inserted] = root_index.emplace(key, walks.size());
+            if (inserted) {
+                WalkRoot wr;
+                wr.base = std::move(plan.base);
+                wr.max_depth = plan.max_depth;
+                walks.push_back(std::move(wr));
+            } else {
+                walks[it->second].max_depth = merge_depth(walks[it->second].max_depth, plan.max_depth);
+            }
+            auto& consumers = walks[it->second].consumers;
+            if (!consumers.empty() && consumers.back().group_idx == g && consumers.back().sub_prefix.empty()) {
+                consumers.back().patterns.push_back(p);
+            } else {
+                consumers.push_back(Consumer {g, {}, {p}});
+            }
+        }
+    }
+
+    if (!walks.empty()) {
+        std::filesystem::path abs_exclude;
+        if (!exclude_dir.empty()) {
+            std::error_code cwd_ec;
+            const std::filesystem::path cwd = std::filesystem::current_path(cwd_ec);
+            if (!cwd_ec) {
+                abs_exclude = norm_abs(exclude_dir, cwd);
+                for (auto& w : walks) {
+                    w.abs_base = norm_abs(w.base, cwd);
+                    w.skip_rel = strict_subpath(w.abs_base, abs_exclude);
+                }
+            }
+        }
+
+        /* Sort shortest roots first (with "." leading) so ancestors are active
+         * before descendants during subsumption. */
+        std::ranges::sort(walks, [](const WalkRoot& a, const WalkRoot& b) {
+            const bool a_dot = a.base == ".";
+            const bool b_dot = b.base == ".";
+            if (a_dot != b_dot)
+                return a_dot;
+            const std::string as = path_str(a.base);
+            const std::string bs = path_str(b.base);
+            if (as.size() != bs.size())
+                return as.size() < bs.size();
+            return as < bs;
+        });
+
+        /* Subsume child roots into active ancestor walks when the ancestor
+         * already reaches deep enough, does not skip the child via exclude_dir,
+         * and crosses no symlinked directory on the way down. */
+        for (std::size_t j = 1; j < walks.size(); ++j) {
+            auto& child = walks[j];
+            for (std::size_t i = 0; i < j; ++i) {
+                auto& anc = walks[i];
+                if (anc.subsumed)
+                    continue;
+                const auto rel_info = syntactic_child_rel(anc.base, child.base);
+                if (!rel_info)
+                    continue;
+                const auto& [rel_from_anc, depth_diff] = *rel_info;
+                if (anc.max_depth.has_value()) {
+                    if (!child.max_depth.has_value() || *anc.max_depth < depth_diff + *child.max_depth)
+                        continue;
+                }
+                if (!anc.skip_rel.empty() && !abs_exclude.empty()) {
+                    if (child.abs_base == abs_exclude || !strict_subpath(abs_exclude, child.abs_base).empty())
+                        continue;
+                }
+                /* recursive_directory_iterator does not follow directory symlinks,
+                 * whereas walking child.base directly opens through a symlink. */
+                std::filesystem::path step = anc.base == "." ? std::filesystem::path {} : anc.base;
+                bool crosses_symlink = false;
+                for (const auto& part : rel_from_anc) {
+                    step = step.empty() ? part : (step / part);
+                    std::error_code sec;
+                    if (std::filesystem::is_symlink(step, sec)) {
+                        crosses_symlink = true;
+                        break;
+                    }
+                }
+                if (crosses_symlink)
+                    continue;
+
+                std::string child_prefix = path_str(child.base);
+                if (!child_prefix.empty() && child_prefix.back() != '/')
+                    child_prefix.push_back('/');
+                for (auto& c : child.consumers) {
+                    if (c.sub_prefix.empty())
+                        c.sub_prefix = child_prefix;
+                    anc.consumers.push_back(std::move(c));
+                }
+                child.consumers.clear();
+                child.subsumed = true;
+                break;
+            }
+        }
+
+        for (const auto& w : walks) {
+            if (w.subsumed)
+                continue;
+            std::error_code dir_ec;
+            if (!std::filesystem::is_directory(w.base, dir_ec))
+                continue; // a missing (or non-directory) base simply matches nothing
+            std::error_code iter_ec;
+            auto it = std::filesystem::recursive_directory_iterator(
+                w.base, std::filesystem::directory_options::skip_permission_denied, iter_ec);
+            const std::filesystem::recursive_directory_iterator end {};
+            const bool base_is_dot = w.base == ".";
+            for (; it != end; it.increment(iter_ec)) {
+                if (iter_ec)
+                    break;
+                std::error_code entry_ec;
+                const bool is_sym = it->is_symlink(entry_ec);
+                const bool is_dir = !is_sym && it->is_directory(entry_ec);
+
+                // check hiddenness only on components BELOW the literal prefix:
+                // explicit ../vendor/*.cpp or .gen/*.cpp prefixes stay valid
+                // while wildcard-discovered dotfiles/dotdirs are skipped
+                const std::filesystem::path under_base = it->path().lexically_relative(w.base);
+                if (is_hidden(under_base) || (!w.skip_rel.empty() && under_base == w.skip_rel)) {
+                    if (is_dir)
+                        it.disable_recursion_pending();
+                    continue;
+                }
+                if (is_dir) {
+                    if (w.max_depth && it.depth() >= *w.max_depth)
+                        it.disable_recursion_pending();
+                    continue;
+                }
+                if (!is_sym && !it->is_regular_file(entry_ec))
+                    continue;
+
+                const std::filesystem::path& rel = base_is_dot ? under_base : it->path();
+                if (rel.empty())
+                    continue;
+                const std::string rel_str = path_str(rel);
+                for (const auto& consumer : w.consumers) {
+                    if (!consumer.sub_prefix.empty() && !rel_str.starts_with(consumer.sub_prefix))
+                        continue;
+                    for (const auto& pat : consumer.patterns) {
+                        if (glob_match(pat, rel_str)) {
+                            results[consumer.group_idx].push_back(rel);
+                            break;
+                        }
+                    }
+                }
+            }
+            /* an increment error (an entry deleted by a concurrent process mid
+             * walk) degrades to the matches collected so far — like fs::walk —
+             * instead of failing the whole glob */
+        }
+    }
+
+    for (auto& matches : results) {
+        std::ranges::sort(matches);
+        matches.erase(std::ranges::unique(matches).begin(), matches.end()); /* overlapping roots */
+    }
+    return results;
 }
 
 } // namespace
@@ -171,69 +467,21 @@ Result<std::vector<std::filesystem::path>> glob(std::string_view pattern) {
 }
 
 Result<std::vector<std::filesystem::path>> glob_multi(std::span<const std::string> patterns) {
-    /* brace-expand every pattern; literal patterns bypass directory walks via
-     * a direct stat, magic patterns share one walk per distinct literal root */
-    std::vector<std::string> expanded;
-    for (const auto& p : patterns)
-        expand_braces(p, expanded);
+    const std::array<std::span<const std::string>, 1> groups {patterns};
+    auto r = glob_groups_impl(groups, {});
+    if (!r)
+        return std::unexpected(r.error());
+    return std::move((*r)[0]);
+}
 
-    std::vector<std::filesystem::path> matches;
-    std::vector<std::string> magic_patterns;
-    std::vector<std::filesystem::path> roots;
-    std::error_code ec;
-    for (const auto& p : expanded) {
-        if (!has_glob_magic(p)) {
-            const std::filesystem::path fp(p);
-            if (std::filesystem::is_regular_file(fp, ec) || std::filesystem::is_symlink(fp, ec))
-                matches.push_back(fp);
-            continue;
-        }
-        magic_patterns.push_back(p);
-        std::filesystem::path base = literal_prefix(p);
-        if (base.empty())
-            base = ".";
-        if (std::ranges::find(roots, base) == roots.end())
-            roots.push_back(base);
-    }
-
-    for (const auto& base : roots) {
-        if (!std::filesystem::is_directory(base, ec))
-            continue; // a missing (or non-directory) base simply matches nothing
-        ec.clear();
-        auto it = std::filesystem::recursive_directory_iterator(
-            base, std::filesystem::directory_options::skip_permission_denied, ec);
-        const std::filesystem::recursive_directory_iterator end {};
-        for (; it != end; it.increment(ec)) {
-            if (ec) break;
-            // check hiddenness only on components BELOW the literal prefix:
-            // explicit ../vendor/*.cpp or .gen/*.cpp prefixes stay valid
-            // while wildcard-discovered dotfiles/dotdirs are skipped
-            const std::filesystem::path under_base = it->path().lexically_relative(base);
-            if (is_hidden(under_base)) {
-                if (it->is_directory(ec))
-                    it.disable_recursion_pending();
-                continue;
-            }
-            if (!it->is_regular_file(ec) && !it->is_symlink(ec)) continue;
-            const std::filesystem::path rel =
-                base == "." ? it->path().lexically_relative(".") : it->path();
-            if (rel.empty()) continue;
-            const std::string rel_str = path_str(rel);
-            for (const auto& pat : magic_patterns) {
-                if (glob_match(pat, rel_str)) {
-                    matches.push_back(rel);
-                    break;
-                }
-            }
-        }
-        /* an increment error (an entry deleted by a concurrent process mid
-         * walk) degrades to the matches collected so far — like fs::walk —
-         * instead of failing the whole glob */
-    }
-
-    std::ranges::sort(matches);
-    matches.erase(std::ranges::unique(matches).begin(), matches.end()); /* overlapping roots */
-    return matches;
+Result<std::vector<std::vector<std::filesystem::path>>> glob_batch(
+    std::span<const std::vector<std::string>> groups,
+    const std::filesystem::path& exclude_dir) {
+    std::vector<std::span<const std::string>> views;
+    views.reserve(groups.size());
+    for (const auto& g : groups)
+        views.emplace_back(g);
+    return glob_groups_impl(views, exclude_dir);
 }
 
 std::vector<std::string> parse_depfile(std::string_view text) {

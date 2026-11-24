@@ -164,3 +164,82 @@ TEST_CASE("glob: explicit parent (..) and hidden prefixes work; unbalanced brace
     /* literal path fast-path */
     CHECK(s.glob_strs("lit.cpp") == std::vector<std::string>{"lit.cpp"});
 }
+
+TEST_CASE("glob: depth capping matches exact levels and mixes with **") {
+    ScratchDir s("glob-depth");
+    s.touch("top.cpp");
+    s.touch("a/d0.cpp");
+    s.touch("a/b/d1.cpp");
+    s.touch("a/b/c/d2.cpp");
+    CHECK(s.glob_strs("*.cpp") == std::vector<std::string>{"top.cpp"});
+    CHECK(s.glob_strs("a/*.cpp") == std::vector<std::string>{"a/d0.cpp"});
+    CHECK(s.glob_strs("a/*/*.cpp") == std::vector<std::string>{"a/b/d1.cpp"});
+    CHECK(s.glob_strs("a/*/*/*.cpp") == std::vector<std::string>{"a/b/c/d2.cpp"});
+
+    const std::vector<std::string> mixed {"a/*.cpp", "a/*/*.cpp"};
+    auto r = detail::glob_multi(mixed);
+    REQUIRE(r.has_value());
+    std::vector<std::string> out;
+    for (const auto& p : *r)
+        out.push_back(p.generic_string());
+    CHECK(out == std::vector<std::string>{"a/b/d1.cpp", "a/d0.cpp"});
+}
+
+TEST_CASE("glob_batch: shared walks, subsumption, exclude_dir, and symlinked subdirs") {
+    ScratchDir s("glob-batch");
+    s.touch("main.cpp");
+    s.touch("src/root.cpp");
+    s.touch("src/core/c.cpp");
+    s.touch("src/core/deep/d.cpp");
+    s.touch("src/cli/u.cpp");
+    s.touch(".gen/g.cpp");
+    s.touch("build/debug/ignored.cpp");
+    s.touch("build/gen/wanted.cpp");
+    s.touch("ext/from_link.cpp");
+    std::filesystem::create_directory_symlink(
+        std::filesystem::current_path() / "ext",
+        std::filesystem::current_path() / "src/linked");
+
+    const std::vector<std::vector<std::string>> groups {
+        {"**.cpp"},            // 0: root walk skipping build/
+        {"src/**.cpp"},        // 1: subsumed by 0
+        {"src/core/*.cpp"},    // 2: shallow child subsumed by 0/1
+        {".gen/*.cpp"},        // 3: hidden prefix must NOT be subsumed
+        {"./src/cli/*.cpp"},   // 4: ./ spelling must NOT be subsumed
+        {"build/gen/*.cpp"},   // 5: explicitly inside exclude_dir -> NOT excluded
+        {"src/linked/*.cpp"},  // 6: crosses directory symlink -> NOT subsumed
+    };
+    auto r = detail::glob_batch(groups, std::filesystem::current_path() / "build");
+    REQUIRE(r.has_value());
+    REQUIRE(r->size() == groups.size());
+    const auto to_strs = [](const std::vector<std::filesystem::path>& ps) {
+        std::vector<std::string> out;
+        for (const auto& p : ps)
+            out.push_back(p.generic_string());
+        return out;
+    };
+    CHECK(to_strs((*r)[0]) == std::vector<std::string>{
+        "ext/from_link.cpp", "main.cpp", "src/cli/u.cpp",
+        "src/core/c.cpp", "src/core/deep/d.cpp", "src/root.cpp",
+    });
+    CHECK(to_strs((*r)[1]) == std::vector<std::string>{
+        "src/cli/u.cpp", "src/core/c.cpp", "src/core/deep/d.cpp", "src/root.cpp",
+    });
+    CHECK(to_strs((*r)[2]) == std::vector<std::string>{"src/core/c.cpp"});
+    CHECK(to_strs((*r)[3]) == std::vector<std::string>{".gen/g.cpp"});
+    CHECK(to_strs((*r)[4]) == std::vector<std::string>{"./src/cli/u.cpp"});
+    CHECK(to_strs((*r)[5]) == std::vector<std::string>{"build/gen/wanted.cpp"});
+    CHECK(to_strs((*r)[6]) == std::vector<std::string>{"src/linked/from_link.cpp"});
+}
+
+TEST_CASE("glob_batch: nested custom exclude_dir preserves sibling files") {
+    ScratchDir s("glob-nested-excl");
+    s.touch("out/keep.cpp");
+    s.touch("out/build/skip.cpp");
+    const std::vector<std::vector<std::string>> groups {{"**.cpp"}};
+    auto r = detail::glob_batch(groups, "out/build");
+    REQUIRE(r.has_value());
+    REQUIRE(r->size() == 1);
+    REQUIRE((*r)[0].size() == 1);
+    CHECK((*r)[0][0].generic_string() == "out/keep.cpp");
+}
