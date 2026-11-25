@@ -438,6 +438,95 @@ Result<void> samu_build(std::string_view manifest, int jobs, bool verbose,
 /// \ingroup grp_internals
 Result<void> samu_compdb(std::string_view manifest, std::string_view outpath);
 
+/* --- interactive options TUI state machine ------------------------------- */
+
+/// One editable option row in the `truss configure` TUI.
+/// \ingroup grp_internals
+struct TuiOptionItem {
+    std::string scope;
+    OptionSpec spec;
+    std::string value;
+};
+
+/// Logical key press decoded from raw terminal input.
+/// \ingroup grp_internals
+enum class TuiKey {
+    Up,
+    Down,
+    Space,
+    Enter,
+    Backspace,
+    Escape,
+    Char,
+    Unknown,
+};
+
+/// A decoded input event for OptionsTuiState.
+/// \ingroup grp_internals
+struct TuiEvent {
+    TuiKey key {TuiKey::Unknown};
+    char ch {0};
+};
+
+/// Decode a raw terminal byte sequence (ANSI arrow keys, CR/LF, backspace, ASCII)
+/// into a TuiEvent.
+/// \ingroup grp_internals
+TuiEvent decode_tui_key(std::string_view seq);
+
+/// Pure state machine for the interactive `truss configure` TUI (decoupled from
+/// termios I/O so navigation, toggling, editing, validation, and reset are
+/// directly unit-testable).
+/// \ingroup grp_internals
+class OptionsTuiState {
+public:
+    explicit OptionsTuiState(std::vector<TuiOptionItem> items);
+
+    /// Process one key event; returns false when the session ends (save or quit).
+    bool handle_event(TuiEvent ev);
+    /// Render the current state as an ANSI frame.
+    std::string render(std::string_view mode_label) const;
+
+    bool saved() const { return saved_; }
+    bool quit() const { return quit_; }
+    bool editing() const { return editing_; }
+    std::size_t selected() const { return selected_; }
+    const std::string& edit_buffer() const { return edit_buf_; }
+    const std::string& status_message() const { return status_; }
+    const std::vector<TuiOptionItem>& items() const { return items_; }
+
+private:
+    std::vector<TuiOptionItem> items_;
+    std::size_t selected_ {0};
+    bool editing_ {false};
+    std::string edit_buf_;
+    std::string status_;
+    bool saved_ {false};
+    bool quit_ {false};
+};
+
+/* --- Unix install / uninstall -------------------------------------------- */
+
+/// One built artifact or header-only target scheduled for `./truss install`.
+/// \ingroup grp_internals
+struct InstallItem {
+    const Target* target {nullptr};
+    std::string output; ///< built artifact path (empty if only install_headers())
+};
+
+/// Install built artifacts and public headers into `<DESTDIR><prefix>/{bin,lib,include}`,
+/// optionally stripping binaries/shared libs, and write `build/<mode>/install_manifest.txt`.
+/// \ingroup grp_internals
+Result<void> run_install(const std::filesystem::path& cwd,
+                         const std::filesystem::path& build_dir,
+                         const std::optional<std::filesystem::path>& prefix_opt,
+                         bool strip,
+                         bool dry_run,
+                         std::span<const InstallItem> items);
+
+/// Remove every file listed in `build/<mode>/install_manifest.txt` and delete the manifest.
+/// \ingroup grp_internals
+Result<void> run_uninstall(const std::filesystem::path& build_dir, bool dry_run);
+
 } // namespace truss::detail
 
 /// \}

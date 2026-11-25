@@ -763,6 +763,63 @@ private:
     StdLib stdlib_ {StdLib::Default};
 };
 
+/**
+ * \brief Project-wide default target settings, configured via `proj.defaults()`.
+ *
+ * Targets created after `proj.defaults()` inherit any settings configured here
+ * unless overridden per target.
+ */
+class TargetDefaults {
+public:
+    /// Default C++ standard for subsequent targets.
+    TargetDefaults& cpp_standard(CppStandard s) { std_ = s; return *this; }
+    /// Default C standard for subsequent targets.
+    TargetDefaults& c_standard(CStandard s) { c_std_ = s; return *this; }
+    /// Default warning level for subsequent targets.
+    TargetDefaults& warnings(Warnings w) { warnings_ = w; return *this; }
+    /// Default debug symbol level for subsequent targets.
+    TargetDefaults& debug_info(DebugInfo d) { debug_ = d; return *this; }
+    /// Default optimization level for subsequent targets.
+    TargetDefaults& optimization(Optimization o) { optimization_ = o; return *this; }
+    /// Default sanitizer set for subsequent targets.
+    TargetDefaults& sanitizer(Sanitizer s) { sanitizer_ = s; return *this; }
+    /// Default LTO mode for subsequent targets.
+    TargetDefaults& lto(Lto l) { lto_ = l; return *this; }
+    /// Default hardening tier for subsequent targets.
+    TargetDefaults& harden(Hardening h) { hardening_ = h; return *this; }
+    /// Default PIC setting for subsequent targets.
+    TargetDefaults& pic(bool v) { pic_ = v; return *this; }
+    /// Default symbol visibility for subsequent targets.
+    TargetDefaults& symbols_hidden(bool v = true) { symbols_hidden_ = v; return *this; }
+    /// Default C++ modules scanning mode for subsequent targets.
+    TargetDefaults& modules_mode(ModulesMode m) { modules_ = m; return *this; }
+
+    CppStandard cpp_standard() const { return std_; }
+    CStandard c_standard() const { return c_std_; }
+    Warnings warnings() const { return warnings_; }
+    DebugInfo debug_info() const { return debug_; }
+    Optimization optimization() const { return optimization_; }
+    Sanitizer sanitizer() const { return sanitizer_; }
+    Lto lto() const { return lto_; }
+    Hardening hardening() const { return hardening_; }
+    std::optional<bool> pic() const { return pic_; }
+    std::optional<bool> symbols_hidden() const { return symbols_hidden_; }
+    ModulesMode modules_mode() const { return modules_; }
+
+private:
+    CppStandard std_ {};
+    CStandard c_std_ {};
+    Warnings warnings_ {};
+    DebugInfo debug_ {};
+    Optimization optimization_ {};
+    Sanitizer sanitizer_ {};
+    Lto lto_ {};
+    Hardening hardening_ {};
+    std::optional<bool> pic_;
+    std::optional<bool> symbols_hidden_;
+    ModulesMode modules_ {};
+};
+
 /// Metadata for one user-configurable build option declared with `Options`.
 struct OptionSpec {
     enum class Kind { Bool, Int, String, Choice };
@@ -850,6 +907,18 @@ private:
 // Forward declaration for TargetRef (used in Target::depends_on below) and Project
 class TargetRef;
 class Project;
+class DepChain;
+class SystemLibBuilder;
+
+/// Specification for probing a system-installed library (`proj.system_lib(...)`).
+struct SystemLibSpec {
+    std::string name;
+    bool use_pkg_config {true};
+    std::string min_version;
+    std::vector<std::string> headers;
+    std::vector<std::string> libs;
+    std::vector<std::string> paths;
+};
 
 /**
  * \brief A build target: options holder built with method chaining.
@@ -1309,6 +1378,60 @@ public:
     template <class Self>
     Self& is_test(this Self& self, bool v = true) { self.test_ = v; return self; }
     /**
+     * \brief Tag this test target for `./truss test --tag ...` filtering.
+     * Repeat calls accumulate. Config error if called on a non-test target.
+     */
+    template <class Self>
+    Self& tag(this Self& self, std::string_view t) {
+        self.tags_.emplace_back(t);
+        return self;
+    }
+    /// Add multiple test tags (braced list).
+    template <class Self>
+    Self& tag(this Self& self, std::initializer_list<std::string_view> tags) {
+        append_strings(self.tags_, tags);
+        return self;
+    }
+    /// Add multiple test tags from any range of strings.
+    template <class Self, StringRange R>
+    Self& tag(this Self& self, R&& tags) {
+        append_strings(self.tags_, std::forward<R>(tags));
+        return self;
+    }
+
+    /// Header directory installation specification (set via `Target::install_headers()`).
+    struct HeaderInstall {
+        std::string dir;    ///< source header directory relative to project root
+        std::string subdir; ///< optional subdirectory under `<prefix>/include/`
+    };
+    /**
+     * \brief Mark this target (`Executable`, `StaticLib`, or `SharedLib`) to be
+     * installed by `./truss install`. Config error on other target kinds.
+     */
+    template <class Self>
+    Self& install(this Self& self, bool v = true) {
+        self.install_ = v;
+        return self;
+    }
+    /**
+     * \brief Install public headers from `dir` into `<prefix>/include/<subdir>`
+     * when `./truss install` runs. Repeat calls accumulate.
+     */
+    template <class Self>
+    Self& install_headers(this Self& self, std::string_view dir, std::string_view subdir = "") {
+        self.install_headers_.push_back({std::string(dir), std::string(subdir)});
+        return self;
+    }
+    /**
+     * \brief Override the install subdirectory under `<prefix>` (defaults: `bin`
+     * for executables, `lib` for static/shared libraries).
+     */
+    template <class Self>
+    Self& install_dir(this Self& self, std::string_view subdir) {
+        self.install_dir_ = std::string(subdir);
+        return self;
+    }
+    /**
      * \brief Combine another static library's archive into this one.
      *
      * This target and every merged library must be static libraries; the
@@ -1383,6 +1506,10 @@ public:
     const std::vector<const Target*>& deps() const { return deps_; }
     const std::vector<const Target*>& merged_libraries() const { return merge_; }
     bool is_test_target() const { return test_; }
+    const std::vector<std::string>& tags() const { return tags_; }
+    bool is_installed() const { return install_; }
+    const std::string& install_subdir() const { return install_dir_; }
+    const std::vector<HeaderInstall>& installed_headers() const { return install_headers_; }
 
     /**
      * \brief Resolve a set of user options scoped under this target's name
@@ -1449,6 +1576,10 @@ private:
     ModulesMode modules_ {};
     bool pic_ {false};
     bool test_ {false};
+    std::vector<std::string> tags_;
+    bool install_ {false};
+    std::string install_dir_;
+    std::vector<HeaderInstall> install_headers_;
     bool static_link_ {false};
     std::string output_name_;
     bool build_by_default_ {true};
@@ -1808,6 +1939,54 @@ public:
     Project& configure(const Config& conf) { config_ = conf; configured_ = true; return *this; }
     /// The active Config.
     const Config& config() const { return config_; }
+
+    /**
+     * \brief Project-wide target defaults. Targets created after calling
+     * `proj.defaults()` inherit these settings unless overridden per target.
+     */
+    TargetDefaults& defaults() { return defaults_; }
+    /// Read-only access to the project's target defaults.
+    const TargetDefaults& defaults() const { return defaults_; }
+
+    /**
+     * \brief Register a named preset carrying a `Config` and `key=val` option
+     * overrides (selectable via `./truss --preset <name>`).
+     */
+    Project& preset(std::string name, Config config, std::initializer_list<std::string_view> options = {}) {
+        std::vector<std::string> opts;
+        opts.reserve(options.size());
+        for (const auto s : options)
+            opts.emplace_back(s);
+        register_preset(std::move(name), std::move(config), std::move(opts));
+        return *this;
+    }
+    /// Register a named preset carrying `key=val` option overrides only.
+    Project& preset(std::string name, std::initializer_list<std::string_view> options) {
+        std::vector<std::string> opts;
+        opts.reserve(options.size());
+        for (const auto s : options)
+            opts.emplace_back(s);
+        register_preset(std::move(name), std::nullopt, std::move(opts));
+        return *this;
+    }
+    /// Register a named preset carrying a `Config` and a range of `key=val` overrides.
+    template <StringRange R>
+    Project& preset(std::string name, Config config, R&& options) {
+        std::vector<std::string> opts;
+        for (const auto& s : options)
+            opts.emplace_back(std::string_view(s));
+        register_preset(std::move(name), std::move(config), std::move(opts));
+        return *this;
+    }
+    /// Register a named preset carrying a range of `key=val` overrides only.
+    template <StringRange R>
+    Project& preset(std::string name, R&& options) {
+        std::vector<std::string> opts;
+        for (const auto& s : options)
+            opts.emplace_back(std::string_view(s));
+        register_preset(std::move(name), std::nullopt, std::move(opts));
+        return *this;
+    }
     /**
      * \brief Per-triple subgraphs: build the WHOLE graph once per named
      * configuration — one manifest, per-triple output dirs, one invocation:
@@ -1908,6 +2087,29 @@ public:
      */
     Result<TargetRef> vcpkg(std::vector<std::string> packages);
 
+    /**
+     * \brief Probe a system-installed library (via `pkg-config` by default, or
+     * manual `.headers()`/`.libs()`/`.paths()`). Returns a chainable builder
+     * supporting `.fallback(...)`, `.required()`, `explicit operator bool()`,
+     * and implicit conversion to `Result<TargetRef>` for `depends_on()`.
+     */
+    SystemLibBuilder system_lib(std::string_view name);
+
+    /**
+     * \brief Start a dependency fallback chain (`DepChain`) from any dependency
+     * (`Result<TargetRef>`, `TargetRef`, `const Target&`, `DepChain`, or
+     * `SystemLibBuilder`). Named `require` because `requires` is a C++20 keyword.
+     */
+    DepChain require(Result<TargetRef> primary);
+    /// \copydoc require
+    DepChain require(const Target& primary);
+    /// \copydoc require
+    DepChain require(TargetRef primary);
+    /// \copydoc require
+    DepChain require(const DepChain& primary);
+    /// \copydoc require
+    DepChain require(const SystemLibBuilder& primary);
+
     /// Generates the ninja manifest, runs samurai, then the requested tasks.
     /// \return success, or the first Error (also logged). Errors are logged.
     Result<void> build();
@@ -1982,14 +2184,37 @@ public:
 
 private:
     friend class Target;
+    friend class DepChain;
+    friend class SystemLibBuilder;
+
+    Result<TargetRef> resolve_system_lib(const SystemLibSpec& spec);
+    void record_dep_error(Error e) {
+        if (!dep_error_)
+            dep_error_ = std::move(e);
+    }
 
     template <class T>
     T& add_target(std::string name) {
         auto t = std::make_unique<T>(std::move(name));
         t->owner_ = this;
+        apply_target_defaults(*t);
         auto& ref = *t;
         targets_.push_back(std::move(t));
         return ref;
+    }
+
+    void apply_target_defaults(Target& t) const {
+        if (defaults_.cpp_standard() != CppStandard::Default) t.cpp_standard(defaults_.cpp_standard());
+        if (defaults_.c_standard() != CStandard::Default) t.c_standard(defaults_.c_standard());
+        if (defaults_.warnings() != Warnings::Default) t.warnings(defaults_.warnings());
+        if (defaults_.debug_info() != DebugInfo::Default) t.debug_info(defaults_.debug_info());
+        if (defaults_.optimization() != Optimization::Default) t.optimization(defaults_.optimization());
+        if (defaults_.sanitizer() != Sanitizer::Default) t.sanitizer(defaults_.sanitizer());
+        if (defaults_.lto() != Lto::Default) t.lto(defaults_.lto());
+        if (defaults_.hardening() != Hardening::Default) t.harden(defaults_.hardening());
+        if (defaults_.pic().has_value()) t.pic(*defaults_.pic());
+        if (defaults_.symbols_hidden().has_value()) t.symbols_hidden(*defaults_.symbols_hidden());
+        if (defaults_.modules_mode() != ModulesMode::Default) t.modules_mode(defaults_.modules_mode());
     }
 
     template <class T>
@@ -2024,6 +2249,9 @@ private:
     Result<void> save_options_cache() const;
     void print_options() const;
     Result<void> reset_options_cache() const;
+    Result<void> run_options_tui();
+    void register_preset(std::string name, std::optional<Config> config, std::vector<std::string> options);
+    void print_presets() const;
 
     std::string name_;
     std::filesystem::path cwd_;
@@ -2036,6 +2264,16 @@ private:
     std::vector<TaskFn> pre_build_, post_build_;
     Config config_;
     bool configured_ {false};                                /* configure() was called */
+    TargetDefaults defaults_;                                /* proj.defaults() */
+    struct PresetDef {
+        std::string name;
+        std::optional<Config> config;
+        std::vector<std::string> options;
+    };
+    std::vector<PresetDef> presets_;
+    std::string selected_preset_;                            /* --preset NAME */
+    bool preset_matched_ {false};
+    std::optional<Config> active_preset_config_;
     std::vector<std::pair<std::string, Config>> subgraphs_;  /* targets(): per-triple graphs */
     bool subgraphs_set_ {false};
     std::string for_selector_;                               /* --for NAME: task-level subgraph */
@@ -2049,9 +2287,13 @@ private:
     bool list_tasks_ {false};                   /* `task list` / bare `task` */
     std::vector<std::string> requested_tasks_;  /* user tasks as "task:<name>" */
     std::vector<std::string> only_targets_;
+    std::vector<std::string> test_tags_;        /* --tag filters for `test` */
+    std::optional<std::filesystem::path> install_prefix_; /* --prefix PATH for `install` */
+    bool install_strip_ {false};                /* --strip for `install` */
     std::vector<std::string> run_args_; /* after `--`, forwarded by run */
     std::optional<std::filesystem::path> build_root_;
     std::optional<Error> cli_error_;
+    std::optional<Error> dep_error_;
     std::vector<std::string> subdir_target_names_; /* created by add_subdirectory */
     mutable std::vector<std::filesystem::path> truss_module_paths_; /* lazily discovered truss module paths */
     mutable bool truss_module_paths_loaded_ {false};
@@ -2068,8 +2310,10 @@ private:
         std::string value;
         bool from_cli {false};
         bool from_cache {false};
+        bool from_preset {false};
     };
     std::vector<CliOption> cli_options_;
+    std::vector<CliOption> preset_options_;
     std::vector<std::pair<std::string, std::string>> cached_options_;
     std::vector<RegisteredOption> registered_options_;
     mutable std::optional<Error> options_error_;
@@ -2097,6 +2341,273 @@ template <class Self, class... Ts>
 Self& Target::public_passthrough_options(this Self& self, const Options<Ts...>& opts) {
     self.apply_passthrough_options(opts.specs(), true, "public_passthrough_options()");
     return self;
+}
+
+/**
+ * \brief Chainable dependency resolution result supporting direct & lazy
+ * `.fallback(...)`, `.required()`, `explicit operator bool()`, and implicit
+ * conversion to `Result<TargetRef>` for `Target::depends_on()`.
+ */
+class DepChain {
+public:
+    DepChain(Project* owner, Result<TargetRef> primary, std::string step_label = "primary")
+        : owner_(owner), result_(std::move(primary)) {
+        if (!result_)
+            tried_.push_back(std::move(step_label) + ": " + result_.error().message);
+    }
+
+    /// True if the primary or one of the fallbacks succeeded.
+    bool has_value() const { return result_.has_value(); }
+    /// Truthy when resolved, enabling `if (auto z = proj.system_lib("zlib"))`.
+    explicit operator bool() const { return has_value(); }
+
+    /// Resolved dependency result (or a combined Config error listing tried steps).
+    Result<TargetRef> result() const {
+        if (result_)
+            return result_;
+        if (required_ || tried_.size() > 1)
+            return std::unexpected(make_combined_error());
+        return result_;
+    }
+
+    /// Implicit conversion so `target.depends_on(chain)` works without unwrapping.
+    operator Result<TargetRef>() const { return result(); }
+
+    /// Direct fallback from an already-evaluated `Result<TargetRef>`.
+    DepChain& fallback(Result<TargetRef> res) {
+        if (result_)
+            return *this;
+        if (res) {
+            result_ = std::move(res);
+        } else {
+            tried_.push_back("fallback #" + std::to_string(tried_.size()) + ": " + res.error().message);
+            result_ = std::move(res);
+        }
+        return *this;
+    }
+
+    /// Direct fallback from a `TargetRef`.
+    DepChain& fallback(TargetRef target) {
+        if (!result_)
+            result_ = target;
+        return *this;
+    }
+
+    /// Direct fallback from an existing `Target`.
+    DepChain& fallback(const Target& target) {
+        if (!result_)
+            result_ = TargetRef(const_cast<Target&>(target));
+        return *this;
+    }
+
+    /// Direct fallback from another `DepChain`.
+    DepChain& fallback(const DepChain& other) {
+        if (result_)
+            return *this;
+        if (other.result_) {
+            result_ = other.result_;
+        } else {
+            for (const auto& step : other.tried_)
+                tried_.push_back(step);
+            result_ = other.result_;
+        }
+        return *this;
+    }
+
+    /// Direct fallback from a `SystemLibBuilder` (defined after `SystemLibBuilder`).
+    DepChain& fallback(const SystemLibBuilder& other);
+
+    /// Lazy fallback: `fn` is only invoked if all earlier steps failed.
+    /// Accepts callables returning `Result<TargetRef>`, `TargetRef`, `Target&`,
+    /// `const Target&`, `DepChain`, or `SystemLibBuilder`.
+    template <std::invocable Fn>
+    DepChain& fallback(Fn&& fn);
+
+    /// Mark the chain as mandatory: if all steps failed, turns the error into a
+    /// `Config` error listing every tried step and records it on the owning Project.
+    DepChain& required() {
+        required_ = true;
+        if (!result_) {
+            Error err = make_combined_error();
+            result_ = std::unexpected(err);
+            if (owner_)
+                owner_->record_dep_error(std::move(err));
+        }
+        return *this;
+    }
+
+    const std::vector<std::string>& tried_steps() const { return tried_; }
+
+private:
+    Error make_combined_error() const {
+        std::string msg = required_
+            ? "required dependency failed after trying:"
+            : "dependency resolution failed after trying:";
+        for (const auto& step : tried_)
+            msg += "\n  - " + step;
+        return Error {Error::Kind::Config, std::move(msg)};
+    }
+
+    Project* owner_ {nullptr};
+    Result<TargetRef> result_;
+    std::vector<std::string> tried_;
+    bool required_ {false};
+};
+
+/**
+ * \brief Fluent builder returned by `proj.system_lib(name)`.
+ *
+ * Probes `pkg-config` by default (tweakable with `.pkg_config(false)`,
+ * `.min_version(...)`, `.headers(...)`, `.libs(...)`, `.paths(...)`). Probing
+ * runs lazily on first evaluation (`operator bool()`, `.has_value()`,
+ * `.fallback(...)`, `.required()`, or passing to `depends_on()`) and is cached.
+ */
+class SystemLibBuilder {
+public:
+    SystemLibBuilder(Project* owner, std::string name)
+        : owner_(owner), spec_ {std::move(name), true, {}, {}, {}, {}} {}
+
+    /// Enable or disable `pkg-config` probing (enabled by default).
+    SystemLibBuilder& pkg_config(bool v) { spec_.use_pkg_config = v; cached_.reset(); return *this; }
+    /// Require at least this `pkg-config` version (e.g. `"1.2.11"`).
+    SystemLibBuilder& min_version(std::string_view v) { spec_.min_version = std::string(v); cached_.reset(); return *this; }
+
+    /// Required header file(s) for manual probing (single, braced list, or range).
+    SystemLibBuilder& headers(std::string_view h) { spec_.headers.emplace_back(h); cached_.reset(); return *this; }
+    SystemLibBuilder& headers(std::initializer_list<std::string_view> hs) {
+        for (const auto h : hs) spec_.headers.emplace_back(h);
+        cached_.reset();
+        return *this;
+    }
+    template <StringRange R>
+    SystemLibBuilder& headers(R&& hs) {
+        for (const auto& h : hs) spec_.headers.emplace_back(std::string_view(h));
+        cached_.reset();
+        return *this;
+    }
+
+    /// Library name(s) to link for manual probing (single, braced list, or range).
+    SystemLibBuilder& libs(std::string_view l) { spec_.libs.emplace_back(l); cached_.reset(); return *this; }
+    SystemLibBuilder& libs(std::initializer_list<std::string_view> ls) {
+        for (const auto l : ls) spec_.libs.emplace_back(l);
+        cached_.reset();
+        return *this;
+    }
+    template <StringRange R>
+    SystemLibBuilder& libs(R&& ls) {
+        for (const auto& l : ls) spec_.libs.emplace_back(std::string_view(l));
+        cached_.reset();
+        return *this;
+    }
+
+    /// Extra search prefix/directory paths for manual probing (single, braced list, or range).
+    SystemLibBuilder& paths(std::string_view p) { spec_.paths.emplace_back(p); cached_.reset(); return *this; }
+    SystemLibBuilder& paths(std::initializer_list<std::string_view> ps) {
+        for (const auto p : ps) spec_.paths.emplace_back(p);
+        cached_.reset();
+        return *this;
+    }
+    template <StringRange R>
+    SystemLibBuilder& paths(R&& ps) {
+        for (const auto& p : ps) spec_.paths.emplace_back(std::string_view(p));
+        cached_.reset();
+        return *this;
+    }
+
+    /// Probe (once, cached) and return the resulting `Result<TargetRef>`.
+    Result<TargetRef> result() const {
+        if (!cached_) {
+            if (!owner_)
+                cached_ = std::unexpected(Error {Error::Kind::Config, "system_lib() has no owning Project"});
+            else
+                cached_ = owner_->resolve_system_lib(spec_);
+        }
+        return *cached_;
+    }
+
+    /// True if the system library was found.
+    bool has_value() const { return result().has_value(); }
+    /// Truthy when found, enabling `if (auto z = proj.system_lib("zlib"))`.
+    explicit operator bool() const { return has_value(); }
+    /// Implicit conversion so `target.depends_on(proj.system_lib("zlib"))` works directly.
+    operator Result<TargetRef>() const { return result(); }
+
+    /// Convert to a `DepChain` for chaining fallbacks or marking required.
+    DepChain to_chain() const {
+        return DepChain(owner_, result(), "system_lib('" + spec_.name + "')");
+    }
+
+    /// Chain a direct or lazy fallback onto this system library probe.
+    template <class Arg>
+    DepChain fallback(Arg&& arg) const {
+        DepChain chain = to_chain();
+        chain.fallback(std::forward<Arg>(arg));
+        return chain;
+    }
+
+    /// Mark this system library as mandatory (surfaces a Config error if missing).
+    DepChain required() const {
+        DepChain chain = to_chain();
+        chain.required();
+        return chain;
+    }
+
+private:
+    Project* owner_ {nullptr};
+    SystemLibSpec spec_;
+    mutable std::optional<Result<TargetRef>> cached_;
+};
+
+inline DepChain& DepChain::fallback(const SystemLibBuilder& other) {
+    if (result_)
+        return *this;
+    return fallback(other.to_chain());
+}
+
+template <std::invocable Fn>
+DepChain& DepChain::fallback(Fn&& fn) {
+    if (result_)
+        return *this;
+    using R = std::remove_cvref_t<std::invoke_result_t<Fn>>;
+    if constexpr (std::same_as<R, Result<TargetRef>>) {
+        return fallback(std::invoke(std::forward<Fn>(fn)));
+    } else if constexpr (std::same_as<R, TargetRef>) {
+        return fallback(TargetRef(std::invoke(std::forward<Fn>(fn))));
+    } else if constexpr (std::derived_from<R, Target>) {
+        return fallback(static_cast<const Target&>(std::invoke(std::forward<Fn>(fn))));
+    } else if constexpr (std::same_as<R, DepChain>) {
+        return fallback(std::invoke(std::forward<Fn>(fn)));
+    } else if constexpr (std::same_as<R, SystemLibBuilder>) {
+        return fallback(std::invoke(std::forward<Fn>(fn)).to_chain());
+    } else {
+        static_assert(std::same_as<R, Result<TargetRef>>,
+                      "fallback() callable must return Result<TargetRef>, TargetRef, Target&, DepChain, or SystemLibBuilder");
+        return *this;
+    }
+}
+
+inline SystemLibBuilder Project::system_lib(std::string_view name) {
+    return SystemLibBuilder(this, std::string(name));
+}
+
+inline DepChain Project::require(Result<TargetRef> primary) {
+    return DepChain(this, std::move(primary), "primary");
+}
+
+inline DepChain Project::require(const Target& primary) {
+    return DepChain(this, TargetRef(const_cast<Target&>(primary)), "target('" + primary.name() + "')");
+}
+
+inline DepChain Project::require(TargetRef primary) {
+    return DepChain(this, primary, "target('" + primary.get().name() + "')");
+}
+
+inline DepChain Project::require(const DepChain& primary) {
+    return primary;
+}
+
+inline DepChain Project::require(const SystemLibBuilder& primary) {
+    return primary.to_chain();
 }
 
 /** \} */ // grp_api

@@ -203,7 +203,7 @@ std::string Project::register_option_value(std::string_view scope, const OptionS
         }
     }
 
-    /* Precedence: CLI scoped > CLI unscoped > options.cache > default */
+    /* Precedence: CLI -D > options.cache > preset options > OptionSpec default */
     const CliOption* matched_cli = nullptr;
     for (const auto& c : cli_options_) {
         if (c.key == full_key)
@@ -219,6 +219,7 @@ std::string Project::register_option_value(std::string_view scope, const OptionS
     std::string raw = spec.default_str;
     bool from_cli = false;
     bool from_cache = false;
+    bool from_preset = false;
 
     if (matched_cli) {
         if (matched_cli->bare && spec.kind != OptionSpec::Kind::Bool) {
@@ -233,6 +234,28 @@ std::string Project::register_option_value(std::string_view scope, const OptionS
                 raw = v;
                 from_cache = true;
                 break;
+            }
+        }
+        if (!from_cache) {
+            const CliOption* matched_preset = nullptr;
+            for (const auto& p : preset_options_) {
+                if (p.key == full_key)
+                    matched_preset = &p;
+            }
+            if (!matched_preset) {
+                for (const auto& p : preset_options_) {
+                    if (p.key == spec.name)
+                        matched_preset = &p;
+                }
+            }
+            if (matched_preset) {
+                if (matched_preset->bare && spec.kind != OptionSpec::Kind::Bool) {
+                    set_err("preset '" + selected_preset_ + "': option '" + matched_preset->key
+                            + "' without '=VALUE' is only valid for bool options");
+                } else {
+                    raw = matched_preset->value;
+                    from_preset = true;
+                }
             }
         }
     }
@@ -272,7 +295,7 @@ std::string Project::register_option_value(std::string_view scope, const OptionS
     }
 
     registered_options_.push_back(RegisteredOption {
-        sc, spec, normalized, from_cli, from_cache,
+        sc, spec, normalized, from_cli, from_cache, from_preset,
     });
     return normalized;
 }
@@ -338,43 +361,51 @@ Result<void> Project::validate_options() const {
     if (options_error_)
         return std::unexpected(*options_error_);
 
-    for (const auto& c : cli_options_) {
-        if (c.key.contains('.')) {
-            bool matched = false;
-            for (const auto& r : registered_options_) {
-                if (r.scope + "." + r.spec.name == c.key) {
-                    matched = true;
-                    break;
+    const auto check_list = [&](const std::vector<CliOption>& list, std::string_view prefix) -> Result<void> {
+        for (const auto& c : list) {
+            if (c.key.contains('.')) {
+                bool matched = false;
+                for (const auto& r : registered_options_) {
+                    if (r.scope + "." + r.spec.name == c.key) {
+                        matched = true;
+                        break;
+                    }
                 }
-            }
-            if (!matched)
-                return std::unexpected(Error {
-                    Error::Kind::Config,
-                    "unknown option '-D" + c.key + "' (run ./truss options to list available options)",
-                });
-        } else {
-            std::vector<std::string> scopes;
-            for (const auto& r : registered_options_)
-                if (r.spec.name == c.key)
-                    scopes.push_back(r.scope);
-            if (scopes.empty())
-                return std::unexpected(Error {
-                    Error::Kind::Config,
-                    "unknown option '-D" + c.key + "' (run ./truss options to list available options)",
-                });
-            if (scopes.size() > 1) {
-                std::string list;
-                for (std::size_t i = 0; i < scopes.size(); ++i) {
-                    if (i > 0) list += ", ";
-                    list += "-D" + scopes[i] + "." + c.key;
+                if (!matched)
+                    return std::unexpected(Error {
+                        Error::Kind::Config,
+                        "unknown option '" + std::string(prefix) + c.key + "' (run ./truss options to list available options)",
+                    });
+            } else {
+                std::vector<std::string> scopes;
+                for (const auto& r : registered_options_)
+                    if (r.spec.name == c.key)
+                        scopes.push_back(r.scope);
+                if (scopes.empty())
+                    return std::unexpected(Error {
+                        Error::Kind::Config,
+                        "unknown option '" + std::string(prefix) + c.key + "' (run ./truss options to list available options)",
+                    });
+                if (scopes.size() > 1) {
+                    std::string scopes_list;
+                    for (std::size_t i = 0; i < scopes.size(); ++i) {
+                        if (i > 0) scopes_list += ", ";
+                        scopes_list += std::string(prefix) + scopes[i] + "." + c.key;
+                    }
+                    return std::unexpected(Error {
+                        Error::Kind::Config,
+                        "option '" + std::string(prefix) + c.key + "' is ambiguous across scopes; specify one of: " + scopes_list,
+                    });
                 }
-                return std::unexpected(Error {
-                    Error::Kind::Config,
-                    "option '-D" + c.key + "' is ambiguous across scopes; specify one of: " + list,
-                });
             }
         }
-    }
+        return {};
+    };
+
+    if (auto r = check_list(cli_options_, "-D"); !r)
+        return r;
+    if (auto r = check_list(preset_options_, "preset " + selected_preset_ + ": "); !r)
+        return r;
     return {};
 }
 
@@ -386,6 +417,8 @@ Result<void> Project::save_options_cache() const {
     for (const auto& [k, v] : cached_options_)
         merged[k] = v;
     for (const auto& r : registered_options_) {
+        if (r.from_preset && !r.from_cli && !r.from_cache)
+            continue;
         const std::string key = r.scope + "." + r.spec.name;
         if (r.value != r.spec.default_str)
             merged[key] = r.value;
@@ -457,6 +490,61 @@ void Project::print_options() const {
             }
             std::putchar('\n');
         }
+    }
+}
+
+void Project::register_preset(std::string name, std::optional<Config> config, std::vector<std::string> options) {
+    if (!selected_preset_.empty() && selected_preset_ == name && !preset_matched_) {
+        preset_matched_ = true;
+        if (config.has_value())
+            active_preset_config_ = *config;
+        for (const auto& entry : options) {
+            if (entry.empty()) {
+                if (!options_error_)
+                    options_error_ = Error {Error::Kind::Config, "preset '" + name + "': empty option entry"};
+                continue;
+            }
+            const std::size_t eq = entry.find('=');
+            if (eq == std::string::npos) {
+                preset_options_.push_back({entry, "true", true});
+            } else if (eq == 0) {
+                if (!options_error_)
+                    options_error_ = Error {Error::Kind::Config, "preset '" + name + "': option entry '" + entry + "' has empty key"};
+            } else {
+                preset_options_.push_back({entry.substr(0, eq), entry.substr(eq + 1), false});
+            }
+        }
+    }
+    presets_.push_back(PresetDef {std::move(name), std::move(config), std::move(options)});
+}
+
+void Project::print_presets() const {
+    if (presets_.empty()) {
+        std::puts("no presets defined (register with proj.preset(...))");
+        return;
+    }
+    std::size_t width = 0;
+    for (const auto& p : presets_)
+        width = std::max(width, p.name.size());
+    std::puts("presets (select with ./truss --preset <name>):");
+    for (const auto& p : presets_) {
+        std::printf("  %-*s", static_cast<int>(width), p.name.c_str());
+        if (p.config.has_value()) {
+            std::printf("  [config");
+            if (!p.config->compiler().empty())
+                std::printf(": %s", p.config->compiler().c_str());
+            if (!p.config->target().empty())
+                std::printf(" -> %s", p.config->target().c_str());
+            std::printf("]");
+        }
+        if (!p.options.empty()) {
+            std::printf("  ");
+            for (std::size_t i = 0; i < p.options.size(); ++i) {
+                if (i > 0) std::printf(" ");
+                std::printf("-D%s", p.options[i].c_str());
+            }
+        }
+        std::putchar('\n');
     }
 }
 

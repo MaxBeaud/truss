@@ -423,6 +423,53 @@ Result<void> validate(const std::vector<std::unique_ptr<Target>>& targets) {
                 "target '" + name + "': merge() combines static archives and is only valid on "
                 "a static library target (add_static_library)",
             });
+        if (!t->tags().empty()) {
+            if (!t->is_test_target())
+                return std::unexpected(Error {
+                    Error::Kind::Config,
+                    "target '" + name + "': tag() is only valid on test targets (mark with .is_test())",
+                });
+            for (const auto& tg : t->tags()) {
+                if (tg.empty() || tg.front() == '!' || !no_control_chars(tg)
+                    || tg.find_first_of(" \t") != std::string::npos)
+                    return std::unexpected(Error {
+                        Error::Kind::Config,
+                        "target '" + name + "': invalid test tag '" + tg
+                            + "' (must be non-empty, no whitespace, and cannot start with '!')",
+                    });
+            }
+        }
+        if (t->is_installed() && t->kind() != TargetKind::Executable
+            && t->kind() != TargetKind::StaticLibrary && t->kind() != TargetKind::SharedLibrary)
+            return std::unexpected(Error {
+                Error::Kind::Config,
+                "target '" + name + "': install() is only valid on Executable, StaticLibrary, or SharedLibrary targets",
+            });
+        if (!t->install_subdir().empty()) {
+            const std::filesystem::path p(t->install_subdir());
+            const std::string g = p.generic_string();
+            if (p.is_absolute() || !no_control_chars(g) || g == ".." || g.find("../") != std::string::npos)
+                return std::unexpected(Error {
+                    Error::Kind::Config,
+                    "target '" + name + "': install_dir('" + t->install_subdir() + "') must be a relative path without '..'",
+                });
+        }
+        for (const auto& hi : t->installed_headers()) {
+            if (hi.dir.empty() || !no_control_chars(hi.dir))
+                return std::unexpected(Error {
+                    Error::Kind::Config,
+                    "target '" + name + "': install_headers() requires a non-empty directory path",
+                });
+            if (!hi.subdir.empty()) {
+                const std::filesystem::path p(hi.subdir);
+                const std::string g = p.generic_string();
+                if (p.is_absolute() || !no_control_chars(g) || g == ".." || g.find("../") != std::string::npos)
+                    return std::unexpected(Error {
+                        Error::Kind::Config,
+                        "target '" + name + "': install_headers() subdir '" + hi.subdir + "' must be relative without '..'",
+                    });
+            }
+        }
 
         /* flags/defines/dirs land in ninja edge variables (shell-run by
          * samurai): a control character — above all a newline — would end the
@@ -1565,11 +1612,15 @@ Result<void> emit_manifest(const Project& proj, std::vector<ResolvedTarget>& res
         } else {
             std::vector<std::string> extra_link;
             if (has_shared_dep && !msvc && r.triple.os != Os::Windows) {
-                /* exe lives in bin/<tdir>, shared libs in lib/<tdir>;
+                /* exe lives in bin/<tdir> (build tree) or <prefix>/bin (installed),
+                 * shared libs in lib/<tdir> or <prefix>/lib;
                  * single-quote $ORIGIN so the shell passes it through to ld.
                  * (Windows has no rpath: dlls are found next to the exe.) */
                 const std::string origin = r.triple.os == Os::MacOS ? "@loader_path" : "'$ORIGIN'";
                 extra_link.push_back("-Wl,-rpath," + origin + "/../../lib/" + detail::triple_dir(r.triple));
+                extra_link.push_back("-Wl,-rpath," + origin + "/../lib");
+                if (t.kind() == TargetKind::SharedLibrary)
+                    extra_link.push_back("-Wl,-rpath," + origin);
             }
             /* imported shared objects live wherever they were built — point
              * the consumer at their directory (ELF / Mach-O runpath) */
@@ -1830,6 +1881,9 @@ constexpr std::string_view kHelp =
     "  clean            remove the mode's build directory\n"
     "  options          list project build options and their current values\n"
     "  configure        interactively edit options (--reset to clear cache)\n"
+    "  presets          list registered build presets\n"
+    "  install          install targets marked install() to --prefix (default ~/.local)\n"
+    "  uninstall        remove files recorded in build/<mode>/install_manifest.txt\n"
     "  compdb           write compile_commands.json\n"
     "  reload           rebuild the truss binary (truss checkout only)\n"
     "  task NAME        build, then run a task registered with proj.task(...)\n"
@@ -1845,8 +1899,12 @@ constexpr std::string_view kHelp =
     "                      (proj.targets()): SUBGRAPH:NAME picks one subgraph, a\n"
     "                      bare name applies to every subgraph that has it\n"
     "      --for NAME      with subgraphs: restrict build/test/run to one subgraph\n"
+    "      --tag TAG...    with test: include tests matching TAG or exclude with !TAG\n"
     "      --build-dir PATH  build root (default: build)\n"
     "  -D KEY[=VAL]     set a build option (persisted in build/<mode>/options.cache)\n"
+    "      --preset NAME  apply a named preset registered with proj.preset(...)\n"
+    "      --prefix PATH  with install: installation prefix (default: ~/.local)\n"
+    "      --strip        with install: strip installed binaries and shared libs\n"
     "      --reset      with configure: clear saved options back to defaults\n"
     "  -V, --version    print the truss version\n"
     "  -h, --help       show this help\n"
@@ -1895,8 +1953,41 @@ Project::Project(std::string name, std::span<char* const> argv) : name_(std::mov
             if (++i >= argv.size()) { cli_error_ = Error {Error::Kind::Config, "--build-dir requires a path"}; continue; }
             build_root_ = argv[i];
         }
+        else if (a == "--prefix") {
+            if (++i >= argv.size()) { cli_error_ = Error {Error::Kind::Config, "--prefix requires a path"}; continue; }
+            install_prefix_ = argv[i];
+        }
+        else if (a == "--strip") {
+            install_strip_ = true;
+        }
         else if (a == "--reset") {
             reset_options_ = true;
+        }
+        else if (a == "--preset") {
+            if (++i >= argv.size()) { cli_error_ = Error {Error::Kind::Config, "--preset requires a name"}; continue; }
+            selected_preset_ = argv[i];
+        }
+        else if (a == "--tag") {
+            auto is_tag_stop = [](std::string_view tok) {
+                return tok.starts_with('-')
+                    || tok == "debug" || tok == "release"
+                    || tok == "test" || tok == "run" || tok == "clean"
+                    || tok == "options" || tok == "configure" || tok == "presets"
+                    || tok == "compdb" || tok == "reload" || tok == "install"
+                    || tok == "uninstall" || tok == "task" || tok == "help";
+            };
+            std::size_t added = 0;
+            while (i + 1 < argv.size() && !is_tag_stop(argv[i + 1])) {
+                const std::string_view tok = argv[++i];
+                if (tok == "!") {
+                    cli_error_ = Error {Error::Kind::Config, "--tag '!': tag name after '!' cannot be empty"};
+                } else {
+                    test_tags_.emplace_back(tok);
+                }
+                ++added;
+            }
+            if (added == 0)
+                cli_error_ = Error {Error::Kind::Config, "--tag requires at least one tag"};
         }
         else if (a == "-D" || a.starts_with("-D")) {
             std::string_view spec = a == "-D" ? std::string_view {} : a.substr(2);
@@ -2045,6 +2136,8 @@ Result<void> Project::build() {
     detail::scan_cache_reset_stats();
     if (cli_error_)
         return std::unexpected(*cli_error_);
+    if (dep_error_)
+        return std::unexpected(*dep_error_);
 
     const auto config_error = [](std::string msg) -> Result<void> {
         return std::unexpected(Error {Error::Kind::Config, std::move(msg)});
@@ -2111,6 +2204,37 @@ Result<void> Project::build() {
         return detail::remove_tree(bld);
     }
 
+    if (std::ranges::any_of(tasks, [](const std::string& t) { return t == "uninstall"; })) {
+        if (tasks.size() > 1)
+            return config_error("'uninstall' cannot be combined with other tasks");
+        return detail::run_uninstall(bld, dry_run_);
+    }
+
+    /* preset registry validation */
+    {
+        std::vector<std::string_view> preset_names;
+        preset_names.reserve(presets_.size());
+        for (const auto& p : presets_) {
+            if (p.name.empty() || p.name.starts_with('-'))
+                return config_error("invalid preset name '" + p.name + "' (must be non-empty and not start with '-')");
+            preset_names.push_back(p.name);
+        }
+        std::ranges::sort(preset_names);
+        if (auto dup = std::ranges::adjacent_find(preset_names); dup != preset_names.end())
+            return config_error("preset '" + std::string(*dup) + "' is registered twice");
+    }
+
+    const bool has_presets = std::ranges::any_of(tasks, [](const std::string& t) { return t == "presets"; });
+    if (has_presets) {
+        if (tasks.size() > 1)
+            return config_error("'presets' cannot be combined with other tasks");
+        print_presets();
+        return {};
+    }
+
+    if (!selected_preset_.empty() && !preset_matched_)
+        return config_error("unknown preset '" + selected_preset_ + "' (run ./truss presets to list available presets)");
+
     const bool has_configure = std::ranges::any_of(tasks, [](const std::string& t) { return t == "configure"; });
     const bool has_options = std::ranges::any_of(tasks, [](const std::string& t) { return t == "options"; });
     if (reset_options_ && !has_configure)
@@ -2141,6 +2265,10 @@ Result<void> Project::build() {
     if (has_configure) {
         if (tasks.size() > 1)
             return config_error("'configure' cannot be combined with other tasks");
+        if (!dry_run_ && !registered_options_.empty() && cli_options_.empty()
+            && ::isatty(STDIN_FILENO) != 0 && ::isatty(STDOUT_FILENO) != 0) {
+            return run_options_tui();
+        }
         if (!dry_run_) {
             if (auto r = save_options_cache(); !r)
                 return r;
@@ -2175,7 +2303,7 @@ Result<void> Project::build() {
                     "  incorrect: proj.configure(conf) followed by proj.targets(...)");
             subs = subgraphs_;
         } else {
-            subs = {{"", config_}};
+            subs = {{"", active_preset_config_.value_or(config_)}};
         }
         /* subgraph names: target-name rules, unique, 'all' reserved (it is the
          * union phony) */
@@ -2706,6 +2834,32 @@ Result<void> Project::build() {
             if (task == "build")
                 return run_samu({});
 
+            if (task == "install") {
+                const std::string target_sg = !for_selector_.empty()
+                                                  ? for_selector_
+                                                  : (sub_ctx.empty() ? std::string {} : sub_ctx.front().name);
+                std::vector<detail::InstallItem> items;
+                std::vector<std::string> to_build;
+                for (const auto& r : resolved) {
+                    if (r.subgraph != target_sg)
+                        continue;
+                    if (!r.target->is_installed() && r.target->installed_headers().empty())
+                        continue;
+                    items.push_back({r.target, r.target->is_installed() ? r.output : std::string {}});
+                    if (r.target->is_installed() && !r.output.empty())
+                        to_build.push_back(r.output);
+                }
+                if (items.empty()) {
+                    log::warn("no targets marked install() or install_headers(); nothing to install");
+                    return {};
+                }
+                if (!to_build.empty()) {
+                    if (auto r = run_samu(to_build); !r)
+                        return r;
+                }
+                return detail::run_install(cwd_, bld, install_prefix_, install_strip_, dry_run_, items);
+            }
+
             if (task == "compdb") {
                 /* same if-changed discipline as `proj.compile_commands()`:
                  * an unchanged database keeps its mtime and prints nothing */
@@ -2863,13 +3017,46 @@ Result<void> Project::build() {
                     std::string output, subgraph;
                     bool cross;
                 };
+                std::vector<std::string_view> inc_tags, exc_tags;
+                for (const auto& tg : test_tags_) {
+                    if (!tg.empty() && tg.front() == '!')
+                        exc_tags.push_back(std::string_view(tg).substr(1));
+                    else
+                        inc_tags.push_back(tg);
+                }
+                const auto tag_matches = [&](const Target& t) {
+                    const auto& ttags = t.tags();
+                    if (!inc_tags.empty()) {
+                        const bool any_inc = std::ranges::any_of(inc_tags, [&](std::string_view want) {
+                            return std::ranges::find(ttags, want) != ttags.end();
+                        });
+                        if (!any_inc)
+                            return false;
+                    }
+                    if (!exc_tags.empty()) {
+                        const bool any_exc = std::ranges::any_of(exc_tags, [&](std::string_view ban) {
+                            return std::ranges::find(ttags, ban) != ttags.end();
+                        });
+                        if (any_exc)
+                            return false;
+                    }
+                    return true;
+                };
                 std::vector<TestExe> tests;
-                for (const auto& r : resolved)
+                bool any_tests_defined = false;
+                for (const auto& r : resolved) {
                     if (r.target->is_test_target()
-                        && (for_selector_.empty() || r.subgraph == for_selector_))
-                        tests.push_back({r.output, r.subgraph, !r.triple.target.empty()});
+                        && (for_selector_.empty() || r.subgraph == for_selector_)) {
+                        any_tests_defined = true;
+                        if (tag_matches(*r.target))
+                            tests.push_back({r.output, r.subgraph, !r.triple.target.empty()});
+                    }
+                }
                 if (tests.empty()) {
-                    log::warn("no targets marked is_test(); nothing to run");
+                    if (any_tests_defined && !test_tags_.empty())
+                        log::warn("no tests matched --tag filter; nothing to run");
+                    else
+                        log::warn("no targets marked is_test(); nothing to run");
                     return {};
                 }
                 std::vector<std::string> to_build;
@@ -3003,7 +3190,7 @@ Result<void> Project::build() {
                 });
             return std::unexpected(Error {
                 Error::Kind::Config,
-                "unknown command '" + task + "' (built-ins: test, run, clean, options, configure, compdb, reload; "
+                "unknown command '" + task + "' (built-ins: test, run, clean, options, configure, presets, install, uninstall, compdb, reload; "
                     "user tasks: ./truss task list; see ./truss --help)",
             });
         }();
