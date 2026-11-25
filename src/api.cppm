@@ -1378,7 +1378,7 @@ public:
     template <class Self>
     Self& is_test(this Self& self, bool v = true) { self.test_ = v; return self; }
     /**
-     * \brief Tag this test target for `./truss test --tag ...` filtering.
+     * \brief Tag this test target for `truss test` filtering (`--tag`).
      * Repeat calls accumulate. Config error if called on a non-test target.
      */
     template <class Self>
@@ -1405,8 +1405,8 @@ public:
         std::string subdir; ///< optional subdirectory under `<prefix>/include/`
     };
     /**
-     * \brief Mark this target (`Executable`, `StaticLib`, or `SharedLib`) to be
-     * installed by `./truss install`. Config error on other target kinds.
+     * \brief Mark this target (Executable, StaticLib, or SharedLib) to be
+     * installed by `truss install`. Config error on other target kinds.
      */
     template <class Self>
     Self& install(this Self& self, bool v = true) {
@@ -1415,7 +1415,7 @@ public:
     }
     /**
      * \brief Install public headers from `dir` into `<prefix>/include/<subdir>`
-     * when `./truss install` runs. Repeat calls accumulate.
+     * when `truss install` runs. Repeat calls accumulate.
      */
     template <class Self>
     Self& install_headers(this Self& self, std::string_view dir, std::string_view subdir = "") {
@@ -1940,7 +1940,7 @@ public:
 
     /**
      * \brief Register a named preset carrying a `Config` and `key=val` option
-     * overrides (selectable via `./truss --preset <name>`).
+     * overrides (selectable via `--preset`).
      */
     Project& preset(std::string name, Config config, std::initializer_list<std::string_view> options = {}) {
         return preset(std::move(name), std::move(config), std::span<const std::string_view>(options));

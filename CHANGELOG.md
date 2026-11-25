@@ -10,6 +10,23 @@ a major version.
 
 ### Added
 
+- **Typed build options & interactive `configure` TUI**: `truss::Options`
+  (`bool`, `int`, `std::string`, `choice`), `proj.options()`, `Target::options()`,
+  `Target::passthrough_options()` / `public_passthrough_options()`, `-D KEY[=VAL]`
+  CLI overrides, `build/<mode>/options.cache` persistence, `./truss options`,
+  and `./truss configure` (POSIX `termios` + ANSI TUI on a TTY; `--reset` to clear).
+- **Project defaults & presets**: `proj.defaults()` (`TargetDefaults`) for
+  inheritable baseline target settings, plus `proj.preset()`, `--preset <name>`,
+  and `./truss presets` (precedence: `CLI -D` > `options.cache` > `preset` > `default`).
+- **Test tags**: `Target::tag(...)` and `./truss test --tag` positive and `!`
+  exclusion filtering.
+- **System library probing & fallback chains**: `proj.system_lib()` (`pkg-config`
+  + manual `.headers()`/`.libs()`/`.paths()`), `proj.require()`, and `DepChain`
+  supporting direct/lazy `.fallback()` and `.required()`.
+- **First-class Unix `install` & `uninstall`**: `Target::install()`,
+  `Target::install_headers()`, `Target::install_dir()`, `./truss install`
+  (`--prefix`, `--strip`, `DESTDIR` staging, `$ORIGIN/../lib` / `@loader_path/../lib`
+  RPATHs, `build/<mode>/install_manifest.txt`), and `./truss uninstall`.
 - MIT `LICENSE` (2026, Maxime Beaudoin).
 - Target switches, all validated at `build()`: `as_shared()` (library kind),
   `output_name()` (artifact basename; unique per subgraph), `build_by_default(false)`
@@ -50,6 +67,9 @@ a major version.
 - Include/link paths are shell-escaped inside their quotes; link library and
   framework names are charset-validated; git's `ext::` transport is refused;
   `reload` refuses to replace the binary with raised privileges.
+- `system_lib()` rejects `pkg-config` tokens containing control characters or
+  shell metacharacters; `install()` publishes via temp+`chmod`+`rename` and
+  `install_headers()` skips symlinks.
 
 ## [1.0.0] — 2026-11-16
 

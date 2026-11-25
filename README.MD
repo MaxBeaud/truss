@@ -20,8 +20,12 @@ no config files, no separate configure stage.
 - **Static & portable binaries** — per-dependency `static_link()`,
   `static_deps()` and `static_stdlib()` (fully-static musl, or drop just the
   C++ runtime).
-- **Packages** — `fetch` (git/tarball, sha256-pinned), `conan` and `vcpkg`,
-  consumed as targets.
+- **Packages & system libs** — `system_lib()` (`pkg-config` + manual probing)
+  with lazy `.fallback()` chains into `fetch` (git/tarball, sha256-pinned),
+  `conan`, and `vcpkg`, consumed as targets.
+- **Options, presets & install** — type-safe `Options` with an interactive
+  `configure` TUI and `options.cache`, `proj.defaults()` / `proj.preset()`,
+  tagged test filtering, and first-class Unix `install` / `uninstall`.
 - **Fast & incremental** — compiler-cache launcher, unity builds, PCH,
   precise module wiring.
 - **Hardened by default** — stack protector, RELRO, non-exec stack and
@@ -49,7 +53,7 @@ compiled once into a `./truss` binary. From then on, every invocation:
    │                           its content changed (mtime-stable)
    ├─ samurai build            the incremental compile + link (depfiles,
    │                           build-log reuse, correct rebuild sets)
-   └─ commands                 test / run / clean / compdb / reload / tasks
+   └─ commands                 test / run / install / configure / clean / tasks
 ```
 
 The regeneration is cheap because the script is cheap to run and the
@@ -81,16 +85,20 @@ Without either it stops with an error asking for a rebuild instead.
   - [File formats](#file-formats)
   - [Usage requirements & propagation](#usage-requirements--propagation)
   - [Compiler options](#compiler-options)
+  - [Defaults, options & presets](#defaults-options--presets)
   - [Hardening](#hardening)
   - [Precompiled headers](#precompiled-headers)
   - [Unity builds](#unity-builds)
   - [Static linking](#static-linking)
   - [Merged archives](#merged-archives)
+  - [Test tags](#test-tags)
   - [User tasks](#user-tasks)
   - [Build hooks](#build-hooks)
+  - [Installing (Unix)](#installing-unix)
 - [Scripting helpers (os / fs / log)](#scripting-helpers-os--fs--log)
 - [C++ modules](#c-modules)
 - [Dependencies](#dependencies)
+  - [system_lib & fallbacks](#system_lib--fallbacks)
   - [add_subdirectory](#add_subdirectory)
   - [fetch](#fetch)
   - [conan](#conan)
@@ -154,7 +162,7 @@ or the cross toolchains below. POSIX hosts only (Linux is the tested one).
 ## Command line
 
 ```
-./truss [debug|release] [command...] [-j N] [-q] [-v] [-n] [--explain] [--target [SUBGRAPH:]NAME] [--for SUBGRAPH] [--build-dir PATH]
+./truss [debug|release] [command...] [-j N] [-q] [-v] [-n] [--explain] [--target [SUBGRAPH:]NAME] [--for SUBGRAPH] [--preset NAME] [-D KEY[=VAL]] [--build-dir PATH]
 ```
 
 truss has **built-in commands** and your **user tasks** — they are different
@@ -163,8 +171,13 @@ things: commands are truss's own verbs; tasks are yours, registered with
 
 | Command | What it does |
 |---|---|
-| `test` | Builds, then runs every target marked `.is_test()` (per subgraph, each with its own runner). |
+| `test` | Builds, then runs every target marked `.is_test()` (filterable with `--tag`; per subgraph, each with its own runner). |
 | `run` | Builds, then runs the first non-test executable (or the one named by `--target`), forwarding the arguments after `--`. |
+| `options` | Lists registered build options, types, current values, and defaults. |
+| `configure` | Interactively edits build options in a terminal TUI (`--reset` clears `options.cache`; non-TTY or `-D` saves overrides and prints). |
+| `presets` | Lists presets registered with `proj.preset(...)`. |
+| `install` | Builds and installs targets marked `.install()` and `.install_headers()` into `--prefix` (default `~/.local`), writing `install_manifest.txt`. |
+| `uninstall` | Removes every file listed in `build/<mode>/install_manifest.txt` and deletes the manifest. |
 | `clean` | Deletes the mode's build dir (cannot be combined with other commands). |
 | `compdb` | Writes `build/<mode>/compile_commands.json` (via samurai's compdb tool), replacing it only when its content changed. |
 | `reload` | Rebuilds the `truss` executable from source and replaces the current binary. Only works from the truss repository root. |
@@ -181,6 +194,12 @@ things: commands are truss's own verbs; tasks are yours, registered with
 | `--explain` | Print *why* each edge is (re)built — samurai's explain mode. |
 | `--target NAME` | Build only this target (repeatable). With subgraphs: `SUBGRAPH:NAME` picks one subgraph's target (e.g. `win:app`); a bare name applies to every subgraph that has it. |
 | `--for SUBGRAPH` | With subgraphs: restrict `build`/`test`/`run` to one subgraph. |
+| `--tag TAG...` | With `test`: include tests matching any `TAG`, or exclude with `!TAG` (repeatable). |
+| `--preset NAME` | Apply a named preset registered with `proj.preset(...)`. |
+| `-D KEY[=VAL]` | Set a build option (`-Dfoo` for `bool`, `-Dscope.key=val` for scoped options; persisted in `build/<mode>/options.cache`). |
+| `--reset` | With `configure`: remove `build/<mode>/options.cache` and revert to defaults. |
+| `--prefix PATH` | With `install`: installation prefix (default `~/.local`; honors `DESTDIR`). |
+| `--strip` | With `install`: strip installed executables and shared libraries. |
 | `--build-dir PATH` | Relocate the build root (default `./build`). |
 | `--version` / `-V` | Print truss version and exit. |
 | `--help` / `-h` / `help` | Print the full usage and exit. |
@@ -390,6 +409,61 @@ This is what makes package managers ergonomic: `conan()`/`vcpkg()` return an
 `Full` in debug, `None` in release), so a single build script does the right
 thing in both modes.
 
+### Defaults, options & presets
+
+**Project-wide target defaults (`proj.defaults()`).** Set baseline compiler
+settings once so every target declared afterward inherits them unless
+overridden per target:
+
+```cpp
+proj.defaults()
+    .cpp_standard(truss::CppStandard::Cpp23)
+    .warnings(truss::Warnings::Pedantic)
+    .harden(truss::Hardening::Medium);
+```
+
+Supports `.cpp_standard()`, `.c_standard()`, `.warnings()`, `.debug_info()`,
+`.optimization()`, `.sanitizer()`, `.lto()`, `.harden()`, `.pic()`,
+`.symbols_hidden()`, and `.modules_mode()`.
+
+**User-configurable options (`truss::Options`).** Declare typed `bool`, `int`,
+`std::string`, or constrained `choice` options and unpack them with structured
+bindings — or emit them straight as `-D` preprocessor defines via
+`Target::passthrough_options()` / `public_passthrough_options()`:
+
+```cpp
+auto [with_tests, threads, audio] = proj.options(
+    truss::Options{}
+        .option("with_tests", true, "Build the test suite")
+        .option("threads", 4, "Worker pool size")
+        .choice("audio", {"pipewire", "alsa", "none"}, "pipewire", "Audio driver"));
+
+proj.add_static_library("engine")
+    .sources_in("src/engine")
+    .passthrough_options(truss::Options{}.option("ENABLE_SIMD", true));
+```
+
+Options are overridden from the command line (`-Dwith_tests=false`,
+`-Dthreads=8`, `-Dengine.ENABLE_SIMD=false`), persisted per mode in
+`build/<mode>/options.cache`, and inspectable via `./truss options`. Running
+`./truss configure` in a terminal opens an interactive TUI (`↑`/`↓` or `j`/`k`
+to move, `Space`/`Enter` to toggle/cycle/edit, `s` to save, `r` to reset,
+`q`/`Esc` to quit); `./truss configure --reset` clears the cache.
+
+**Named presets (`proj.preset()`).** Bundle an optional `Config` overlay and
+option overrides under a name selectable with `./truss --preset <name>` (list
+them with `./truss presets`):
+
+```cpp
+proj.preset("llvm-alsa",
+            truss::Config{}.toolchain(truss::Toolchain::LLVM),
+            {"audio=alsa", "with_tests=true"});
+```
+
+Option precedence is strictly: `CLI -D` > `options.cache` > `preset` >
+`OptionSpec default`. A preset's `Config` merges over `proj.configure()` (and
+`proj.targets()` subgraphs) without dropping fields the preset left unset.
+
 ### Hardening
 
 Every target gets truss's **default hardening stack** (`Hardening::Light`)
@@ -497,6 +571,24 @@ in — `depends_on()` those separately). A merged library needs no sources of it
 own; each member must itself be a static library. MSVC targets are a Config
 error.
 
+### Test tags
+
+Label `.is_test()` targets with `.tag(...)` (single string, braced list, or
+range; repeat calls accumulate) and filter `./truss test` with `--tag`:
+
+```cpp
+proj.add_executable("unit_math").sources("tests/math.cpp").is_test().tag({"unit", "fast"});
+proj.add_executable("integ_net").sources("tests/net.cpp").is_test().tag({"integration", "slow"});
+```
+
+```sh
+./truss test --tag unit fast          # run tests matching any positive tag
+./truss test --tag !slow              # exclude tests matching any !tag
+./truss test --tag unit --tag !slow   # combine include + exclude
+```
+
+Calling `.tag()` on a non-test target is a `Config` error.
+
 ### User tasks
 
 `proj.task(name, description, fn)` registers a **user task**, run with
@@ -572,6 +664,38 @@ proj.compile_commands("build/compile_commands.json");  // custom path
 This is also available as the built-in `compdb` command: `./truss compdb`.
 Named tasks (`./truss task <name>`) stay manual commands — hooks are for what
 must always run around the build itself.
+
+### Installing (Unix)
+
+Mark executables, static libraries, or shared libraries with `.install()` and
+attach public header trees with `.install_headers(dir, subdir)` (optional
+`.install_dir(subdir)` overrides the default `bin` / `lib` destination):
+
+```cpp
+auto& core = proj.add_shared_library("core")
+                 .sources_in("src/core")
+                 .include_dirs("include")
+                 .install()
+                 .install_headers("include", "myapp");   // -> <prefix>/include/myapp/
+
+proj.add_executable("myapp")
+    .sources_in("src/app")
+    .depends_on(core)
+    .install();                                         // -> <prefix>/bin/myapp
+```
+
+```sh
+./truss install                          # installs into ~/.local
+./truss install --prefix /usr/local --strip
+DESTDIR=/tmp/stage ./truss install --prefix /usr
+./truss uninstall                        # removes files from build/<mode>/install_manifest.txt
+```
+
+Installed executables linked against project-built shared libraries carry
+`$ORIGIN/../lib` (ELF) / `@loader_path/../lib` (macOS) RPATHs so they run
+directly from `<prefix>/bin` without `LD_LIBRARY_PATH`. Artifacts are published
+atomically (`0755` for executables/shared libs, `0644` for static libs/headers),
+and symlinks inside `install_headers()` trees are skipped.
 
 ## Scripting helpers (os / fs / log)
 
@@ -682,6 +806,32 @@ proj.add_executable("calc").sources("src/calc.cpp").depends_on(math);
 ```
 
 ## Dependencies
+
+### system_lib & fallbacks
+
+Probe system-installed libraries with `proj.system_lib(name)` (`pkg-config` by
+default, or manual `.headers()` / `.libs()` / `.paths()` with `.pkg_config(false)`),
+and compose fallback chains with `.fallback(...)` and `.required()`:
+
+```cpp
+auto zlib = proj.system_lib("zlib")
+                .min_version("1.2.11")
+                .fallback(proj.system_lib("zlib-ng"))   // direct fallback
+                .fallback([&] {                         // lazy fallback: only runs if needed
+                    return proj.conan({"zlib/1.3.1"});
+                })
+                .required();                            // Config error listing all tried steps if all fail
+
+proj.add_executable("app").sources_in("src").depends_on(zlib);
+
+// Optional probing also works directly:
+if (auto z = proj.system_lib("zlib"))
+    app.depends_on(z);
+```
+
+`proj.require(...)` wraps any `Result<TargetRef>`, `Target`, or `TargetRef` into
+the same fallback chain. `pkg-config` tokens are validated against control
+characters and shell metacharacters before reaching the build manifest.
 
 ### add_subdirectory
 
@@ -960,6 +1110,8 @@ Notes:
 build/
   debug/                      # one dir per mode
     ninja/build.ninja         # generated manifest
+    options.cache             # persisted -D / `truss configure` option overrides
+    install_manifest.txt      # files written by `truss install` (for `uninstall`)
     obj/<triple>/<target>/…   # .o/.obj (+ .d depfiles, bmi/*.pcm | *.gcm)
     modmap/<triple>/          # GCC module-mapper files (per target)
     scan-cache/               # compiler scans (path+mtime+size+flags+compiler)

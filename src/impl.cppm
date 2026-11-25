@@ -516,7 +516,7 @@ private:
 
 /* --- Unix install / uninstall -------------------------------------------- */
 
-/// One built artifact or header-only target scheduled for `./truss install`.
+/// One built artifact or header-only target scheduled for `truss install`.
 /// \ingroup grp_internals
 struct InstallItem {
     const Target* target {nullptr};

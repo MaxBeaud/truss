@@ -48,7 +48,11 @@ page explains the architecture around them.
 | `src/core/samu.cpp` | C shim over vendored samurai (`vendor/samurai`), in-process build + compdb; on a terminal, samurai's stdout is pumped through a pipe by a reader thread that renders the live in-flight block (`[started/total pct]` + the jobs currently compiling, FIFO-evicted as new ones start); compiler diagnostics clear the block and print verbatim, `TRUSS_PROGRESS=plain`/`-v`/`-n`/`--explain` keep the plain stream |
 | `src/core/proc.cpp` | `posix_spawn` process runner (optional cwd via `addchdir_np`), output capture |
 | `src/core/os.cpp` | `truss::os`: consteval host predicates, memoized fork-free `find_program` `$PATH` walk, lenient `env` parsing, machine specs, `temp_scope`, `find_truss_modules` auto-discovery |
-| `src/core/pkg.cpp` | fetch (git/tarball + sha256), `~/.cache/truss` cache, hardlink materialization, conan/vcpkg fingerprint + configure-skip; on a terminal, fetch tools stream their progress bars (stderr inherited), off a terminal their diagnostics are captured |
+| `src/core/pkg.cpp` | fetch (git/tarball + sha256), `~/.cache/truss` cache, hardlink materialization, `add_subdirectory`, conan/vcpkg fingerprint + configure-skip; on a terminal, fetch tools stream their progress bars (stderr inherited), off a terminal their diagnostics are captured |
+| `src/core/system_lib.cpp` | `proj.system_lib()` probing (`pkg-config` + manual `.headers()`/`.libs()`/`.paths()`) with spec-keyed `Interface` targets and shell-token validation |
+| `src/core/options.cpp` | typed build options (`Options`, `options.cache`, `-D` CLI overrides, `passthrough_options`, `proj.preset()`, `validate_options`) |
+| `src/core/options_tui.cpp` | zero-dependency POSIX `termios` + ANSI TUI and decoupled `OptionsTuiState` state machine for `./truss configure` |
+| `src/core/install.cpp` | Unix `./truss install` (`--prefix`, `DESTDIR`, `--strip`, atomic temp+chmod+rename, `install_manifest.txt`) and `./truss uninstall` |
 | `src/core/target.cpp` | host triple detection, `Config` → `TargetTriple` resolution (`apply_config`), triple parsing, compiler-family/`c_driver` detection, launcher resolution |
 | `src/core/build.cpp` | the emitter: rules, edges, unity batching, PCH edges, scan-deps wiring, `Project::build()` orchestration, `compile_commands` generation, `reload` task |
 | `src/core/log.cpp` | colored stderr logging, the public `truss::log` channel |
@@ -78,6 +82,11 @@ page explains the architecture around them.
   euid != uid (a setuid install must not let an unprivileged caller swap a
   root-owned binary); `write_file` publishes through an O_EXCL|O_NOFOLLOW
   sibling temp + rename, so a pre-placed symlink is never followed.
+  `install()` publishes artifacts via a PID-unique temp sibling + `chmod` +
+  `rename` (avoiding `ETXTBSY` on running executables and never writing through
+  pre-existing symlinks), `install_headers()` skips symlinks inside header
+  trees, and `system_lib()` rejects `pkg-config` tokens containing control
+  characters or shell metacharacters.
 - **Module wiring**: BMI edges are separate rules; consumers get
   `-fmodule-file=` flags from the scanner (Auto) or clang-scan-deps (Manual);
   unity never batches `.cppm` units.
