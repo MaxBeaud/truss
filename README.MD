@@ -20,12 +20,10 @@ no config files, no separate configure stage.
 - **Static & portable binaries** — per-dependency `static_link()`,
   `static_deps()` and `static_stdlib()` (fully-static musl, or drop just the
   C++ runtime).
-- **Packages & system libs** — `system_lib()` (`pkg-config` + manual probing)
-  with lazy `.fallback()` chains into `fetch` (git/tarball, sha256-pinned),
-  `conan`, and `vcpkg`, consumed as targets.
-- **Options, presets & install** — type-safe `Options` with an interactive
-  `configure` TUI and `options.cache`, `proj.defaults()` / `proj.preset()`,
-  tagged test filtering, and first-class Unix `install` / `uninstall`.
+- **Packages & system libs** — `system_lib()` with lazy `.fallback()` chains
+  into `fetch` (git/tarball, sha256-pinned), `conan`, and `vcpkg`.
+- **Options, presets & install** — typed `Options` (`configure` TUI),
+  `defaults()` / `preset()`, test `--tag` filtering, and Unix `install`.
 - **Fast & incremental** — compiler-cache launcher, unity builds, PCH,
   precise module wiring.
 - **Hardened by default** — stack protector, RELRO, non-exec stack and
@@ -173,11 +171,11 @@ things: commands are truss's own verbs; tasks are yours, registered with
 |---|---|
 | `test` | Builds, then runs every target marked `.is_test()` (filterable with `--tag`; per subgraph, each with its own runner). |
 | `run` | Builds, then runs the first non-test executable (or the one named by `--target`), forwarding the arguments after `--`. |
-| `options` | Lists registered build options, types, current values, and defaults. |
-| `configure` | Interactively edits build options in a terminal TUI (`--reset` clears `options.cache`; non-TTY or `-D` saves overrides and prints). |
+| `options` | Lists registered build options and their current values. |
+| `configure` | Edits options in a terminal TUI (`--reset` clears `options.cache`). |
 | `presets` | Lists presets registered with `proj.preset(...)`. |
-| `install` | Builds and installs targets marked `.install()` and `.install_headers()` into `--prefix` (default `~/.local`), writing `install_manifest.txt`. |
-| `uninstall` | Removes every file listed in `build/<mode>/install_manifest.txt` and deletes the manifest. |
+| `install` | Builds and installs `install()` targets to `--prefix` (default `~/.local`). |
+| `uninstall` | Removes files listed in `build/<mode>/install_manifest.txt`. |
 | `clean` | Deletes the mode's build dir (cannot be combined with other commands). |
 | `compdb` | Writes `build/<mode>/compile_commands.json` (via samurai's compdb tool), replacing it only when its content changed. |
 | `reload` | Rebuilds the `truss` executable from source and replaces the current binary. Only works from the truss repository root. |
@@ -194,12 +192,12 @@ things: commands are truss's own verbs; tasks are yours, registered with
 | `--explain` | Print *why* each edge is (re)built — samurai's explain mode. |
 | `--target NAME` | Build only this target (repeatable). With subgraphs: `SUBGRAPH:NAME` picks one subgraph's target (e.g. `win:app`); a bare name applies to every subgraph that has it. |
 | `--for SUBGRAPH` | With subgraphs: restrict `build`/`test`/`run` to one subgraph. |
-| `--tag TAG...` | With `test`: include tests matching any `TAG`, or exclude with `!TAG` (repeatable). |
-| `--preset NAME` | Apply a named preset registered with `proj.preset(...)`. |
-| `-D KEY[=VAL]` | Set a build option (`-Dfoo` for `bool`, `-Dscope.key=val` for scoped options; persisted in `build/<mode>/options.cache`). |
-| `--reset` | With `configure`: remove `build/<mode>/options.cache` and revert to defaults. |
-| `--prefix PATH` | With `install`: installation prefix (default `~/.local`; honors `DESTDIR`). |
-| `--strip` | With `install`: strip installed executables and shared libraries. |
+| `--tag TAG...` | With `test`: include `TAG`, or exclude `!TAG` (repeatable). |
+| `--preset NAME` | Apply a preset registered with `proj.preset(...)`. |
+| `-D KEY[=VAL]` | Set a build option (`build/<mode>/options.cache`). |
+| `--reset` | With `configure`: clear `options.cache` back to defaults. |
+| `--prefix PATH` | With `install`: install prefix (default `~/.local`; honors `DESTDIR`). |
+| `--strip` | With `install`: strip installed binaries and shared libs. |
 | `--build-dir PATH` | Relocate the build root (default `./build`). |
 | `--version` / `-V` | Print truss version and exit. |
 | `--help` / `-h` / `help` | Print the full usage and exit. |
@@ -411,58 +409,28 @@ thing in both modes.
 
 ### Defaults, options & presets
 
-**Project-wide target defaults (`proj.defaults()`).** Set baseline compiler
-settings once so every target declared afterward inherits them unless
-overridden per target:
+Set project-wide target defaults with `proj.defaults()`, declare typed build
+options (`bool`, `int`, `string`, `choice`) with `truss::Options`, and bundle
+configs/overrides as `proj.preset()`:
 
 ```cpp
-proj.defaults()
-    .cpp_standard(truss::CppStandard::Cpp23)
-    .warnings(truss::Warnings::Pedantic)
-    .harden(truss::Hardening::Medium);
-```
+proj.defaults().cpp_standard(truss::CppStandard::Cpp23).harden(truss::Hardening::Medium);
 
-Supports `.cpp_standard()`, `.c_standard()`, `.warnings()`, `.debug_info()`,
-`.optimization()`, `.sanitizer()`, `.lto()`, `.harden()`, `.pic()`,
-`.symbols_hidden()`, and `.modules_mode()`.
-
-**User-configurable options (`truss::Options`).** Declare typed `bool`, `int`,
-`std::string`, or constrained `choice` options and unpack them with structured
-bindings — or emit them straight as `-D` preprocessor defines via
-`Target::passthrough_options()` / `public_passthrough_options()`:
-
-```cpp
-auto [with_tests, threads, audio] = proj.options(
+auto [with_tests, audio] = proj.options(
     truss::Options{}
-        .option("with_tests", true, "Build the test suite")
-        .option("threads", 4, "Worker pool size")
-        .choice("audio", {"pipewire", "alsa", "none"}, "pipewire", "Audio driver"));
+        .option("with_tests", true, "Build tests")
+        .choice("audio", {"pipewire", "alsa"}, "pipewire", "Audio driver"));
 
-proj.add_static_library("engine")
-    .sources_in("src/engine")
-    .passthrough_options(truss::Options{}.option("ENABLE_SIMD", true));
+proj.preset("llvm-alsa", truss::Config{}.toolchain(truss::Toolchain::LLVM), {"audio=alsa"});
 ```
 
-Options are overridden from the command line (`-Dwith_tests=false`,
-`-Dthreads=8`, `-Dengine.ENABLE_SIMD=false`), persisted per mode in
-`build/<mode>/options.cache`, and inspectable via `./truss options`. Running
-`./truss configure` in a terminal opens an interactive TUI (`↑`/`↓` or `j`/`k`
-to move, `Space`/`Enter` to toggle/cycle/edit, `s` to save, `r` to reset,
-`q`/`Esc` to quit); `./truss configure --reset` clears the cache.
-
-**Named presets (`proj.preset()`).** Bundle an optional `Config` overlay and
-option overrides under a name selectable with `./truss --preset <name>` (list
-them with `./truss presets`):
-
-```cpp
-proj.preset("llvm-alsa",
-            truss::Config{}.toolchain(truss::Toolchain::LLVM),
-            {"audio=alsa", "with_tests=true"});
-```
-
-Option precedence is strictly: `CLI -D` > `options.cache` > `preset` >
-`OptionSpec default`. A preset's `Config` merges over `proj.configure()` (and
-`proj.targets()` subgraphs) without dropping fields the preset left unset.
+- Override options with `-Dkey=val` (or `-Dscope.key=val`), persist them in
+  `build/<mode>/options.cache`, or edit them in `./truss configure` (TTY TUI;
+  `--reset` clears). Target options can also emit `-D` defines directly via
+  `Target::passthrough_options()`.
+- Select a preset with `./truss --preset <name>` (`./truss presets` lists them).
+  Precedence: `CLI -D` > `options.cache` > `preset` > default; preset `Config`
+  merges over `proj.configure()` and `proj.targets()`.
 
 ### Hardening
 
@@ -573,21 +541,13 @@ error.
 
 ### Test tags
 
-Label `.is_test()` targets with `.tag(...)` (single string, braced list, or
-range; repeat calls accumulate) and filter `./truss test` with `--tag`:
+Label `.is_test()` targets with `.tag(...)` and filter `./truss test` with
+`--tag` (positive includes, `!` excludes; `Config` error on non-tests):
 
 ```cpp
 proj.add_executable("unit_math").sources("tests/math.cpp").is_test().tag({"unit", "fast"});
-proj.add_executable("integ_net").sources("tests/net.cpp").is_test().tag({"integration", "slow"});
+// ./truss test --tag unit --tag !slow
 ```
-
-```sh
-./truss test --tag unit fast          # run tests matching any positive tag
-./truss test --tag !slow              # exclude tests matching any !tag
-./truss test --tag unit --tag !slow   # combine include + exclude
-```
-
-Calling `.tag()` on a non-test target is a `Config` error.
 
 ### User tasks
 
@@ -667,35 +627,23 @@ must always run around the build itself.
 
 ### Installing (Unix)
 
-Mark executables, static libraries, or shared libraries with `.install()` and
-attach public header trees with `.install_headers(dir, subdir)` (optional
-`.install_dir(subdir)` overrides the default `bin` / `lib` destination):
+Mark artifacts with `.install()` (optional `.install_dir(subdir)`) and public
+headers with `.install_headers(dir, subdir)`:
 
 ```cpp
-auto& core = proj.add_shared_library("core")
-                 .sources_in("src/core")
-                 .include_dirs("include")
-                 .install()
-                 .install_headers("include", "myapp");   // -> <prefix>/include/myapp/
-
-proj.add_executable("myapp")
-    .sources_in("src/app")
-    .depends_on(core)
-    .install();                                         // -> <prefix>/bin/myapp
+auto& core = proj.add_shared_library("core").sources_in("src/core")
+                 .install().install_headers("include", "myapp");
+proj.add_executable("myapp").sources_in("src/app").depends_on(core).install();
 ```
 
 ```sh
-./truss install                          # installs into ~/.local
-./truss install --prefix /usr/local --strip
-DESTDIR=/tmp/stage ./truss install --prefix /usr
-./truss uninstall                        # removes files from build/<mode>/install_manifest.txt
+./truss install --prefix /usr/local --strip   # default prefix: ~/.local; honors DESTDIR
+./truss uninstall                              # removes files from build/<mode>/install_manifest.txt
 ```
 
-Installed executables linked against project-built shared libraries carry
-`$ORIGIN/../lib` (ELF) / `@loader_path/../lib` (macOS) RPATHs so they run
-directly from `<prefix>/bin` without `LD_LIBRARY_PATH`. Artifacts are published
-atomically (`0755` for executables/shared libs, `0644` for static libs/headers),
-and symlinks inside `install_headers()` trees are skipped.
+Installed binaries depending on project shared libs get `$ORIGIN/../lib`
+(`@loader_path/../lib` on macOS) RPATHs; artifacts are installed atomically
+(`0755`/`0644`) and symlinks in `install_headers()` are skipped.
 
 ## Scripting helpers (os / fs / log)
 
@@ -809,29 +757,20 @@ proj.add_executable("calc").sources("src/calc.cpp").depends_on(math);
 
 ### system_lib & fallbacks
 
-Probe system-installed libraries with `proj.system_lib(name)` (`pkg-config` by
-default, or manual `.headers()` / `.libs()` / `.paths()` with `.pkg_config(false)`),
-and compose fallback chains with `.fallback(...)` and `.required()`:
+Probe system libraries with `proj.system_lib(name)` (`pkg-config` by default,
+or `.pkg_config(false)` + `.headers()`/`.libs()`/`.paths()`), and chain direct
+or lazy `.fallback(...)` steps with `.required()`:
 
 ```cpp
-auto zlib = proj.system_lib("zlib")
-                .min_version("1.2.11")
-                .fallback(proj.system_lib("zlib-ng"))   // direct fallback
-                .fallback([&] {                         // lazy fallback: only runs if needed
-                    return proj.conan({"zlib/1.3.1"});
-                })
-                .required();                            // Config error listing all tried steps if all fail
-
+auto zlib = proj.system_lib("zlib").min_version("1.2.11")
+                .fallback(proj.system_lib("zlib-ng"))
+                .fallback([&] { return proj.conan({"zlib/1.3.1"}); })
+                .required();
 proj.add_executable("app").sources_in("src").depends_on(zlib);
-
-// Optional probing also works directly:
-if (auto z = proj.system_lib("zlib"))
-    app.depends_on(z);
 ```
 
-`proj.require(...)` wraps any `Result<TargetRef>`, `Target`, or `TargetRef` into
-the same fallback chain. `pkg-config` tokens are validated against control
-characters and shell metacharacters before reaching the build manifest.
+`proj.require(...)` wraps any `Result<TargetRef>` or `Target` into the same
+chain, and `explicit operator bool()` supports `if (auto z = proj.system_lib("zlib"))`.
 
 ### add_subdirectory
 
