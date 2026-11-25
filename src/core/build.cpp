@@ -1828,6 +1828,8 @@ constexpr std::string_view kHelp =
     "  test             build and run every test executable\n"
     "  run              build and run an executable (pick one with --target)\n"
     "  clean            remove the mode's build directory\n"
+    "  options          list project build options and their current values\n"
+    "  configure        interactively edit options (--reset to clear cache)\n"
     "  compdb           write compile_commands.json\n"
     "  reload           rebuild the truss binary (truss checkout only)\n"
     "  task NAME        build, then run a task registered with proj.task(...)\n"
@@ -1844,6 +1846,8 @@ constexpr std::string_view kHelp =
     "                      bare name applies to every subgraph that has it\n"
     "      --for NAME      with subgraphs: restrict build/test/run to one subgraph\n"
     "      --build-dir PATH  build root (default: build)\n"
+    "  -D KEY[=VAL]     set a build option (persisted in build/<mode>/options.cache)\n"
+    "      --reset      with configure: clear saved options back to defaults\n"
     "  -V, --version    print the truss version\n"
     "  -h, --help       show this help\n"
     "  --               pass the remaining arguments to the program started by run\n"
@@ -1890,6 +1894,28 @@ Project::Project(std::string name, std::span<char* const> argv) : name_(std::mov
         else if (a == "--build-dir") {
             if (++i >= argv.size()) { cli_error_ = Error {Error::Kind::Config, "--build-dir requires a path"}; continue; }
             build_root_ = argv[i];
+        }
+        else if (a == "--reset") {
+            reset_options_ = true;
+        }
+        else if (a == "-D" || a.starts_with("-D")) {
+            std::string_view spec = a == "-D" ? std::string_view {} : a.substr(2);
+            if (a == "-D") {
+                if (++i >= argv.size()) { cli_error_ = Error {Error::Kind::Config, "-D requires KEY=VAL or KEY"}; continue; }
+                spec = argv[i];
+            }
+            if (spec.empty()) {
+                cli_error_ = Error {Error::Kind::Config, "-D requires KEY=VAL or KEY"};
+                continue;
+            }
+            const std::size_t eq = spec.find('=');
+            if (eq == std::string_view::npos) {
+                cli_options_.push_back({std::string(spec), "true", true});
+            } else if (eq == 0) {
+                cli_error_ = Error {Error::Kind::Config, "-D requires a non-empty option name"};
+            } else {
+                cli_options_.push_back({std::string(spec.substr(0, eq)), std::string(spec.substr(eq + 1)), false});
+            }
         }
         else if (a == "--") {
             /* everything after `--` goes to the program started by `run` */
@@ -2083,6 +2109,49 @@ Result<void> Project::build() {
             return {};
         }
         return detail::remove_tree(bld);
+    }
+
+    const bool has_configure = std::ranges::any_of(tasks, [](const std::string& t) { return t == "configure"; });
+    const bool has_options = std::ranges::any_of(tasks, [](const std::string& t) { return t == "options"; });
+    if (reset_options_ && !has_configure)
+        return config_error("'--reset' can only be used with 'configure' (./truss configure --reset)");
+
+    if (has_configure && reset_options_) {
+        if (tasks.size() > 1)
+            return config_error("'configure' cannot be combined with other tasks");
+        if (!cli_options_.empty())
+            return config_error("'configure --reset' cannot be combined with -D options");
+        if (dry_run_) {
+            log::info("dry run: would reset " + (bld / "options.cache").generic_string());
+            return {};
+        }
+        return reset_options_cache();
+    }
+
+    if (auto r = validate_options(); !r)
+        return r;
+
+    if (has_options) {
+        if (tasks.size() > 1)
+            return config_error("'options' cannot be combined with other tasks");
+        print_options();
+        return {};
+    }
+
+    if (has_configure) {
+        if (tasks.size() > 1)
+            return config_error("'configure' cannot be combined with other tasks");
+        if (!dry_run_) {
+            if (auto r = save_options_cache(); !r)
+                return r;
+        }
+        print_options();
+        return {};
+    }
+
+    if (!dry_run_) {
+        if (auto r = save_options_cache(); !r)
+            return r;
     }
 
     if (auto r = validate(targets_); !r)
@@ -2934,7 +3003,7 @@ Result<void> Project::build() {
                 });
             return std::unexpected(Error {
                 Error::Kind::Config,
-                "unknown command '" + task + "' (built-ins: test, run, clean, compdb, reload; "
+                "unknown command '" + task + "' (built-ins: test, run, clean, options, configure, compdb, reload; "
                     "user tasks: ./truss task list; see ./truss --help)",
             });
         }();

@@ -23,6 +23,7 @@ module;
 #include <span>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -762,8 +763,93 @@ private:
     StdLib stdlib_ {StdLib::Default};
 };
 
-// Forward declaration for TargetRef (used in Target::depends_on below)
+/// Metadata for one user-configurable build option declared with `Options`.
+struct OptionSpec {
+    enum class Kind { Bool, Int, String, Choice };
+    Kind kind {Kind::Bool};
+    std::string name;
+    std::string description;
+    std::string default_str;
+    std::vector<std::string> choices;
+};
+
+/**
+ * \brief Type-safe builder for user-configurable build options (`bool`, `int`,
+ *        `std::string`, or constrained `choice`).
+ *
+ * Chain `.option(...)` / `.choice(...)` and pass to `Project::options()`,
+ * `Target::options()`, or `Target::passthrough_options()` to unpack via
+ * structured bindings:
+ * \code
+ * auto opts = truss::Options{}
+ *     .option("with_tests", true, "Build the test suite")
+ *     .option("max_threads", 4, "Worker pool size")
+ *     .choice("audio", {"pipewire", "alsa"}, "pipewire", "Audio driver");
+ * auto [with_tests, max_threads, audio] = proj.options(opts);
+ * \endcode
+ */
+template <class... Ts>
+class Options {
+public:
+    Options() = default;
+
+    /// Add a boolean option (constrained to exact `bool` so pointers/ints never decay).
+    template <class Self, std::same_as<bool> B>
+    auto option(this Self&& self, std::string_view name, B def, std::string_view desc = "") -> Options<Ts..., bool> {
+        return std::forward<Self>(self).template push<bool>(
+            {OptionSpec::Kind::Bool, std::string(name), std::string(desc), def ? "true" : "false", {}});
+    }
+
+    /// Add an integer option (`int`, `int64_t`, etc., excluding `bool`/character types).
+    template <class Self, std::integral I>
+        requires (!std::same_as<I, bool> && !std::same_as<I, char>)
+    auto option(this Self&& self, std::string_view name, I def, std::string_view desc = "") -> Options<Ts..., I> {
+        return std::forward<Self>(self).template push<I>(
+            {OptionSpec::Kind::Int, std::string(name), std::string(desc), std::to_string(def), {}});
+    }
+
+    /// Add a string option (`std::string`, `std::string_view`, `const char*`).
+    template <class Self, std::convertible_to<std::string_view> S>
+    auto option(this Self&& self, std::string_view name, S&& def, std::string_view desc = "")
+        -> Options<Ts..., std::string> {
+        return std::forward<Self>(self).template push<std::string>(
+            {OptionSpec::Kind::String, std::string(name), std::string(desc),
+             std::string(std::string_view(std::forward<S>(def))), {}});
+    }
+
+    /// Add a constrained string choice option.
+    template <class Self>
+    auto choice(this Self&& self, std::string_view name, std::initializer_list<std::string_view> allowed,
+                std::string_view def, std::string_view desc = "") -> Options<Ts..., std::string> {
+        std::vector<std::string> list;
+        list.reserve(allowed.size());
+        for (const auto s : allowed)
+            list.emplace_back(s);
+        return std::forward<Self>(self).template push<std::string>(
+            {OptionSpec::Kind::Choice, std::string(name), std::string(desc), std::string(def), std::move(list)});
+    }
+
+    const std::vector<OptionSpec>& specs() const { return specs_; }
+
+private:
+    template <class... Us>
+    friend class Options;
+
+    explicit Options(std::vector<OptionSpec> specs) : specs_(std::move(specs)) {}
+
+    template <class Next, class Self>
+    auto push(this Self&& self, OptionSpec spec) -> Options<Ts..., Next> {
+        auto next_specs = std::forward_like<Self>(self.specs_);
+        next_specs.push_back(std::move(spec));
+        return Options<Ts..., Next>(std::move(next_specs));
+    }
+
+    std::vector<OptionSpec> specs_;
+};
+
+// Forward declaration for TargetRef (used in Target::depends_on below) and Project
 class TargetRef;
+class Project;
 
 /**
  * \brief A build target: options holder built with method chaining.
@@ -1298,6 +1384,29 @@ public:
     const std::vector<const Target*>& merged_libraries() const { return merge_; }
     bool is_test_target() const { return test_; }
 
+    /**
+     * \brief Resolve a set of user options scoped under this target's name
+     * (e.g. `-D<target>.<name>=<val>` or unscoped `-D<name>=<val>`).
+     */
+    template <class... Ts>
+    std::tuple<Ts...> options(const class Options<Ts...>& opts);
+
+    /**
+     * \brief Resolve options under this target's name and automatically emit
+     * private `-D` / `/D` preprocessor defines onto this target's compile edges.
+     * Config error on Interface or ImportedLibrary targets.
+     */
+    template <class Self, class... Ts>
+    Self& passthrough_options(this Self& self, const Options<Ts...>& opts);
+
+    /**
+     * \brief Resolve options under this target's name and automatically emit
+     * `public_defines()` (propagated to dependents) onto this target.
+     * Config error on Interface or ImportedLibrary targets.
+     */
+    template <class Self, class... Ts>
+    Self& public_passthrough_options(this Self& self, const Options<Ts...>& opts);
+
 protected:
     /// Record a failed-result error from depends_on(Result)/uses(Result)
     /// (first one wins; reported by Project::build()).
@@ -1307,6 +1416,10 @@ protected:
     }
 
 private:
+    friend class Project;
+
+    void apply_passthrough_options(std::span<const OptionSpec> specs, bool is_public, std::string_view fn_name);
+
     /// Shared append loop behind the braced-list/range builder overloads.
     template <class R>
     static void append_strings(std::vector<std::string>& v, R&& range) {
@@ -1314,6 +1427,7 @@ private:
             v.emplace_back(std::string_view(s));
     }
 
+    Project* owner_ {nullptr};
     std::string name_;
     TargetKind kind_;
     std::vector<std::string> source_patterns_;
@@ -1823,14 +1937,93 @@ public:
     /// Get the auto-discovered truss module paths (probed lazily on first call).
     const std::vector<std::filesystem::path>& truss_module_paths() const;
 
+    /**
+     * \brief Register and resolve a set of options under the project's default
+     * scope, returning their resolved values as a tuple.
+     */
+    template <class... Ts>
+    std::tuple<Ts...> options(const Options<Ts...>& opts) {
+        return options(name_, opts);
+    }
+
+    /**
+     * \brief Register and resolve a set of options under an explicit `scope`
+     * (e.g. `"audio"` for `-Daudio.<key>=<val>`), returning a tuple.
+     */
+    template <class... Ts>
+    std::tuple<Ts...> options(std::string_view scope, const Options<Ts...>& opts) {
+        return resolve_options_tuple(scope, opts, std::index_sequence_for<Ts...> {});
+    }
+
+    /**
+     * \brief Look up a previously registered option's resolved value by name
+     * (unscoped, or `"scope.name"`). Returns `T{}` if not registered.
+     */
+    template <class T>
+    T get(std::string_view name) const {
+        return get<T>(std::string_view {}, name);
+    }
+
+    /// Look up a previously registered option's resolved value by `(scope, name)`.
+    /// Records a Config error (surfaced by `build()`) on unknown, ambiguous, or
+    /// type-mismatched lookups.
+    template <class T>
+    T get(std::string_view scope, std::string_view name) const {
+        constexpr OptionSpec::Kind expected = [] {
+            if constexpr (std::same_as<T, bool>) return OptionSpec::Kind::Bool;
+            else if constexpr (std::integral<T>) return OptionSpec::Kind::Int;
+            else return OptionSpec::Kind::String;
+        }();
+        const auto val = lookup_option_value(scope, name, expected);
+        if (!val)
+            return T {};
+        return parse_option_value<T>(*val);
+    }
+
 private:
+    friend class Target;
+
     template <class T>
     T& add_target(std::string name) {
         auto t = std::make_unique<T>(std::move(name));
+        t->owner_ = this;
         auto& ref = *t;
         targets_.push_back(std::move(t));
         return ref;
     }
+
+    template <class T>
+    static T parse_option_value(std::string_view s) {
+        if constexpr (std::same_as<T, bool>) {
+            return s == "true" || s == "1" || s == "on" || s == "yes" || s == "y";
+        } else if constexpr (std::integral<T>) {
+            T out {};
+            std::from_chars(s.data(), s.data() + s.size(), out);
+            return out;
+        } else {
+            return std::string(s);
+        }
+    }
+
+    template <class... Ts, std::size_t... Is>
+    std::tuple<Ts...> resolve_options_tuple(std::string_view scope, const Options<Ts...>& opts,
+                                            std::index_sequence<Is...>) {
+        const auto& specs = opts.specs();
+        std::vector<std::string> resolved;
+        resolved.reserve(specs.size());
+        for (const auto& s : specs)
+            resolved.push_back(register_option_value(scope, s));
+        return std::tuple<Ts...>(parse_option_value<Ts>(resolved[Is])...);
+    }
+
+    std::string register_option_value(std::string_view scope, const OptionSpec& spec);
+    std::optional<std::string> lookup_option_value(std::string_view scope, std::string_view name,
+                                                   OptionSpec::Kind expected) const;
+    void load_options_cache();
+    Result<void> validate_options() const;
+    Result<void> save_options_cache() const;
+    void print_options() const;
+    Result<void> reset_options_cache() const;
 
     std::string name_;
     std::filesystem::path cwd_;
@@ -1862,7 +2055,49 @@ private:
     std::vector<std::string> subdir_target_names_; /* created by add_subdirectory */
     mutable std::vector<std::filesystem::path> truss_module_paths_; /* lazily discovered truss module paths */
     mutable bool truss_module_paths_loaded_ {false};
+
+    /* user options state (-D overrides + options.cache + registered schema) */
+    struct CliOption {
+        std::string key;
+        std::string value;
+        bool bare {false};
+    };
+    struct RegisteredOption {
+        std::string scope;
+        OptionSpec spec;
+        std::string value;
+        bool from_cli {false};
+        bool from_cache {false};
+    };
+    std::vector<CliOption> cli_options_;
+    std::vector<std::pair<std::string, std::string>> cached_options_;
+    std::vector<RegisteredOption> registered_options_;
+    mutable std::optional<Error> options_error_;
+    bool cache_loaded_ {false};
+    bool reset_options_ {false};
 };
+
+// Out-of-line Target option templates (Project is complete here).
+template <class... Ts>
+std::tuple<Ts...> Target::options(const Options<Ts...>& opts) {
+    if (!owner_) {
+        defer_error(Error {Error::Kind::Config, "target '" + name_ + "' has no owning Project for options()"});
+        return {};
+    }
+    return owner_->options(name_, opts);
+}
+
+template <class Self, class... Ts>
+Self& Target::passthrough_options(this Self& self, const Options<Ts...>& opts) {
+    self.apply_passthrough_options(opts.specs(), false, "passthrough_options()");
+    return self;
+}
+
+template <class Self, class... Ts>
+Self& Target::public_passthrough_options(this Self& self, const Options<Ts...>& opts) {
+    self.apply_passthrough_options(opts.specs(), true, "public_passthrough_options()");
+    return self;
+}
 
 /** \} */ // grp_api
 
