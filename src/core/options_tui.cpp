@@ -20,24 +20,6 @@ import :impl;
 namespace truss {
 namespace {
 
-std::string_view tui_kind_label(OptionSpec::Kind k) {
-    switch (k) {
-    case OptionSpec::Kind::Bool: return "bool";
-    case OptionSpec::Kind::Int: return "int";
-    case OptionSpec::Kind::String: return "string";
-    case OptionSpec::Kind::Choice: return "choice";
-    }
-    return "string";
-}
-
-bool tui_valid_string(std::string_view s) {
-    for (const char c : s) {
-        if (c == '\n' || c == '\r' || c == '\0')
-            return false;
-    }
-    return true;
-}
-
 void tui_write_all(std::string_view s) {
     std::size_t off = 0;
     while (off < s.size()) {
@@ -176,7 +158,7 @@ bool OptionsTuiState::handle_event(TuiEvent ev) {
                 }
                 item.value = std::to_string(parsed);
             } else {
-                if (!tui_valid_string(edit_buf_)) {
+                if (!valid_option_string(edit_buf_)) {
                     status_ = "Invalid string value";
                     return true;
                 }
@@ -277,7 +259,7 @@ std::string OptionsTuiState::render(std::string_view mode_label) const {
             out += item.value;
         }
         out += "  (";
-        out += tui_kind_label(item.spec.kind);
+        out += option_kind_label(item.spec.kind);
         out += ", default: ";
         out += item.spec.default_str;
         if (mod)

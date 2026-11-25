@@ -189,4 +189,28 @@ TEST_CASE("install: DESTDIR staging, --strip, custom install_dir, and validation
         REQUIRE_FALSE(r.has_value());
         CHECK(r.error().kind == Error::Kind::Config);
     }
+
+    SUBCASE("install_headers skips symlinks") {
+        REQUIRE(detail::write_file("inc/real.hpp", "#pragma once\n").has_value());
+        REQUIRE(detail::write_file("secret.txt", "TOP_SECRET\n").has_value());
+        std::error_code ec;
+        std::filesystem::create_symlink(dir.dir / "secret.txt", dir.dir / "inc/leak.hpp", ec);
+        if (ec) {
+            MESSAGE("symlinks unsupported; skipping symlink test");
+            return;
+        }
+        const std::filesystem::path prefix = dir.dir / "pfx";
+        std::string pfx = prefix.generic_string();
+        std::vector<char*> argv {
+            const_cast<char*>("truss"),
+            const_cast<char*>("install"),
+            const_cast<char*>("--prefix"),
+            pfx.data(),
+        };
+        Project proj {"demo", argv};
+        proj.add_interface_library("hdrs").install_headers("inc", "demo");
+        REQUIRE(proj.build().has_value());
+        CHECK(std::filesystem::exists(prefix / "include/demo/real.hpp"));
+        CHECK_FALSE(std::filesystem::exists(prefix / "include/demo/leak.hpp"));
+    }
 }

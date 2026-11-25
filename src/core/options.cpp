@@ -89,7 +89,17 @@ std::string opt_shell_safe_c_string(std::string_view s) {
     return out;
 }
 
-std::string_view opt_kind_label(OptionSpec::Kind k) {
+bool opt_kind_matches(OptionSpec::Kind actual, OptionSpec::Kind expected) {
+    if (expected == OptionSpec::Kind::String)
+        return actual == OptionSpec::Kind::String || actual == OptionSpec::Kind::Choice;
+    return actual == expected;
+}
+
+} // namespace
+
+namespace detail {
+
+std::string_view option_kind_label(OptionSpec::Kind k) {
     switch (k) {
     case OptionSpec::Kind::Bool: return "bool";
     case OptionSpec::Kind::Int: return "int";
@@ -99,13 +109,11 @@ std::string_view opt_kind_label(OptionSpec::Kind k) {
     return "string";
 }
 
-bool opt_kind_matches(OptionSpec::Kind actual, OptionSpec::Kind expected) {
-    if (expected == OptionSpec::Kind::String)
-        return actual == OptionSpec::Kind::String || actual == OptionSpec::Kind::Choice;
-    return actual == expected;
+bool valid_option_string(std::string_view s) {
+    return opt_valid_value(s);
 }
 
-} // namespace
+} // namespace detail
 
 void Target::apply_passthrough_options(std::span<const OptionSpec> specs, bool is_public, std::string_view fn_name) {
     if (kind_ == TargetKind::Interface || kind_ == TargetKind::ImportedLibrary) {
@@ -350,8 +358,8 @@ std::optional<std::string> Project::lookup_option_value(std::string_view scope, 
 
     if (!opt_kind_matches(match->spec.kind, expected)) {
         set_err("get(): option '" + match->scope + "." + match->spec.name + "' has type "
-                + std::string(opt_kind_label(match->spec.kind)) + ", not "
-                + std::string(opt_kind_label(expected)));
+                + std::string(detail::option_kind_label(match->spec.kind)) + ", not "
+                + std::string(detail::option_kind_label(expected)));
         return std::nullopt;
     }
     return match->value;
@@ -363,40 +371,27 @@ Result<void> Project::validate_options() const {
 
     const auto check_list = [&](const std::vector<CliOption>& list, std::string_view prefix) -> Result<void> {
         for (const auto& c : list) {
-            if (c.key.contains('.')) {
-                bool matched = false;
-                for (const auto& r : registered_options_) {
-                    if (r.scope + "." + r.spec.name == c.key) {
-                        matched = true;
-                        break;
-                    }
+            std::vector<std::string> matches;
+            const bool scoped = c.key.contains('.');
+            for (const auto& r : registered_options_) {
+                if (scoped ? (r.scope + "." + r.spec.name == c.key) : (r.spec.name == c.key))
+                    matches.push_back(r.scope);
+            }
+            if (matches.empty())
+                return std::unexpected(Error {
+                    Error::Kind::Config,
+                    "unknown option '" + std::string(prefix) + c.key + "' (run ./truss options to list available options)",
+                });
+            if (!scoped && matches.size() > 1) {
+                std::string scopes_list;
+                for (std::size_t i = 0; i < matches.size(); ++i) {
+                    if (i > 0) scopes_list += ", ";
+                    scopes_list += std::string(prefix) + matches[i] + "." + c.key;
                 }
-                if (!matched)
-                    return std::unexpected(Error {
-                        Error::Kind::Config,
-                        "unknown option '" + std::string(prefix) + c.key + "' (run ./truss options to list available options)",
-                    });
-            } else {
-                std::vector<std::string> scopes;
-                for (const auto& r : registered_options_)
-                    if (r.spec.name == c.key)
-                        scopes.push_back(r.scope);
-                if (scopes.empty())
-                    return std::unexpected(Error {
-                        Error::Kind::Config,
-                        "unknown option '" + std::string(prefix) + c.key + "' (run ./truss options to list available options)",
-                    });
-                if (scopes.size() > 1) {
-                    std::string scopes_list;
-                    for (std::size_t i = 0; i < scopes.size(); ++i) {
-                        if (i > 0) scopes_list += ", ";
-                        scopes_list += std::string(prefix) + scopes[i] + "." + c.key;
-                    }
-                    return std::unexpected(Error {
-                        Error::Kind::Config,
-                        "option '" + std::string(prefix) + c.key + "' is ambiguous across scopes; specify one of: " + scopes_list,
-                    });
-                }
+                return std::unexpected(Error {
+                    Error::Kind::Config,
+                    "option '" + std::string(prefix) + c.key + "' is ambiguous across scopes; specify one of: " + scopes_list,
+                });
             }
         }
         return {};
@@ -473,7 +468,7 @@ void Project::print_options() const {
             if (r.scope != sc)
                 continue;
             const bool modified = (r.value != r.spec.default_str);
-            const std::string_view kind = opt_kind_label(r.spec.kind);
+            const std::string_view kind = detail::option_kind_label(r.spec.kind);
             std::printf("    %-*s = %-12s  (%.*s, default: %s%s)",
                         static_cast<int>(width), r.spec.name.c_str(), r.value.c_str(),
                         static_cast<int>(kind.size()), kind.data(), r.spec.default_str.c_str(),

@@ -446,9 +446,9 @@ Result<void> validate(const std::vector<std::unique_ptr<Target>>& targets) {
                 "target '" + name + "': install() is only valid on Executable, StaticLibrary, or SharedLibrary targets",
             });
         if (!t->install_subdir().empty()) {
-            const std::filesystem::path p(t->install_subdir());
-            const std::string g = p.generic_string();
-            if (p.is_absolute() || !no_control_chars(g) || g == ".." || g.find("../") != std::string::npos)
+            const std::filesystem::path norm = std::filesystem::path(t->install_subdir()).lexically_normal();
+            const std::string g = norm.generic_string();
+            if (norm.is_absolute() || !no_control_chars(g) || g == ".." || g.starts_with("../"))
                 return std::unexpected(Error {
                     Error::Kind::Config,
                     "target '" + name + "': install_dir('" + t->install_subdir() + "') must be a relative path without '..'",
@@ -461,9 +461,9 @@ Result<void> validate(const std::vector<std::unique_ptr<Target>>& targets) {
                     "target '" + name + "': install_headers() requires a non-empty directory path",
                 });
             if (!hi.subdir.empty()) {
-                const std::filesystem::path p(hi.subdir);
-                const std::string g = p.generic_string();
-                if (p.is_absolute() || !no_control_chars(g) || g == ".." || g.find("../") != std::string::npos)
+                const std::filesystem::path norm = std::filesystem::path(hi.subdir).lexically_normal();
+                const std::string g = norm.generic_string();
+                if (norm.is_absolute() || !no_control_chars(g) || g == ".." || g.starts_with("../"))
                     return std::unexpected(Error {
                         Error::Kind::Config,
                         "target '" + name + "': install_headers() subdir '" + hi.subdir + "' must be relative without '..'",
@@ -1971,7 +1971,7 @@ Project::Project(std::string name, std::span<char* const> argv) : name_(std::mov
             auto is_tag_stop = [](std::string_view tok) {
                 return tok.starts_with('-')
                     || tok == "debug" || tok == "release"
-                    || tok == "test" || tok == "run" || tok == "clean"
+                    || tok == "build" || tok == "test" || tok == "run" || tok == "clean"
                     || tok == "options" || tok == "configure" || tok == "presets"
                     || tok == "compdb" || tok == "reload" || tok == "install"
                     || tok == "uninstall" || tok == "task" || tok == "help";
@@ -2294,6 +2294,16 @@ Result<void> Project::build() {
     };
     std::vector<SubCtx> sub_ctx;
     {
+        auto merge_config = [](Config base, const Config& overlay) -> Config {
+            if (!overlay.compiler().empty()) base.compiler(overlay.compiler());
+            if (!overlay.linker().empty()) base.linker(overlay.linker());
+            if (!overlay.ar().empty()) base.ar(overlay.ar());
+            if (overlay.stdlib() != StdLib::Default) base.stdlib(overlay.stdlib());
+            if (!overlay.target().empty()) base.target(overlay.target());
+            if (overlay.launcher_set()) base.launcher(overlay.launcher());
+            if (overlay.runner_set()) base.runner(overlay.runner());
+            return base;
+        };
         std::vector<std::pair<std::string, Config>> subs;
         if (!subgraphs_.empty()) {
             if (configured_)
@@ -2302,8 +2312,13 @@ Result<void> Project::build() {
                     "  correct:   proj.targets({{\"linux\", Config{}.toolchain(...)}, ...})\n"
                     "  incorrect: proj.configure(conf) followed by proj.targets(...)");
             subs = subgraphs_;
+            if (active_preset_config_) {
+                for (auto& [sg, cfg] : subs)
+                    cfg = merge_config(cfg, *active_preset_config_);
+            }
         } else {
-            subs = {{"", active_preset_config_.value_or(config_)}};
+            Config effective = active_preset_config_ ? merge_config(config_, *active_preset_config_) : config_;
+            subs = {{"", std::move(effective)}};
         }
         /* subgraph names: target-name rules, unique, 'all' reserved (it is the
          * union phony) */

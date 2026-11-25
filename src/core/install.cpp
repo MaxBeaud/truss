@@ -1,5 +1,6 @@
 module;
 #include <algorithm>
+#include <atomic>
 #include <cerrno>
 #include <cstring>
 #include <expected>
@@ -12,6 +13,7 @@ module;
 #include <vector>
 
 #include <sys/stat.h>
+#include <unistd.h>
 
 module truss;
 import :api;
@@ -55,19 +57,38 @@ Result<void> inst_copy_file_mode(const std::filesystem::path& src,
                 dst.parent_path(),
             });
     }
-    std::filesystem::copy_file(src, dst, std::filesystem::copy_options::overwrite_existing, ec);
-    if (ec)
+    static std::atomic<unsigned> seq {0};
+    const std::filesystem::path tmp(
+        dst.generic_string() + ".truss-tmp." + std::to_string(::getpid()) + "."
+        + std::to_string(seq.fetch_add(1, std::memory_order_relaxed)));
+
+    std::filesystem::copy_file(src, tmp, std::filesystem::copy_options::overwrite_existing, ec);
+    if (ec) {
+        std::filesystem::remove(tmp, ec);
         return std::unexpected(Error {
             Error::Kind::Io,
             "install: failed to copy '" + src.generic_string() + "' to '" + dst.generic_string() + "': " + ec.message(),
             dst,
         });
-    if (::chmod(dst.c_str(), mode) != 0)
+    }
+    if (::chmod(tmp.c_str(), mode) != 0) {
+        const std::string why = std::strerror(errno);
+        std::filesystem::remove(tmp, ec);
         return std::unexpected(Error {
             Error::Kind::Io,
-            "install: failed to set permissions on '" + dst.generic_string() + "': " + std::strerror(errno),
+            "install: failed to set permissions on '" + dst.generic_string() + "': " + why,
             dst,
         });
+    }
+    std::filesystem::rename(tmp, dst, ec);
+    if (ec) {
+        std::filesystem::remove(tmp, ec);
+        return std::unexpected(Error {
+            Error::Kind::Io,
+            "install: failed to install '" + dst.generic_string() + "': " + ec.message(),
+            dst,
+        });
+    }
     return {};
 }
 
@@ -162,6 +183,11 @@ Result<void> run_install(const std::filesystem::path& cwd,
                     break;
                 const std::string fname = it->path().filename().generic_string();
                 if (!fname.empty() && fname.front() == '.') {
+                    if (it->is_directory(ec))
+                        it.disable_recursion_pending();
+                    continue;
+                }
+                if (it->is_symlink(ec)) {
                     if (it->is_directory(ec))
                         it.disable_recursion_pending();
                     continue;

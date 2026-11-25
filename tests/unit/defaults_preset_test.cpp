@@ -141,6 +141,24 @@ TEST_CASE("preset: selection, Config override, option precedence, and presets ve
         CHECK_FALSE(std::filesystem::exists("build/debug/options.cache"));
     }
 
+    SUBCASE("preset Config merges over proj.configure() rather than discarding unset fields") {
+        std::vector<char*> argv {
+            const_cast<char*>("truss"),
+            const_cast<char*>("-n"),
+            const_cast<char*>("--preset"),
+            const_cast<char*>("gcc-only"),
+        };
+        Project proj {"app", argv};
+        proj.configure(Config {}.linker("lld"));
+        proj.preset("gcc-only", Config {}.toolchain(Toolchain::GCC));
+        proj.add_executable("app").sources("main.cpp");
+        REQUIRE(proj.build().has_value());
+
+        const std::string m = dp_manifest_text();
+        CHECK(dp_contains(m, "cxx = g++"));
+        CHECK(dp_contains(m, "-fuse-ld=lld"));
+    }
+
     SUBCASE("precedence: CLI -D > options.cache > preset > default") {
         // Seed options.cache with threads=12
         {

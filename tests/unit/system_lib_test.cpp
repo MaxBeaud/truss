@@ -128,6 +128,46 @@ TEST_CASE("system_lib: pkg-config probing with PKG_CONFIG_PATH and min_version")
     CHECK(sl_contains(*m, "-ldemo"));
 }
 
+TEST_CASE("system_lib: distinct specs for same name do not collide and unsafe pkg-config tokens are rejected") {
+    SlScratchDir dir {"sec-and-spec"};
+    REQUIRE(detail::write_file("sys_a/include/a.h", "#pragma once\n").has_value());
+    REQUIRE(detail::write_file("sys_b/include/b.h", "#pragma once\n").has_value());
+    REQUIRE(detail::write_file("main.cpp", "int main() { return 0; }\n").has_value());
+
+    SUBCASE("different specs for same library name produce distinct targets") {
+        std::vector<char*> argv {const_cast<char*>("truss"), const_cast<char*>("-n")};
+        Project proj {"app", argv};
+
+        auto a = proj.system_lib("mylib").pkg_config(false).headers("a.h").paths((dir.dir / "sys_a").generic_string());
+        auto b = proj.system_lib("mylib").pkg_config(false).headers("b.h").paths((dir.dir / "sys_b").generic_string());
+        REQUIRE(static_cast<bool>(a));
+        REQUIRE(static_cast<bool>(b));
+        CHECK(a.result()->get().name() != b.result()->get().name());
+    }
+
+    if (os::program_exists("pkg-config")) {
+        SUBCASE("unsafe shell metacharacters from pkg-config are rejected") {
+            const std::string pc_dir = (dir.dir / "bad_pc").generic_string();
+            std::filesystem::create_directories(pc_dir);
+            const std::string bad_pc =
+                "Name: evil\n"
+                "Description: Evil\n"
+                "Version: 1.0.0\n"
+                "Cflags: -DFOO=$(id)\n"
+                "Libs: -levil\n";
+            REQUIRE(detail::write_file(dir.dir / "bad_pc/evil.pc", bad_pc).has_value());
+            EnvGuard guard("PKG_CONFIG_PATH", pc_dir);
+
+            std::vector<char*> argv {const_cast<char*>("truss"), const_cast<char*>("-n")};
+            Project proj {"app", argv};
+            auto r = proj.system_lib("evil").result();
+            REQUIRE_FALSE(r.has_value());
+            CHECK(r.error().kind == Error::Kind::Config);
+            CHECK(sl_contains(r.error().message, "unsafe"));
+        }
+    }
+}
+
 TEST_CASE("system_lib: direct & lazy fallback chaining, short-circuiting, and required()") {
     SlScratchDir dir {"fallback"};
     REQUIRE(detail::write_file("fb/include/bar.h", "#pragma once\n").has_value());

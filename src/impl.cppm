@@ -438,6 +438,16 @@ Result<void> samu_build(std::string_view manifest, int jobs, bool verbose,
 /// \ingroup grp_internals
 Result<void> samu_compdb(std::string_view manifest, std::string_view outpath);
 
+/* --- options shared helpers ---------------------------------------------- */
+
+/// Human-readable label for an OptionSpec::Kind (`"bool"`, `"int"`, `"string"`, `"choice"`).
+/// \ingroup grp_internals
+std::string_view option_kind_label(OptionSpec::Kind k);
+
+/// True when `s` contains no newlines or NUL bytes.
+/// \ingroup grp_internals
+bool valid_option_string(std::string_view s);
+
 /* --- interactive options TUI state machine ------------------------------- */
 
 /// One editable option row in the `truss configure` TUI.

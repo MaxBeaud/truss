@@ -1170,32 +1170,32 @@ public:
     /* --- options --- */
     /// C++ standard (Default = C++23).
     template <class Self>
-    Self& cpp_standard(this Self& self, CppStandard s) { self.std_ = s; return self; }
+    Self& cpp_standard(this Self& self, CppStandard s) { self.opts_.cpp_standard(s); return self; }
     /**
      * \brief C standard for this target's `.c` sources (Default = `gnu17`).
      * C++ sources are unaffected; MSVC has no C99/C23 mode (Config error) and
      * accepts `C11`/`C17` as `/std:c11` / `/std:c17`.
      */
     template <class Self>
-    Self& c_standard(this Self& self, CStandard s) { self.c_std_ = s; return self; }
+    Self& c_standard(this Self& self, CStandard s) { self.opts_.c_standard(s); return self; }
     /// Warning level (Default = -Wall -Wextra).
     template <class Self>
-    Self& warnings(this Self& self, Warnings w) { self.warnings_ = w; return self; }
+    Self& warnings(this Self& self, Warnings w) { self.opts_.warnings(w); return self; }
     /// Debug symbol level (Default resolves per mode).
     template <class Self>
-    Self& debug_info(this Self& self, DebugInfo d) { self.debug_ = d; return self; }
+    Self& debug_info(this Self& self, DebugInfo d) { self.opts_.debug_info(d); return self; }
     /// Optimization level (Default resolves per mode).
     template <class Self>
-    Self& optimization(this Self& self, Optimization o) { self.optimization_ = o; return self; }
+    Self& optimization(this Self& self, Optimization o) { self.opts_.optimization(o); return self; }
     /// Sanitizer set (Default = off).
     template <class Self>
-    Self& sanitizer(this Self& self, Sanitizer s) { self.sanitizer_ = s; return self; }
+    Self& sanitizer(this Self& self, Sanitizer s) { self.opts_.sanitizer(s); return self; }
     /// Link-time optimization (Default = off).
     template <class Self>
-    Self& lto(this Self& self, Lto l) { self.lto_ = l; return self; }
+    Self& lto(this Self& self, Lto l) { self.opts_.lto(l); return self; }
     /// Hardening tier (Default = Light: truss's default hardening stack).
     template <class Self>
-    Self& harden(this Self& self, Hardening h) { self.hardening_ = h; return self; }
+    Self& harden(this Self& self, Hardening h) { self.opts_.harden(h); return self; }
     /**
      * \brief Precompiled header for this target's C++ sources.
      * clang: `-include-pch`; GCC: `.gch` + `-include`, with the PCH directory
@@ -1218,10 +1218,10 @@ public:
     Self& unity(this Self& self, bool v = true) { self.unity_ = v; return self; }
     /// .cppm handling mode (Default = Auto).
     template <class Self>
-    Self& modules_mode(this Self& self, ModulesMode m) { self.modules_ = m; return self; }
+    Self& modules_mode(this Self& self, ModulesMode m) { self.opts_.modules_mode(m); return self; }
     /// Position-independent code (on by default for libraries).
     template <class Self>
-    Self& pic(this Self& self, bool v) { self.pic_ = v; return self; }
+    Self& pic(this Self& self, bool v) { self.opts_.pic(v); return self; }
     /**
      * \brief Link this dependency statically into whatever consumes it.
      * (`static` is a C++ keyword, hence the name.)
@@ -1295,7 +1295,7 @@ public:
      */
     template <class Self>
     Self& symbols_hidden(this Self& self, bool v = true) {
-        self.symbols_hidden_ = v;
+        self.opts_.symbols_hidden(v);
         return self;
     }
     /**
@@ -1472,18 +1472,18 @@ public:
     const std::string& flags() const { return flags_; }
     const std::string& c_flags() const { return c_flags_; }
     const std::string& linker_flags() const { return linker_flags_; }
-    CppStandard cpp_standard() const { return std_; }
-    CStandard c_standard() const { return c_std_; }
-    Warnings warnings() const { return warnings_; }
-    DebugInfo debug_info() const { return debug_; }
-    Optimization optimization() const { return optimization_; }
-    Sanitizer sanitizer() const { return sanitizer_; }
-    Lto lto() const { return lto_; }
-    Hardening hardening() const { return hardening_; }
+    CppStandard cpp_standard() const { return opts_.cpp_standard(); }
+    CStandard c_standard() const { return opts_.c_standard(); }
+    Warnings warnings() const { return opts_.warnings(); }
+    DebugInfo debug_info() const { return opts_.debug_info(); }
+    Optimization optimization() const { return opts_.optimization(); }
+    Sanitizer sanitizer() const { return opts_.sanitizer(); }
+    Lto lto() const { return opts_.lto(); }
+    Hardening hardening() const { return opts_.hardening(); }
     const std::string& pch() const { return pch_; }
     bool unity() const { return unity_; }
-    ModulesMode modules_mode() const { return modules_; }
-    bool pic() const { return pic_; }
+    ModulesMode modules_mode() const { return opts_.modules_mode(); }
+    bool pic() const { return opts_.pic().value_or(false); }
     /// static_link() / static_deps() state (named apart: the setters default their bool).
     bool static_link_enabled() const { return static_link_; }
     /// True when as_shared() was called on this target (for build()-time validation).
@@ -1491,7 +1491,7 @@ public:
     const std::string& output_name() const { return output_name_; }
     bool is_built_by_default() const { return build_by_default_; }
     bool is_default_target() const { return default_target_; }
-    bool symbols_hidden() const { return symbols_hidden_; }
+    bool symbols_hidden() const { return opts_.symbols_hidden().value_or(false); }
     /// false when not_linkable() marked the target as a runtime-loaded plugin.
     bool linkable() const { return !not_linkable_; }
     bool static_deps_enabled() const { return static_deps_; }
@@ -1563,18 +1563,9 @@ private:
     std::vector<std::string> system_include_dirs_, public_defines_, public_flags_;
     std::vector<std::string> frameworks_, framework_paths_;
     std::string flags_, c_flags_, linker_flags_;
-    CppStandard std_ {};
-    CStandard c_std_ {};
-    Warnings warnings_ {};
-    DebugInfo debug_ {};
-    Optimization optimization_ {};
-    Sanitizer sanitizer_ {};
-    Lto lto_ {};
-    Hardening hardening_ {};
+    TargetDefaults opts_;
     std::string pch_;
     bool unity_ {false};
-    ModulesMode modules_ {};
-    bool pic_ {false};
     bool test_ {false};
     std::vector<std::string> tags_;
     bool install_ {false};
@@ -1584,7 +1575,6 @@ private:
     std::string output_name_;
     bool build_by_default_ {true};
     bool default_target_ {false};
-    bool symbols_hidden_ {false};
     bool not_linkable_ {false};
     /* SharedLib turned into a static archive by static_link(): remembers the
      * original kind so static_link(false) can restore it. Only read from the
@@ -1953,39 +1943,21 @@ public:
      * overrides (selectable via `./truss --preset <name>`).
      */
     Project& preset(std::string name, Config config, std::initializer_list<std::string_view> options = {}) {
-        std::vector<std::string> opts;
-        opts.reserve(options.size());
-        for (const auto s : options)
-            opts.emplace_back(s);
-        register_preset(std::move(name), std::move(config), std::move(opts));
-        return *this;
+        return preset(std::move(name), std::move(config), std::span<const std::string_view>(options));
     }
     /// Register a named preset carrying `key=val` option overrides only.
     Project& preset(std::string name, std::initializer_list<std::string_view> options) {
-        std::vector<std::string> opts;
-        opts.reserve(options.size());
-        for (const auto s : options)
-            opts.emplace_back(s);
-        register_preset(std::move(name), std::nullopt, std::move(opts));
-        return *this;
+        return preset(std::move(name), std::span<const std::string_view>(options));
     }
     /// Register a named preset carrying a `Config` and a range of `key=val` overrides.
     template <StringRange R>
     Project& preset(std::string name, Config config, R&& options) {
-        std::vector<std::string> opts;
-        for (const auto& s : options)
-            opts.emplace_back(std::string_view(s));
-        register_preset(std::move(name), std::move(config), std::move(opts));
-        return *this;
+        return add_preset_range(std::move(name), std::move(config), std::forward<R>(options));
     }
     /// Register a named preset carrying a range of `key=val` overrides only.
     template <StringRange R>
     Project& preset(std::string name, R&& options) {
-        std::vector<std::string> opts;
-        for (const auto& s : options)
-            opts.emplace_back(std::string_view(s));
-        register_preset(std::move(name), std::nullopt, std::move(opts));
-        return *this;
+        return add_preset_range(std::move(name), std::nullopt, std::forward<R>(options));
     }
     /**
      * \brief Per-triple subgraphs: build the WHOLE graph once per named
@@ -2197,24 +2169,10 @@ private:
     T& add_target(std::string name) {
         auto t = std::make_unique<T>(std::move(name));
         t->owner_ = this;
-        apply_target_defaults(*t);
+        t->opts_ = defaults_;
         auto& ref = *t;
         targets_.push_back(std::move(t));
         return ref;
-    }
-
-    void apply_target_defaults(Target& t) const {
-        if (defaults_.cpp_standard() != CppStandard::Default) t.cpp_standard(defaults_.cpp_standard());
-        if (defaults_.c_standard() != CStandard::Default) t.c_standard(defaults_.c_standard());
-        if (defaults_.warnings() != Warnings::Default) t.warnings(defaults_.warnings());
-        if (defaults_.debug_info() != DebugInfo::Default) t.debug_info(defaults_.debug_info());
-        if (defaults_.optimization() != Optimization::Default) t.optimization(defaults_.optimization());
-        if (defaults_.sanitizer() != Sanitizer::Default) t.sanitizer(defaults_.sanitizer());
-        if (defaults_.lto() != Lto::Default) t.lto(defaults_.lto());
-        if (defaults_.hardening() != Hardening::Default) t.harden(defaults_.hardening());
-        if (defaults_.pic().has_value()) t.pic(*defaults_.pic());
-        if (defaults_.symbols_hidden().has_value()) t.symbols_hidden(*defaults_.symbols_hidden());
-        if (defaults_.modules_mode() != ModulesMode::Default) t.modules_mode(defaults_.modules_mode());
     }
 
     template <class T>
@@ -2251,6 +2209,14 @@ private:
     Result<void> reset_options_cache() const;
     Result<void> run_options_tui();
     void register_preset(std::string name, std::optional<Config> config, std::vector<std::string> options);
+    template <class R>
+    Project& add_preset_range(std::string name, std::optional<Config> config, R&& options) {
+        std::vector<std::string> opts;
+        for (const auto& s : options)
+            opts.emplace_back(std::string_view(s));
+        register_preset(std::move(name), std::move(config), std::move(opts));
+        return *this;
+    }
     void print_presets() const;
 
     std::string name_;
@@ -2473,46 +2439,22 @@ public:
     SystemLibBuilder& min_version(std::string_view v) { spec_.min_version = std::string(v); cached_.reset(); return *this; }
 
     /// Required header file(s) for manual probing (single, braced list, or range).
-    SystemLibBuilder& headers(std::string_view h) { spec_.headers.emplace_back(h); cached_.reset(); return *this; }
-    SystemLibBuilder& headers(std::initializer_list<std::string_view> hs) {
-        for (const auto h : hs) spec_.headers.emplace_back(h);
-        cached_.reset();
-        return *this;
-    }
+    SystemLibBuilder& headers(std::string_view h) { return append_sv(spec_.headers, h); }
+    SystemLibBuilder& headers(std::initializer_list<std::string_view> hs) { return append_range(spec_.headers, hs); }
     template <StringRange R>
-    SystemLibBuilder& headers(R&& hs) {
-        for (const auto& h : hs) spec_.headers.emplace_back(std::string_view(h));
-        cached_.reset();
-        return *this;
-    }
+    SystemLibBuilder& headers(R&& hs) { return append_range(spec_.headers, std::forward<R>(hs)); }
 
     /// Library name(s) to link for manual probing (single, braced list, or range).
-    SystemLibBuilder& libs(std::string_view l) { spec_.libs.emplace_back(l); cached_.reset(); return *this; }
-    SystemLibBuilder& libs(std::initializer_list<std::string_view> ls) {
-        for (const auto l : ls) spec_.libs.emplace_back(l);
-        cached_.reset();
-        return *this;
-    }
+    SystemLibBuilder& libs(std::string_view l) { return append_sv(spec_.libs, l); }
+    SystemLibBuilder& libs(std::initializer_list<std::string_view> ls) { return append_range(spec_.libs, ls); }
     template <StringRange R>
-    SystemLibBuilder& libs(R&& ls) {
-        for (const auto& l : ls) spec_.libs.emplace_back(std::string_view(l));
-        cached_.reset();
-        return *this;
-    }
+    SystemLibBuilder& libs(R&& ls) { return append_range(spec_.libs, std::forward<R>(ls)); }
 
     /// Extra search prefix/directory paths for manual probing (single, braced list, or range).
-    SystemLibBuilder& paths(std::string_view p) { spec_.paths.emplace_back(p); cached_.reset(); return *this; }
-    SystemLibBuilder& paths(std::initializer_list<std::string_view> ps) {
-        for (const auto p : ps) spec_.paths.emplace_back(p);
-        cached_.reset();
-        return *this;
-    }
+    SystemLibBuilder& paths(std::string_view p) { return append_sv(spec_.paths, p); }
+    SystemLibBuilder& paths(std::initializer_list<std::string_view> ps) { return append_range(spec_.paths, ps); }
     template <StringRange R>
-    SystemLibBuilder& paths(R&& ps) {
-        for (const auto& p : ps) spec_.paths.emplace_back(std::string_view(p));
-        cached_.reset();
-        return *this;
-    }
+    SystemLibBuilder& paths(R&& ps) { return append_range(spec_.paths, std::forward<R>(ps)); }
 
     /// Probe (once, cached) and return the resulting `Result<TargetRef>`.
     Result<TargetRef> result() const {
@@ -2553,6 +2495,19 @@ public:
     }
 
 private:
+    SystemLibBuilder& append_sv(std::vector<std::string>& dst, std::string_view s) {
+        dst.emplace_back(s);
+        cached_.reset();
+        return *this;
+    }
+    template <class R>
+    SystemLibBuilder& append_range(std::vector<std::string>& dst, R&& r) {
+        for (const auto& s : r)
+            dst.emplace_back(std::string_view(s));
+        cached_.reset();
+        return *this;
+    }
+
     Project* owner_ {nullptr};
     SystemLibSpec spec_;
     mutable std::optional<Result<TargetRef>> cached_;
