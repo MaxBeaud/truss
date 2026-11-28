@@ -92,6 +92,7 @@ truss_samu_build(const struct truss_samu_options *o)
 
 	if (setjmp(fatal_jmp) != 0) {
 		truss_samu_fatal_jmp = NULL;
+		buildcleanup();
 		logclose();
 		depsclose();
 		return 1;

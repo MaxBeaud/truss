@@ -53,13 +53,16 @@ std::vector<std::string> sys_split_shell_tokens(std::string_view text) {
 }
 
 bool sys_token_is_safe(std::string_view tok) {
+    if (!tok.empty() && tok.back() == '\\')
+        return false;
     for (std::size_t i = 0; i < tok.size(); ++i) {
         const unsigned char c = static_cast<unsigned char>(tok[i]);
         if (c < 0x20 || c == 0x7f)
             return false;
-        if (c == '`' || c == ';' || c == '|' || c == '&' || c == '>' || c == '<')
-            return false;
-        if (c == '$' && i + 1 < tok.size() && tok[i + 1] == '(')
+        /* reject shell operators, command/variable expansion, globs, and tilde
+         * expansion so untrusted .pc tokens never expand under /bin/sh -c */
+        if (c == '`' || c == ';' || c == '|' || c == '&' || c == '>' || c == '<'
+            || c == '$' || c == '*' || c == '?' || c == '[' || c == '~')
             return false;
     }
     return true;

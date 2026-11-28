@@ -10,6 +10,7 @@ module;
 #include <utility>
 #include <vector>
 
+#include <unistd.h>
 #include <nlohmann/json.hpp>
 
 module truss;
@@ -401,7 +402,8 @@ scan_deps_requires(const std::string& compiler, std::string_view compile_flags,
      * counter keeps each TU's compilation database apart (a hash could
      * collide, and std::hash is not stable across runs) */
     static std::atomic<unsigned> cdb_seq {0};
-    const std::string seq = std::to_string(cdb_seq.fetch_add(1, std::memory_order_relaxed));
+    const std::string seq = std::to_string(::getpid()) + "_"
+                          + std::to_string(cdb_seq.fetch_add(1, std::memory_order_relaxed));
 
     const bool gcc = family_from_compiler_name(compiler) == CompilerFamily::Gcc;
     nlohmann::json j;

@@ -11,7 +11,6 @@ module;
 #include <cstring>
 #include <expected>
 #include <filesystem>
-#include <functional>
 #include <iterator>
 #include <map>
 #include <memory>
@@ -19,7 +18,6 @@ module;
 #include <ranges>
 #include <set>
 #include <span>
-#include <sstream>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -50,10 +48,6 @@ bool ends_with_any(std::string_view s, const auto& exts) {
     return std::ranges::any_of(exts, [&](std::string_view e) { return s.ends_with(e); });
 }
 
-std::string_view mode_dir_name(BuildMode m) {
-    return m == BuildMode::Release ? "release" : "debug";
-}
-
 /* Flags, defines and dirs land in ninja edge variables (executed by samurai
  * through /bin/sh -c): a control character — above all a newline — would end
  * the binding and let the rest inject manifest statements. */
@@ -61,13 +55,20 @@ bool no_control_chars(std::string_view s) {
     return std::ranges::none_of(s, [](unsigned char c) { return c < 0x20 || c == 0x7f; });
 }
 
-bool path_is_safe(const std::filesystem::path& p) {
-    const std::string s = p.generic_string();
+bool path_is_safe(std::string_view s) {
     /* these strings end up in ninja build statements (executed by samurai
      * through /bin/sh -c) and in `ar -M` MRI scripts, so anything the shell,
      * ninja or the MRI lexer would interpret is refused up front */
-    return s.find_first_of(" \t:$\"'`;|&<>()\\#~*?") == std::string::npos
+    return s.find_first_of(" \t:$\"'`;|&<>()\\#~*?") == std::string_view::npos
         && no_control_chars(s);
+}
+
+bool path_is_safe(const std::string& s) {
+    return path_is_safe(std::string_view(s));
+}
+
+bool path_is_safe(const std::filesystem::path& p) {
+    return path_is_safe(std::string_view(p.generic_string()));
 }
 
 /* Split a command prefix on spaces ("qemu-aarch64 -L /sysroot" -> 3 words);
@@ -337,7 +338,7 @@ Result<std::vector<std::string>> finalize_sources(
         /* source paths become compile-edge inputs and depfile entries: hold
          * them to the same bar as every other manifest path (a filename
          * planted in the source tree must not reach the shell) */
-        if (!path_is_safe(std::filesystem::path(f)))
+        if (!path_is_safe(std::string_view(f)))
             return std::unexpected(Error {
                 Error::Kind::Config,
                 "source file '" + f + "' for target '" + t.name() +
@@ -350,8 +351,10 @@ Result<std::vector<std::string>> finalize_sources(
     for (const auto& f : globbed)
         files.push_back(f.generic_string());
 
-    for (const auto& removed : t.removed_sources())
-        std::erase(files, removed);
+    for (const auto& removed : t.removed_sources()) {
+        if (std::erase(files, removed) == 0)
+            log::warn("target '" + t.name() + "': remove_source('" + removed + "') did not match any source file");
+    }
     std::erase_if(files, [](const std::string& f) { return f.empty(); });
     std::ranges::sort(files);
     files.erase(std::ranges::unique(files).begin(), files.end());
@@ -371,7 +374,7 @@ Result<void> validate(const std::vector<std::unique_ptr<Target>>& targets) {
         }
         if (name.empty())
             return std::unexpected(Error {Error::Kind::Config, "target with an empty name"});
-        if (name.find_first_of("/\\") != std::string::npos)
+        if (name.find_first_of("/\\") != std::string::npos || name == "." || name == "..")
             return std::unexpected(Error {
                 Error::Kind::Config,
                 "target name '" + name + "' must be a bare name, not a path, e.g:\n"
@@ -390,7 +393,8 @@ Result<void> validate(const std::vector<std::unique_ptr<Target>>& targets) {
          * target name (bare, no platform extension: truss adds it) */
         if (!t->output_name().empty()) {
             const std::string& out = t->output_name();
-            if (out.find_first_of("/\\") != std::string::npos || ends_with_any(out, kPlatformExts)
+            if (out.find_first_of("/\\") != std::string::npos || out == "." || out == ".."
+                || ends_with_any(out, kPlatformExts)
                 || !path_is_safe(std::filesystem::path(out)))
                 return std::unexpected(Error {
                     Error::Kind::Config,
@@ -598,6 +602,43 @@ Result<void> validate(const std::vector<std::unique_ptr<Target>>& targets) {
         if (auto dup = std::ranges::adjacent_find(names); dup != names.end())
             return std::unexpected(Error {Error::Kind::Config, "duplicate target name '" + std::string(*dup) + "'"});
     }
+    /* dependency cycles: detect at configure time instead of letting samurai
+     * abort with a raw "dependency cycle" fatal */
+    {
+        std::set<const Target*> visited, visiting;
+        auto dfs = [&](this const auto& self, const Target& cur) -> Result<void> {
+            visiting.insert(&cur);
+            auto check_edge = [&](const Target* dep) -> Result<void> {
+                if (!dep)
+                    return {};
+                if (visiting.contains(dep))
+                    return std::unexpected(Error {
+                        Error::Kind::Config,
+                        "dependency cycle: target '" + cur.name() + "' depends on '" + dep->name()
+                            + "' which already depends on it",
+                    });
+                if (!visited.contains(dep))
+                    return self(*dep);
+                return {};
+            };
+            for (const Target* dep : cur.deps())
+                if (auto r = check_edge(dep); !r)
+                    return r;
+            if (cur.kind() == TargetKind::CustomCommand) {
+                const auto& cc = static_cast<const CustomCommand&>(cur);
+                if (auto r = check_edge(cc.used_tool()); !r)
+                    return r;
+            }
+            visiting.erase(&cur);
+            visited.insert(&cur);
+            return {};
+        };
+        for (const auto& t : targets)
+            if (!visited.contains(t.get())) {
+                if (auto r = dfs(*t); !r)
+                    return r;
+            }
+    }
     return {};
 }
 
@@ -663,9 +704,6 @@ Result<void> emit_manifest(const Project& proj, std::vector<ResolvedTarget>& res
     const auto std_for = [&](const ResolvedTarget& r, bool compat) -> Result<StdModule> {
         const std::string_view flag = std_module_flag(r.target->cpp_standard());
         const bool gcc = r.triple.family == CompilerFamily::Gcc;
-        /* the BMI config flags (hardening/sanitizer/LTO) must match the
-         * consumers', or clang rejects the module file — they key the std
-         * build apart too */
         const std::string config_flags =
             detail::bmi_config_flags(r.triple, r.target->hardening(), r.target->sanitizer(),
                                      r.target->lto());
@@ -817,7 +855,9 @@ Result<void> emit_manifest(const Project& proj, std::vector<ResolvedTarget>& res
             {"description", "BMI $in"},
         });
     w.rule("archive", {
-        {"command", "$ar rcs $out $in"},
+        /* ar r never deletes unlisted members; remove $out first so renamed or
+         * deleted sources cannot leave stale objects behind in the archive */
+        {"command", "rm -f $out && $ar rcs $out $in"},
         {"description", "AR $out"},
     });
     if (std::ranges::any_of(resolved, [](const ResolvedTarget& r) { return !r.target->merged_libraries().empty(); }))
@@ -937,7 +977,183 @@ Result<void> emit_manifest(const Project& proj, std::vector<ResolvedTarget>& res
         }
     }
 
-    for (auto& r : resolved) {
+    /* GCC finds a PCH only through the include search: the .gch must sit in
+     * the FIRST -I directory containing the header. The target's own -I
+     * dirs (inside usage.includes) usually contain the header too — without
+     * a .gch next to it — so the PCH dir goes ahead of all of them (clang's
+     * -include-pch names the file and is immune to the order). Multi-subgraph
+     * builds scope PCH dirs by triple so subgraphs never collide. */
+    const auto pch_dir_for = [&](const ResolvedTarget& rt) {
+        return (rt.subgraph.empty()
+                    ? (build_dir / "pch" / rt.target->name())
+                    : (build_dir / "pch" / detail::triple_dir(rt.triple) / rt.target->name()))
+            .generic_string();
+    };
+
+    /* Pre-pass: compute per-target usage/flags and collect every cold module
+     * scan across ALL targets into one shared thread pool + scratch directory
+     * so multi-target module builds do not serialize per target. */
+    struct TargetPrep {
+        Usage usage;
+        detail::FlagSet cflags;
+        std::string scan_flags;
+        bool run_scan = false;
+        ModulesMode mm = ModulesMode::Auto;
+    };
+    struct PendingScan {
+        std::size_t ti;
+        std::size_t ui;
+        std::string key;
+    };
+    std::vector<TargetPrep> preps(resolved.size());
+    std::vector<std::vector<Result<std::pair<std::vector<std::string>, std::vector<std::string>>>>> scanned(
+        resolved.size());
+    std::vector<PendingScan> pending;
+    const std::filesystem::path cache_dir = build_dir / "scan-cache";
+    const std::string cwd_str = proj.cwd().generic_string();
+
+    for (std::size_t ti = 0; ti < resolved.size(); ++ti) {
+        auto& r = resolved[ti];
+        const Target& t = *r.target;
+        if (t.kind() == TargetKind::CustomCommand || t.kind() == TargetKind::Interface
+            || t.kind() == TargetKind::ImportedLibrary)
+            continue;
+        const bool msvc = r.triple.family == CompilerFamily::Msvc;
+        const bool pic = t.pic() || t.kind() != TargetKind::Executable;
+        if (msvc && t.static_deps_enabled())
+            return std::unexpected(Error {
+                Error::Kind::Config, "target '" + t.name() + "': static_deps() is not supported on MSVC targets yet",
+            });
+
+        Usage usage = UsageWalk(by_name).run(r);
+
+        std::vector<std::string> defines = t.defines();
+        defines.insert(defines.end(), usage.defines.begin(), usage.defines.end());
+
+        std::vector<std::string> includes = usage.includes;
+        if (r.triple.family == CompilerFamily::Gcc && !t.pch().empty())
+            includes.insert(includes.begin(), pch_dir_for(r));
+
+        /* public flags (self + deps) first, so the target's private flags() win */
+        std::string user_flags;
+        for (const auto& f : usage.flags)
+            user_flags.append(f).push_back(' ');
+        user_flags += t.flags();
+
+        auto cflags = detail::build_flags(r.triple, proj.mode(), t.cpp_standard(), t.warnings(),
+                                          t.debug_info(), t.optimization(), t.sanitizer(), t.lto(),
+                                          t.hardening(), pic, defines, includes, user_flags,
+                                          usage.system_includes, t.c_standard(), t.c_flags(),
+                                          t.symbols_hidden());
+        if (!cflags)
+            return std::unexpected(cflags.error());
+
+        TargetPrep& prep = preps[ti];
+        prep.usage = std::move(usage);
+        prep.cflags = std::move(*cflags);
+        prep.scan_flags = prep.cflags.compile;
+        /* include the raw PCH header during scanning so macros defined in the
+         * PCH gate module imports accurately (the compiled .pch/.gch does not
+         * exist yet at configure time) */
+        if (!t.pch().empty() && !msvc) {
+            std::error_code pch_ec;
+            if (std::filesystem::exists(proj.cwd() / t.pch(), pch_ec))
+                prep.scan_flags += " -include " + std::filesystem::path(t.pch()).generic_string();
+        }
+
+        /* Authoritative import lists via the compiler's p1689 output (parallel;
+         * ~10 ms per TU). Manual demands it; Auto (the default — Default
+         * resolves to Auto here) uses it whenever the toolchain can run it —
+         * clang via clang-scan-deps (not zig: its two-token driver is
+         * unparseable), GCC via -fdeps-format=p1689r5 — and falls back to the
+         * hand-rolled lexer scan otherwise. */
+        const bool has_clang_scan_deps =
+            r.triple.family == CompilerFamily::Clang && !detail::is_zig(r.triple)
+            && detail::find_clang_scan_deps(r.triple.compiler).has_value();
+        const bool scan_deps_usable =
+            has_clang_scan_deps || r.triple.family == CompilerFamily::Gcc;
+        const ModulesMode mm = t.modules_mode() == ModulesMode::Default
+                                   ? ModulesMode::Auto
+                                   : t.modules_mode();
+        if (mm == ModulesMode::Manual || (mm == ModulesMode::Auto && scan_deps_usable)) {
+            if (mm == ModulesMode::Manual) {
+                if (r.triple.family != CompilerFamily::Clang && r.triple.family != CompilerFamily::Gcc)
+                    return std::unexpected(Error {
+                        Error::Kind::Config,
+                        "modules_mode(Manual) requires a clang- or GCC-family compiler (p1689 scanning)",
+                    });
+                if (r.triple.family == CompilerFamily::Clang && !has_clang_scan_deps)
+                    return std::unexpected(Error {
+                        Error::Kind::Toolchain, "modules_mode(Manual): clang-scan-deps not found on PATH",
+                    });
+            }
+            prep.run_scan = true;
+            prep.mm = mm;
+            scanned[ti].resize(r.units.size());
+            /* unchanged TUs are served from build/<mode>/scan-cache/ instead of
+             * paying ~10 ms each through the compiler: the key covers the cwd,
+             * source, compiler binary identity and the exact flag string, and
+             * a hit additionally requires the source's (mtime, size) to match */
+            for (std::size_t ui = 0; ui < r.units.size(); ++ui) {
+                /* no `import`/`module` anywhere in the raw text: no compiler
+                 * scan can find anything (the keywords cannot be
+                 * macro-generated), so do not even ask. Conservative on
+                 * purpose — a keyword inside a comment or string literal only
+                 * costs one scan. */
+                if (!r.units[ui].mentions_module_syntax) {
+                    scanned[ti][ui] = std::pair<std::vector<std::string>, std::vector<std::string>> {};
+                    detail::scan_cache_note_skipped();
+                    continue;
+                }
+                std::string key = detail::scan_cache_key(cwd_str, r.triple.compiler,
+                                                         prep.scan_flags, r.units[ui].path);
+                if (auto hit = detail::scan_cache_lookup(cache_dir, key, r.units[ui].path);
+                    hit && hit->has_value()) {
+                    scanned[ti][ui] = std::move(**hit);
+                    continue;
+                }
+                pending.push_back({ti, ui, std::move(key)});
+            }
+        }
+    }
+
+    /* Parallel compiler-scan pool (<=8 threads, shared across all targets):
+     * scratch is declared before pool so jthreads join before it is removed. */
+    if (!pending.empty()) {
+        const std::size_t nthreads = std::min<std::size_t>(pending.size(), 8);
+        /* create scratch dir ONLY when cold scans actually run: a
+         * 100% cache-hit no-op build avoids mkdtemp/rmdir */
+        const os::temp_scope scratch;
+        if (!scratch.valid())
+            return std::unexpected(Error {
+                Error::Kind::Io, "cannot create scan-deps scratch directory",
+            });
+        std::vector<std::jthread> pool;
+        for (std::size_t wi = 0; wi < nthreads; ++wi)
+            pool.emplace_back([&, wi] {
+                for (std::size_t j = wi; j < pending.size(); j += nthreads) {
+                    const auto& job = pending[j];
+                    const auto& r = resolved[job.ti];
+                    const auto& u = r.units[job.ui];
+                    /* capture (mtime, size) BEFORE scanning so a mid-scan
+                     * edit never stamps its new mtime onto a stale scan */
+                    const auto pre_stat = detail::scan_cache_stat(u.path);
+                    auto res = detail::scan_deps_requires(
+                        r.triple.compiler, preps[job.ti].scan_flags, u.path, proj.cwd(),
+                        scratch.path());
+                    if (res)
+                        /* an optimization: a read-only build dir must not
+                         * fail the build, so the store result is ignored */
+                        static_cast<void>(detail::scan_cache_store(
+                            cache_dir, job.key, u.path, res->first, res->second, pre_stat));
+                    scanned[job.ti][job.ui] = std::move(res);
+                }
+            });
+        /* jthread destructors join at scope end */
+    }
+
+    for (std::size_t ti = 0; ti < resolved.size(); ++ti) {
+        auto& r = resolved[ti];
         const Target& t = *r.target;
         /* custom command: one edge with every output; the used tool and the
          * depends_on file inputs are explicit inputs (built first, and a
@@ -1003,147 +1219,25 @@ Result<void> emit_manifest(const Project& proj, std::vector<ResolvedTarget>& res
         if (t.kind() == TargetKind::Interface || t.kind() == TargetKind::ImportedLibrary)
             continue;
         const bool msvc = r.triple.family == CompilerFamily::Msvc;
-        const bool pic = t.pic() || t.kind() != TargetKind::Executable;
-        if (msvc && t.static_deps_enabled())
-            return std::unexpected(Error {
-                Error::Kind::Config, "target '" + t.name() + "': static_deps() is not supported on MSVC targets yet",
-            });
+        const TargetPrep& prep = preps[ti];
+        const Usage& usage = prep.usage;
+        const detail::FlagSet* cflags = &prep.cflags;
 
-        const Usage usage = UsageWalk(by_name).run(r);
-
-        std::vector<std::string> defines = t.defines();
-        defines.insert(defines.end(), usage.defines.begin(), usage.defines.end());
-
-        /* GCC finds a PCH only through the include search: the .gch must sit in
-         * the FIRST -I directory containing the header. The target's own -I
-         * dirs (inside usage.includes) usually contain the header too — without
-         * a .gch next to it — so the PCH dir goes ahead of all of them (clang's
-         * -include-pch names the file and is immune to the order). Multi-subgraph
-         * builds scope PCH dirs by triple so subgraphs never collide. */
-        const auto pch_dir_for = [&](const ResolvedTarget& rt) {
-            return (rt.subgraph.empty()
-                        ? (build_dir / "pch" / rt.target->name())
-                        : (build_dir / "pch" / detail::triple_dir(rt.triple) / rt.target->name()))
-                .generic_string();
-        };
-        std::vector<std::string> includes = usage.includes;
-        if (r.triple.family == CompilerFamily::Gcc && !t.pch().empty())
-            includes.insert(includes.begin(), pch_dir_for(r));
-
-        /* public flags (self + deps) first, so the target's private flags() win */
-        std::string user_flags;
-        for (const auto& f : usage.flags)
-            user_flags.append(f).push_back(' ');
-        user_flags += t.flags();
-
-        auto cflags = detail::build_flags(r.triple, proj.mode(), t.cpp_standard(), t.warnings(),
-                                          t.debug_info(), t.optimization(), t.sanitizer(), t.lto(),
-                                          t.hardening(), pic, defines, includes, user_flags,
-                                          usage.system_includes, t.c_standard(), t.c_flags(),
-                                          t.symbols_hidden());
-        if (!cflags)
-            return std::unexpected(cflags.error());
-
-        /* Authoritative import lists via the compiler's p1689 output (parallel;
-         * ~10 ms per TU). Manual demands it; Auto (the default — Default
-         * resolves to Auto here) uses it whenever the toolchain can run it —
-         * clang via clang-scan-deps (not zig: its two-token driver is
-         * unparseable), GCC via -fdeps-format=p1689r5 — and falls back to the
-         * hand-rolled lexer scan otherwise. */
-        const bool has_clang_scan_deps =
-            r.triple.family == CompilerFamily::Clang && !detail::is_zig(r.triple)
-            && detail::find_clang_scan_deps(r.triple.compiler).has_value();
-        const bool scan_deps_usable =
-            has_clang_scan_deps || r.triple.family == CompilerFamily::Gcc;
-        const ModulesMode mm = t.modules_mode() == ModulesMode::Default
-                                   ? ModulesMode::Auto
-                                   : t.modules_mode();
-        if (mm == ModulesMode::Manual || (mm == ModulesMode::Auto && scan_deps_usable)) {
-            if (mm == ModulesMode::Manual) {
-                if (r.triple.family != CompilerFamily::Clang && r.triple.family != CompilerFamily::Gcc)
-                    return std::unexpected(Error {
-                        Error::Kind::Config,
-                        "modules_mode(Manual) requires a clang- or GCC-family compiler (p1689 scanning)",
-                    });
-                if (r.triple.family == CompilerFamily::Clang && !has_clang_scan_deps)
-                    return std::unexpected(Error {
-                        Error::Kind::Toolchain, "modules_mode(Manual): clang-scan-deps not found on PATH",
-                    });
-            }
-            std::vector<Result<std::pair<std::vector<std::string>, std::vector<std::string>>>> scanned(r.units.size());
-            /* unchanged TUs are served from build/<mode>/scan-cache/ instead of
-             * paying ~10 ms each through the compiler: the key covers the cwd,
-             * source, compiler binary identity and the exact flag string, and
-             * a hit additionally requires the source's (mtime, size) to match */
-            const std::filesystem::path cache_dir = build_dir / "scan-cache";
-            std::vector<std::string> keys(r.units.size());
-            std::vector<std::size_t> pending;
-            pending.reserve(r.units.size());
+        if (prep.run_scan) {
             for (std::size_t i = 0; i < r.units.size(); ++i) {
-                /* no `import`/`module` anywhere in the raw text: no compiler
-                 * scan can find anything (the keywords cannot be
-                 * macro-generated), so do not even ask. Conservative on
-                 * purpose — a keyword inside a comment or string literal only
-                 * costs one scan. */
-                if (!r.units[i].mentions_module_syntax) {
-                    scanned[i] = std::pair<std::vector<std::string>, std::vector<std::string>> {};
-                    detail::scan_cache_note_skipped();
-                    continue;
-                }
-                keys[i] = detail::scan_cache_key(proj.cwd().generic_string(), r.triple.compiler,
-                                                 cflags->compile, r.units[i].path);
-                if (auto hit = detail::scan_cache_lookup(cache_dir, keys[i], r.units[i].path);
-                    hit && hit->has_value()) {
-                    scanned[i] = std::move(**hit);
-                    continue;
-                }
-                pending.push_back(i);
-            }
-
-            const size_t nthreads = std::min<size_t>(pending.size(), 8);
-            if (nthreads > 0) {
-                /* create scratch dir ONLY when cold scans actually run: a
-                 * 100% cache-hit no-op build avoids mkdtemp/rmdir per target */
-                const os::temp_scope scratch;
-                if (!scratch.valid())
-                    return std::unexpected(Error {
-                        Error::Kind::Io, "cannot create scan-deps scratch directory",
-                    });
-                std::vector<std::jthread> pool;
-                for (size_t w = 0; w < nthreads; ++w)
-                    pool.emplace_back([&, w] {
-                        for (size_t j = w; j < pending.size(); j += nthreads) {
-                            const size_t i = pending[j];
-                            /* capture (mtime, size) BEFORE scanning so a mid-scan
-                             * edit never stamps its new mtime onto a stale scan */
-                            const auto pre_stat = detail::scan_cache_stat(r.units[i].path);
-                            scanned[i] = detail::scan_deps_requires(
-                                r.triple.compiler, cflags->compile, r.units[i].path, proj.cwd(),
-                                scratch.path());
-                            if (scanned[i])
-                                /* an optimization: a read-only build dir must not
-                                 * fail the build, so the store result is ignored */
-                                static_cast<void>(detail::scan_cache_store(
-                                    cache_dir, keys[i], r.units[i].path, scanned[i]->first,
-                                    scanned[i]->second, pre_stat));
-                        }
-                    });
-                /* jthread destructors join at scope end */
-            }
-            for (size_t i = 0; i < r.units.size(); ++i) {
-                if (!scanned[i]) {
-                    if (mm == ModulesMode::Manual)
-                        return std::unexpected(scanned[i].error());
+                if (!scanned[ti][i]) {
+                    if (prep.mm == ModulesMode::Manual)
+                        return std::unexpected(scanned[ti][i].error());
                     /* Auto: scan-deps preprocesses, so a TU that includes a
                      * not-yet-generated header (the codegen pattern) cannot be
                      * scanned — fall back to this unit's heuristic import list */
                     log::warn("the module scan failed for '" + r.units[i].path + "' ("
-                              + scanned[i].error().message
+                              + scanned[ti][i].error().message
                               + "); falling back to the heuristic module scan");
                     continue;
                 }
-                r.units[i].imports = std::move(scanned[i]->first);
-                r.units[i].header_imports = std::move(scanned[i]->second);
+                r.units[i].imports = std::move(scanned[ti][i]->first);
+                r.units[i].header_imports = std::move(scanned[ti][i]->second);
             }
             /* recompute std requirements from the authoritative compiler scan
              * (macro-gated or line-spliced `import std;` may differ from the
@@ -1303,26 +1397,23 @@ Result<void> emit_manifest(const Project& proj, std::vector<ResolvedTarget>& res
                 if (!imp)
                     return std::unexpected(imp.error());
                 /* imp->first is space-joined -fmodule-file=NAME=PATH tokens,
-                 * imp->second the same BMIs as dep paths (parallel order) */
-                std::vector<std::string> tokens;
-                {
-                    std::string_view fs = imp->first;
-                    while (!fs.empty()) {
+                 * imp->second the same BMIs as dep paths (parallel order):
+                 * scan the string_view directly without allocating a token vector */
+                std::string_view fs = imp->first;
+                for (std::size_t i = 0; i < imp->second.size(); ++i) {
+                    std::string_view tok;
+                    if (!fs.empty()) {
                         const auto sp = fs.find(' ');
-                        tokens.emplace_back(fs.substr(0, sp == std::string_view::npos ? fs.size() : sp));
-                        if (sp == std::string_view::npos)
-                            break;
-                        fs.remove_prefix(sp + 1);
+                        tok = fs.substr(0, sp == std::string_view::npos ? fs.size() : sp);
+                        fs = sp == std::string_view::npos ? std::string_view {} : fs.substr(sp + 1);
                     }
-                }
-                for (size_t i = 0; i < imp->second.size(); ++i) {
                     if (!seen.insert(imp->second[i]).second)
                         continue;
                     unit.imp_ins.push_back(imp->second[i]);
-                    if (i < tokens.size()) {
+                    if (!tok.empty()) {
                         if (!unit.imp_flags.empty())
                             unit.imp_flags += ' ';
-                        unit.imp_flags += tokens[i];
+                        unit.imp_flags += tok;
                     }
                 }
             }
@@ -1386,19 +1477,19 @@ Result<void> emit_manifest(const Project& proj, std::vector<ResolvedTarget>& res
             /* generated files from depends_on custom commands: order-only, so
              * the command runs before this compile (the depfile then tracks
              * the generated header for incremental rebuilds) */
-            e.implicit_ins.insert(e.implicit_ins.end(), usage.gen_outputs.begin(), usage.gen_outputs.end());
+            e.order_only_ins = usage.gen_outputs;
             std::string flags = cflags->compile;
             if (!gcc_mod_flags.empty())
                 flags += " " + gcc_mod_flags; /* -fmodules + the mapper; GCC takes no -fmodule-file */
-            if (!imp->first.empty())
+            if (!gcc_modules && !imp->first.empty())
                 flags += " " + imp->first;
             e.vars = {
                 {"cxx", r.triple.compiler},
-                {"flags", flags},
+                {"flags", std::move(flags)},
                 {"bmi", b.bmi_path},
                 {"depfile", b.object + ".d"},
             };
-            w.build(std::move(e));
+            w.build(e);
             objects.push_back(b.object);
         }
         for (const auto& unit : cxx_units) {
@@ -1410,21 +1501,21 @@ Result<void> emit_manifest(const Project& proj, std::vector<ResolvedTarget>& res
             e.implicit_ins = unit.imp_ins;
             if (!pch_out.empty())
                 e.implicit_ins.push_back(pch_out);
-            e.implicit_ins.insert(e.implicit_ins.end(), usage.gen_outputs.begin(), usage.gen_outputs.end());
+            e.order_only_ins = usage.gen_outputs;
             std::string flags = cflags->compile;
             if (!gcc_mod_flags.empty())
                 flags += " " + gcc_mod_flags; /* module imports resolve via the mapper */
-            if (!unit.imp_flags.empty())
+            if (!gcc_modules && !unit.imp_flags.empty())
                 flags += " " + unit.imp_flags;
             if (!pch_flag.empty())
                 flags += " " + pch_flag;
             e.vars = {
                 {"cxx", r.triple.compiler},
-                {"flags", flags},
+                {"flags", std::move(flags)},
             };
             if (!msvc)
                 e.vars.emplace_back("depfile", obj + ".d");
-            w.build(std::move(e));
+            w.build(e);
             objects.push_back(obj);
         }
         const std::string cc = detail::c_driver(r.triple.compiler);
@@ -1434,14 +1525,14 @@ Result<void> emit_manifest(const Project& proj, std::vector<ResolvedTarget>& res
             e.outputs = {obj};
             e.rule = msvc ? "compile_c_msvc" : "compile_c";
             e.inputs = {src};
-            e.implicit_ins = usage.gen_outputs;
+            e.order_only_ins = usage.gen_outputs;
             e.vars = {
                 {"cc", cc},
                 {"flags", cflags->compile_c},
             };
             if (!msvc)
                 e.vars.emplace_back("depfile", obj + ".d");
-            w.build(std::move(e));
+            w.build(e);
             objects.push_back(obj);
         }
 
@@ -1757,376 +1848,7 @@ Result<void> emit_manifest(const Project& proj, std::vector<ResolvedTarget>& res
 
 } // namespace
 
-/* --- Project ------------------------------------------------------------ */
-
-namespace {
-
-/* Path of the running executable: /proc/self/exe, else argv[0] when it is a path. */
-std::filesystem::path self_exe(std::span<char* const> argv) {
-    std::error_code ec;
-    if (auto p = std::filesystem::canonical("/proc/self/exe", ec); !ec)
-        return p;
-    if (!argv.empty() && argv[0] != nullptr && std::string_view(argv[0]).find('/') != std::string_view::npos)
-        if (auto p = std::filesystem::canonical(argv[0], ec); !ec)
-            return p;
-    return {};
-}
-
-/* nob-style self-rebuild: when the build script (truss.cpp next to the
- * executable) or a header/BMI it depends on (truss.d) is newer than the
- * executable, a stale build graph would be generated — run the project's
- * rebuild driver and re-exec with the same argv. The driver is either a
- * `bootstrap.sh` next to the binary (the init template) or, in a truss
- * checkout, `setup.sh build` (bootstrap.sh was folded into setup.sh). With
- * neither, report it (via build()) instead of building the stale graph.
- * TRUSS_NO_REBUILD=1 disables the check; TRUSS_REBUILT guards the re-exec loop. */
-std::optional<Error> refresh_build_script(std::span<char* const> argv, bool dry_run) {
-    if (const char* off = std::getenv("TRUSS_NO_REBUILD"); off != nullptr && *off != '\0' && *off != '0')
-        return std::nullopt;
-    const auto exe = self_exe(argv);
-    if (exe.empty())
-        return std::nullopt;
-    const auto dir = exe.parent_path();
-    const auto script = dir / "truss.cpp";
-    std::error_code ec;
-    const auto script_time = std::filesystem::last_write_time(script, ec);
-    if (ec)
-        return std::nullopt; /* not a build-script executable (tests, installed CLI) */
-    const auto exe_time = std::filesystem::last_write_time(exe, ec);
-    if (ec)
-        return std::nullopt;
-
-    /* truss.d (written by bootstrap.sh / `setup.sh build` via -MMD) lists the
-     * headers truss.cpp includes plus the truss BMIs/libtruss.a it was built
-     * against; without it (older projects) only truss.cpp itself is compared. */
-    std::filesystem::path changed;
-    if (script_time > exe_time)
-        changed = script;
-    if (auto deps = detail::read_file(dir / "truss.d"); deps && changed.empty()) {
-        for (const auto& dep : detail::parse_depfile(*deps)) {
-            std::error_code dep_ec;
-            const auto dep_time = std::filesystem::last_write_time(dir / dep, dep_ec);
-            if (!dep_ec && dep_time > exe_time) {
-                changed = dir / dep;
-                break;
-            }
-        }
-    }
-    if (changed.empty())
-        return std::nullopt;
-
-    if (dry_run) {
-        /* -n changes nothing: report instead of rebuilding */
-        log::warn(changed.filename().string() + " is newer than " + exe.filename().string()
-                  + "; a dry run does not rebuild it (run ./truss once, or ./setup.sh build)");
-        return std::nullopt;
-    }
-    if (std::getenv("TRUSS_REBUILT") != nullptr) {
-        log::warn(changed.filename().string() + " still looks newer than " + exe.filename().string()
-                  + " after a rebuild (clock skew?); continuing");
-        return std::nullopt;
-    }
-    /* rebuild driver, in preference order: a project's bootstrap.sh, then the
-     * truss checkout's setup.sh (whose `build` verb is the old bootstrap) */
-    const auto bootstrap = dir / "bootstrap.sh";
-    const auto setup = dir / "setup.sh";
-    std::vector<std::string> cmd;
-    std::error_code driver_ec;
-    if (std::filesystem::is_regular_file(bootstrap, driver_ec))
-        cmd = {"sh", bootstrap.string()};
-    else if (std::filesystem::is_regular_file(setup, driver_ec))
-        /* setup.sh uses bash arrays, mapfile, pipefail, and [[ ]] */
-        cmd = {"bash", setup.string(), "build"};
-    if (cmd.empty())
-        return Error {
-            Error::Kind::Config,
-            "build script is stale: " + changed.filename().string() + " is newer than "
-                + exe.filename().string()
-                + "\nrebuild it first (`./setup.sh build` in a truss checkout, or a bootstrap.sh"
-                  " next to the binary), or set TRUSS_NO_REBUILD=1 to use it anyway",
-            changed,
-        };
-
-    log::info(changed.filename().string() + " changed: rebuilding " + exe.filename().string()
-              + " (" + std::filesystem::path(cmd[1]).filename().string()
-              + (cmd.size() > 2 ? " " + cmd[2] : "") + ")");
-    auto outcome = detail::run_process(cmd, false, dir);
-    if (!outcome)
-        return outcome.error();
-    if (outcome->exit_code != 0)
-        return Error {Error::Kind::Command,
-                      "rebuilding the build script failed (" + std::filesystem::path(cmd[1]).filename().string()
-                          + " exited with " + std::to_string(outcome->exit_code) + ")"};
-
-    /* execv needs a NULL-terminated array; argv spans need not be */
-    std::vector<char*> args(argv.begin(), argv.end());
-    args.push_back(nullptr);
-    ::setenv("TRUSS_REBUILT", "1", 1);
-    ::execv(exe.c_str(), args.data());
-    return Error {Error::Kind::Io, "re-exec of the rebuilt build script failed: " + std::string(std::strerror(errno))};
-}
-
-} // namespace
-
-constexpr std::string_view kHelp =
-    "usage: truss [debug|release] [task...] [options] [-- program-args...]\n"
-    "\n"
-    "modes (default: debug):\n"
-    "  debug            -O0 -g, assertions on; outputs in build/debug/\n"
-    "  release          optimized, NDEBUG; outputs in build/release/\n"
-    "\n"
-    "tasks (default: build everything):\n"
-    "  test             build and run every test executable\n"
-    "  run              build and run an executable (pick one with --target)\n"
-    "  clean            remove the mode's build directory\n"
-    "  options          list project build options and their current values\n"
-    "  configure        interactively edit options (--reset to clear cache)\n"
-    "  presets          list registered build presets\n"
-    "  install          install targets marked install() to --prefix (default ~/.local)\n"
-    "  uninstall        remove files recorded in build/<mode>/install_manifest.txt\n"
-    "  compdb           write compile_commands.json\n"
-    "  reload           rebuild the truss binary (truss checkout only)\n"
-    "  task NAME        build, then run a task registered with proj.task(...)\n"
-    "  task list        list the registered tasks with their descriptions\n"
-    "\n"
-    "options:\n"
-    "  -j, --jobs N     parallel jobs (default: CPU count)\n"
-    "  -q, --quiet      errors only\n"
-    "  -v, --verbose    print full command lines\n"
-    "  -n, --dry-run    show what would run without running it\n"
-    "      --explain    explain why each step is rebuilt\n"
-    "      --target NAME  build (or run) only NAME; repeatable. With subgraphs\n"
-    "                      (proj.targets()): SUBGRAPH:NAME picks one subgraph, a\n"
-    "                      bare name applies to every subgraph that has it\n"
-    "      --for NAME      with subgraphs: restrict build/test/run to one subgraph\n"
-    "      --tag TAG...    with test: include tests matching TAG or exclude with !TAG\n"
-    "      --build-dir PATH  build root (default: build)\n"
-    "  -D KEY[=VAL]     set a build option (persisted in build/<mode>/options.cache)\n"
-    "      --preset NAME  apply a named preset registered with proj.preset(...)\n"
-    "      --prefix PATH  with install: installation prefix (default: ~/.local)\n"
-    "      --strip        with install: strip installed binaries and shared libs\n"
-    "      --reset      with configure: clear saved options back to defaults\n"
-    "  -V, --version    print the truss version\n"
-    "  -h, --help       show this help\n"
-    "  --               pass the remaining arguments to the program started by run\n"
-    "\n"
-    "examples:\n"
-    "  truss release run -- --port 8080\n"
-    "  truss test -j 8\n"
-    "  truss run --target server\n";
-
-Project::Project(std::string name, std::span<char* const> argv) : name_(std::move(name)) {
-    detail::log_init_from_env();
-
-    std::error_code ec;
-    cwd_ = std::filesystem::current_path(ec);
-    if (ec) {
-        cwd_ = ".";
-        cli_error_ = Error {Error::Kind::Io, "failed to determine current working directory"};
-    }
-
-    for (size_t i = 1; i < argv.size(); ++i) {
-        const std::string_view a = argv[i];
-        if (a == "debug") mode_ = BuildMode::Debug;
-        else if (a == "release") mode_ = BuildMode::Release;
-        else if (a == "-v" || a == "--verbose") verbose_ = true;
-        else if (a == "-q" || a == "--quiet") detail::log_set_min_level(3);
-        else if (a == "-n" || a == "--dry-run") dry_run_ = true;
-        else if (a == "--explain") explain_ = true;
-        else if (a == "-j" || a == "--jobs") {
-            if (++i >= argv.size()) { cli_error_ = Error {Error::Kind::Config, "-j requires a number"}; continue; }
-            const std::string_view n = argv[i];
-            const auto [end, ec] = std::from_chars(n.data(), n.data() + n.size(), jobs_);
-            if (ec != std::errc {} || end != n.data() + n.size() || jobs_ <= 0)
-                cli_error_ = Error {Error::Kind::Config, "-j requires a positive number"};
-        }
-        else if (a == "--target") {
-            if (++i >= argv.size()) { cli_error_ = Error {Error::Kind::Config, "--target requires a name"}; continue; }
-            only_targets_.emplace_back(argv[i]);
-        }
-        else if (a == "--for") {
-            /* subgraph selector for tasks (test/run); validated in build() */
-            if (++i >= argv.size()) { cli_error_ = Error {Error::Kind::Config, "--for requires a subgraph name"}; continue; }
-            for_selector_ = argv[i];
-        }
-        else if (a == "--build-dir") {
-            if (++i >= argv.size()) { cli_error_ = Error {Error::Kind::Config, "--build-dir requires a path"}; continue; }
-            build_root_ = argv[i];
-        }
-        else if (a == "--prefix") {
-            if (++i >= argv.size()) { cli_error_ = Error {Error::Kind::Config, "--prefix requires a path"}; continue; }
-            install_prefix_ = argv[i];
-        }
-        else if (a == "--strip") {
-            install_strip_ = true;
-        }
-        else if (a == "--reset") {
-            reset_options_ = true;
-        }
-        else if (a == "--preset") {
-            if (++i >= argv.size()) { cli_error_ = Error {Error::Kind::Config, "--preset requires a name"}; continue; }
-            selected_preset_ = argv[i];
-        }
-        else if (a == "--tag") {
-            auto is_tag_stop = [](std::string_view tok) {
-                return tok.starts_with('-')
-                    || tok == "debug" || tok == "release"
-                    || tok == "build" || tok == "test" || tok == "run" || tok == "clean"
-                    || tok == "options" || tok == "configure" || tok == "presets"
-                    || tok == "compdb" || tok == "reload" || tok == "install"
-                    || tok == "uninstall" || tok == "task" || tok == "help";
-            };
-            std::size_t added = 0;
-            while (i + 1 < argv.size() && !is_tag_stop(argv[i + 1])) {
-                const std::string_view tok = argv[++i];
-                if (tok == "!") {
-                    cli_error_ = Error {Error::Kind::Config, "--tag '!': tag name after '!' cannot be empty"};
-                } else {
-                    test_tags_.emplace_back(tok);
-                }
-                ++added;
-            }
-            if (added == 0)
-                cli_error_ = Error {Error::Kind::Config, "--tag requires at least one tag"};
-        }
-        else if (a == "-D" || a.starts_with("-D")) {
-            std::string_view spec = a == "-D" ? std::string_view {} : a.substr(2);
-            if (a == "-D") {
-                if (++i >= argv.size()) { cli_error_ = Error {Error::Kind::Config, "-D requires KEY=VAL or KEY"}; continue; }
-                spec = argv[i];
-            }
-            if (spec.empty()) {
-                cli_error_ = Error {Error::Kind::Config, "-D requires KEY=VAL or KEY"};
-                continue;
-            }
-            const std::size_t eq = spec.find('=');
-            if (eq == std::string_view::npos) {
-                cli_options_.push_back({std::string(spec), "true", true});
-            } else if (eq == 0) {
-                cli_error_ = Error {Error::Kind::Config, "-D requires a non-empty option name"};
-            } else {
-                cli_options_.push_back({std::string(spec.substr(0, eq)), std::string(spec.substr(eq + 1)), false});
-            }
-        }
-        else if (a == "--") {
-            /* everything after `--` goes to the program started by `run` */
-            for (++i; i < argv.size(); ++i)
-                run_args_.emplace_back(argv[i]);
-        }
-        else if (a == "-h" || a == "--help" || a == "help") {
-            std::fputs(kHelp.data(), stdout);
-            std::exit(0);
-        }
-        else if (a == "--version" || a == "-V") {
-            std::printf("truss %.*s\n", static_cast<int>(kVersion.size()), kVersion.data());
-            std::exit(0);
-        }
-        else if (a.starts_with('-')) {
-            cli_error_ = Error {
-                Error::Kind::Config,
-                "unknown option '" + std::string(a) + "' (see truss --help)",
-            };
-        }
-        else if (a == "task") {
-            /* `task NAME` runs a user task; `task` / `task list` lists them */
-            if (i + 1 >= argv.size() || std::string_view(argv[i + 1]) == "list" || std::string_view(argv[i + 1]).starts_with('-')) {
-                list_tasks_ = true;
-                if (i + 1 < argv.size() && std::string_view(argv[i + 1]) == "list")
-                    ++i;
-            } else {
-                requested_tasks_.push_back("task:" + std::string(argv[++i]));
-            }
-        }
-        else requested_tasks_.emplace_back(a);
-    }
-
-    /* self-rebuild last: --help/--version exit above (they need no graph, and
-     * must not pay a bootstrap), an invalid option is reported as typed, and
-     * -n stays side-effect-free. */
-    if (!cli_error_)
-        if (auto stale = refresh_build_script(argv, dry_run_))
-            cli_error_ = std::move(*stale);
-}
-
-const std::vector<std::filesystem::path>& Project::truss_module_paths() const {
-    if (!truss_module_paths_loaded_) {
-        truss_module_paths_ = os::find_truss_modules();
-        truss_module_paths_loaded_ = true;
-    }
-    return truss_module_paths_;
-}
-
-Project::Project(std::string name, int argc, char** argv)
-    : Project(std::move(name), std::span<char* const>(argv, static_cast<std::size_t>(argc))) {}
-
-void Project::task(std::string name, std::string description, TaskFn fn) {
-    user_tasks_.push_back({std::move(name), std::move(description), std::move(fn)});
-}
-
-std::filesystem::path Project::build_dir() const {
-    const std::filesystem::path root = build_root_.has_value() ? *build_root_ : cwd_ / "build";
-    return root / mode_dir_name(mode_);
-}
-
-Result<void> Project::compile_commands(const std::filesystem::path& path) {
-    /* -n promises no side effects: a build script that exports the database
-     * after build() (truss.cpp does) must not write it in a dry run either */
-    if (dry_run_)
-        return {};
-    // If path is a directory, use compile_commands.json inside it
-    auto output_path = path;
-    if (std::error_code dir_ec; std::filesystem::is_directory(path, dir_ec)) {
-        output_path = path / "compile_commands.json";
-    }
-    
-    // Get the manifest path
-    const std::filesystem::path bld = build_dir();
-    const std::filesystem::path manifest = bld / "ninja" / "build.ninja";
-    
-    // Run samurai's compdb tool
-    std::error_code ec;
-    if (!std::filesystem::exists(manifest, ec)) {
-        return std::unexpected(Error {
-            Error::Kind::Config,
-            "compile_commands requires a built manifest (run build() first)",
-            manifest,
-        });
-    }
-    
-    // Invoke samurai compdb tool into a PID-unique sibling temp file, then
-    // replace only when the content changed: a no-op `./truss` must not touch
-    // mtimes or race concurrent builds
-    if (output_path.has_parent_path()) {
-        std::filesystem::create_directories(output_path.parent_path(), ec);
-        if (ec)
-            return std::unexpected(Error {
-                Error::Kind::Io, "failed to create directory for compile_commands.json",
-                output_path.parent_path()});
-    }
-    static std::atomic<unsigned> compdb_seq {0};
-    const auto tmp = std::filesystem::path(
-        output_path.generic_string() + ".truss-tmp." + std::to_string(::getpid()) + "."
-        + std::to_string(compdb_seq.fetch_add(1, std::memory_order_relaxed)));
-    if (auto r = detail::samu_compdb(manifest.generic_string(), tmp.generic_string()); !r) {
-        std::filesystem::remove(tmp, ec);
-        return r;
-    }
-    auto fresh = detail::read_file(tmp);
-    auto existing = detail::read_file(output_path);
-    if (fresh && existing && *fresh == *existing) {
-        std::filesystem::remove(tmp, ec);
-        return {};
-    }
-    std::filesystem::rename(tmp, output_path, ec);
-    if (ec) {
-        std::filesystem::remove(tmp, ec);
-        return std::unexpected(Error {
-            Error::Kind::Io, "failed to write compile_commands.json", output_path});
-    }
-
-    log::success("wrote " + output_path.generic_string());
-    return {};
-}
+/* --- Project::build ----------------------------------------------------- */
 
 Result<void> Project::build() {
     /* single error-logging boundary: every failure returned by Project::build()
@@ -2207,7 +1929,7 @@ Result<void> Project::build() {
     if (std::ranges::any_of(tasks, [](const std::string& t) { return t == "uninstall"; })) {
         if (tasks.size() > 1)
             return config_error("'uninstall' cannot be combined with other tasks");
-        return detail::run_uninstall(bld, dry_run_);
+        return detail::run_uninstall(cwd_, bld, install_prefix_, dry_run_);
     }
 
     /* preset registry validation */
@@ -2277,13 +1999,13 @@ Result<void> Project::build() {
         return {};
     }
 
+    if (auto r = validate(targets_); !r)
+        return r;
+
     if (!dry_run_) {
         if (auto r = save_options_cache(); !r)
             return r;
     }
-
-    if (auto r = validate(targets_); !r)
-        return r;
 
     /* per-triple subgraphs: without targets() this is one unnamed subgraph
      * carrying the project Config */
@@ -2324,7 +2046,8 @@ Result<void> Project::build() {
          * union phony) */
         std::set<std::string> names;
         for (const auto& [sg, conf] : subs) {
-            if (!sg.empty() && (sg == "all" || sg.contains(':') || !path_is_safe(std::filesystem::path(sg))))
+            if (!sg.empty() && (sg == "all" || sg == "." || sg == ".." || sg.contains(':')
+                                || !path_is_safe(std::filesystem::path(sg))))
                 return config_error("subgraph name '" + sg + "' is invalid (bare name, no ':', not 'all')");
             if (!names.insert(sg).second)
                 return config_error("subgraph '" + sg + "' is declared twice");
@@ -2380,8 +2103,10 @@ Result<void> Project::build() {
      * depth, and skips build_root unless explicitly targeted) */
     struct TargetSources {
         std::vector<std::string> files;
-        std::map<std::string, detail::ModuleUnitInfo, std::less<>> text_scans;
     };
+    /* One shared text-scan map across all targets: a source file listed by
+     * multiple targets is stat'd, hashed, read, and scanned only once. */
+    std::map<std::string, detail::ModuleUnitInfo, std::less<>> text_scans;
     const std::filesystem::path scan_cache = bld / "scan-cache";
     const std::filesystem::path build_root = build_root_.has_value() ? *build_root_ : cwd_ / "build";
     std::vector<TargetSources> target_sources(targets_.size());
@@ -2420,10 +2145,12 @@ Result<void> Project::build() {
         for (const auto& f : target_sources[ti].files) {
             if (f.ends_with(".cppm") || f.ends_with(".ixx")
                 || f.ends_with(".cpp") || f.ends_with(".cc") || f.ends_with(".cxx")) {
+                if (text_scans.contains(f))
+                    continue;
                 auto info = detail::scan_module_unit_cached(scan_cache, f);
                 if (!info)
                     return std::unexpected(info.error());
-                target_sources[ti].text_scans.emplace(f, std::move(*info));
+                text_scans.emplace(f, std::move(*info));
             }
         }
     }
@@ -2594,7 +2321,7 @@ Result<void> Project::build() {
                 });
             }
             if (is_bmi) {
-                detail::ModuleUnitInfo info = target_sources[ti].text_scans.at(f);
+                detail::ModuleUnitInfo info = text_scans.at(f);
                 if (info.module_name.empty()) {
                     return std::unexpected(Error {
                         Error::Kind::Config,
@@ -2616,7 +2343,7 @@ Result<void> Project::build() {
                 r.units.push_back(std::move(info));
                 r.bmis.push_back(std::move(b));
             } else if (f.ends_with(".cpp") || f.ends_with(".cc") || f.ends_with(".cxx")) {
-                detail::ModuleUnitInfo info = target_sources[ti].text_scans.at(f);
+                detail::ModuleUnitInfo info = text_scans.at(f);
                 r.cxx_sources.push_back(f);
                 r.units.push_back(std::move(info));
             } else if (f.ends_with(".c")) {
@@ -2853,6 +2580,9 @@ Result<void> Project::build() {
                 const std::string target_sg = !for_selector_.empty()
                                                   ? for_selector_
                                                   : (sub_ctx.empty() ? std::string {} : sub_ctx.front().name);
+                if (for_selector_.empty() && sub_ctx.size() > 1)
+                    log::warn("multiple subgraphs defined; installing subgraph '" + target_sg
+                              + "' only (pass --for <subgraph> to select another)");
                 std::vector<detail::InstallItem> items;
                 std::vector<std::string> to_build;
                 for (const auto& r : resolved) {
@@ -2956,72 +2686,16 @@ Result<void> Project::build() {
                 if (!built_bytes)
                     return std::unexpected(built_bytes.error());
 
-                static std::atomic<unsigned> reload_seq {0};
-                std::filesystem::path temp_path;
-                int fd = -1;
-                for (int attempt = 0; attempt < 64; ++attempt) {
-                    temp_path = current_exe;
-                    temp_path += ".tmp_reload." + std::to_string(::getpid()) + "."
-                               + std::to_string(reload_seq.fetch_add(1, std::memory_order_relaxed));
-                    fd = ::open(temp_path.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0700);
-                    if (fd != -1 || errno != EEXIST)
-                        break;
-                }
-                if (fd == -1) {
+                // Atomically replace the running binary via write_file_mode
+                // (O_EXCL|O_NOFOLLOW sibling temp + fchmod + rename), keeping
+                // the running binary's permissions rather than downgrading.
+                const unsigned mode = static_cast<unsigned>(cur_status.permissions()) & 07777u;
+                if (auto r = detail::write_file_mode(current_exe, *built_bytes, mode); !r)
                     return std::unexpected(Error {
-                        Error::Kind::Io,
-                        "reload: failed to create temp binary: " + std::string(std::strerror(errno)),
-                        temp_path,
+                        r.error().kind,
+                        "reload: failed to replace binary: " + r.error().message,
+                        current_exe,
                     });
-                }
-                {
-                    std::size_t written = 0;
-                    while (written < built_bytes->size()) {
-                        const ssize_t n = ::write(fd, built_bytes->data() + written,
-                                                  built_bytes->size() - written);
-                        if (n < 0) {
-                            if (errno == EINTR)
-                                continue;
-                            const std::string why = std::strerror(errno);
-                            ::close(fd);
-                            std::filesystem::remove(temp_path, ec);
-                            return std::unexpected(Error {
-                                Error::Kind::Io, "reload: failed to write temp binary: " + why, temp_path});
-                        }
-                        written += static_cast<std::size_t>(n);
-                    }
-                    if (::close(fd) != 0) {
-                        const std::string why = std::strerror(errno);
-                        std::filesystem::remove(temp_path, ec);
-                        return std::unexpected(Error {
-                            Error::Kind::Io, "reload: failed to close temp binary: " + why, temp_path});
-                    }
-                }
-
-                // Make executable: keep the running binary's mode rather than
-                // downgrading the reloaded binary to owner-only
-                std::filesystem::permissions(temp_path, cur_status.permissions(), ec);
-                if (ec) {
-                    const std::string why = ec.message();
-                    std::filesystem::remove(temp_path, ec);
-                    return std::unexpected(Error {
-                        Error::Kind::Io,
-                        "reload: failed to set permissions on temp binary: " + why,
-                        temp_path
-                    });
-                }
-
-                // Atomically replace the running binary with rename
-                std::filesystem::rename(temp_path, current_exe, ec);
-                if (ec) {
-                    const std::string why = ec.message();
-                    std::filesystem::remove(temp_path, ec);
-                    return std::unexpected(Error {
-                        Error::Kind::Io,
-                        "reload: failed to replace binary: " + why,
-                        current_exe
-                    });
-                }
 
                 log::success("truss reloaded from source. New binary active for next run.");
                 return {};
@@ -3059,17 +2733,23 @@ Result<void> Project::build() {
                 };
                 std::vector<TestExe> tests;
                 bool any_tests_defined = false;
+                bool any_tests_in_scope = false;
                 for (const auto& r : resolved) {
                     if (r.target->is_test_target()
                         && (for_selector_.empty() || r.subgraph == for_selector_)) {
                         any_tests_defined = true;
+                        if (!target_selected(r.subgraph, r.target->name()))
+                            continue;
+                        any_tests_in_scope = true;
                         if (tag_matches(*r.target))
                             tests.push_back({r.output, r.subgraph, !r.triple.target.empty()});
                     }
                 }
                 if (tests.empty()) {
-                    if (any_tests_defined && !test_tags_.empty())
+                    if (any_tests_in_scope && !test_tags_.empty())
                         log::warn("no tests matched --tag filter; nothing to run");
+                    else if (any_tests_defined && !only_targets_.empty())
+                        log::warn("no tests matched --target filter; nothing to run");
                     else
                         log::warn("no targets marked is_test(); nothing to run");
                     return {};

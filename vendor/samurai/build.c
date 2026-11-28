@@ -36,7 +36,38 @@ static struct edge *work;
 static size_t nstarted, nfinished, ntotal;
 static bool consoleused;
 static struct timespec starttime;
-static int sigfd[2];
+static int sigfd[2] = {-1, -1};
+/* truss patch: save/restore signal dispositions and close sigfd after build()
+ * returns so in-process callers keep normal SIGINT/SIGTERM handling and do not
+ * leak 2 fds per build */
+static const int buildsigs[] = {
+	SIGHUP,
+	SIGINT,
+	SIGQUIT,
+	SIGTERM,
+};
+static struct sigaction oldsa[4];
+static bool sigs_installed;
+
+void
+buildcleanup(void)
+{
+	size_t i;
+
+	if (sigs_installed) {
+		for (i = 0; i < countof(buildsigs); ++i)
+			sigaction(buildsigs[i], &oldsa[i], NULL);
+		sigs_installed = false;
+	}
+	if (sigfd[0] >= 0) {
+		close(sigfd[0]);
+		sigfd[0] = -1;
+	}
+	if (sigfd[1] >= 0) {
+		close(sigfd[1]);
+		sigfd[1] = -1;
+	}
+}
 
 void
 buildreset(void)
@@ -551,12 +582,6 @@ catchsig(int sig)
 void
 build(void)
 {
-	static const int sigs[] = {
-		SIGHUP,
-		SIGINT,
-		SIGQUIT,
-		SIGTERM,
-	};
 	struct job *jobs = NULL;
 	struct pollfd *fds = NULL;
 	size_t i, next = 0, jobslen = 0, maxjobs = buildopts.maxjobs, numjobs = 0, numfail = 0;
@@ -577,10 +602,11 @@ build(void)
 	memset(&sa, 0, sizeof(sa));
 	sa.sa_handler = catchsig;
 	sa.sa_flags = SA_RESTART;
-	for (i = 0; i < countof(sigs); ++i) {
-		if (sigaction(sigs[i], &sa, NULL) != 0)
-			warn("sigaction %d:", sigs[i]);
+	for (i = 0; i < countof(buildsigs); ++i) {
+		if (sigaction(buildsigs[i], &sa, &oldsa[i]) != 0)
+			warn("sigaction %d:", buildsigs[i]);
 	}
+	sigs_installed = true;
 
 	clock_gettime(CLOCK_MONOTONIC, &starttime);
 	formatstatus(NULL, 0);
@@ -670,6 +696,7 @@ build(void)
 		free(jobs[i].buf.data);
 	free(jobs);
 	free(fds);
+	buildcleanup();
 	if (numfail > 0) {
 		if (numfail < buildopts.maxfail)
 			fatal("cannot make progress due to previous errors");

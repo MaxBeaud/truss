@@ -12,6 +12,7 @@ module;
 #include <system_error>
 #include <vector>
 
+#include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -57,26 +58,92 @@ Result<void> inst_copy_file_mode(const std::filesystem::path& src,
                 dst.parent_path(),
             });
     }
-    static std::atomic<unsigned> seq {0};
-    const std::filesystem::path tmp(
-        dst.generic_string() + ".truss-tmp." + std::to_string(::getpid()) + "."
-        + std::to_string(seq.fetch_add(1, std::memory_order_relaxed)));
-
-    std::filesystem::copy_file(src, tmp, std::filesystem::copy_options::overwrite_existing, ec);
-    if (ec) {
-        std::filesystem::remove(tmp, ec);
+    const int src_fd = ::open(src.c_str(), O_RDONLY | O_CLOEXEC);
+    if (src_fd == -1)
         return std::unexpected(Error {
             Error::Kind::Io,
-            "install: failed to copy '" + src.generic_string() + "' to '" + dst.generic_string() + "': " + ec.message(),
+            "install: failed to open '" + src.generic_string() + "': " + std::strerror(errno),
+            src,
+        });
+
+    /* O_EXCL|O_NOFOLLOW sibling temp + fchmod + rename: a pre-placed symlink
+     * at a guessed temp name is never followed or written through. */
+    static std::atomic<unsigned> seq {0};
+    std::filesystem::path tmp;
+    int dst_fd = -1;
+    for (int attempt = 0; attempt < 64; ++attempt) {
+        tmp = std::filesystem::path(
+            dst.generic_string() + ".truss-tmp." + std::to_string(::getpid()) + "."
+            + std::to_string(seq.fetch_add(1, std::memory_order_relaxed)));
+        dst_fd = ::open(tmp.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
+        if (dst_fd != -1 || errno != EEXIST)
+            break;
+    }
+    if (dst_fd == -1) {
+        const std::string why = std::strerror(errno);
+        ::close(src_fd);
+        return std::unexpected(Error {
+            Error::Kind::Io,
+            "install: failed to create temp file for '" + dst.generic_string() + "': " + why,
             dst,
         });
     }
-    if (::chmod(tmp.c_str(), mode) != 0) {
+
+    char buf[65536];
+    for (;;) {
+        const ssize_t n = ::read(src_fd, buf, sizeof(buf));
+        if (n < 0) {
+            if (errno == EINTR)
+                continue;
+            const std::string why = std::strerror(errno);
+            ::close(src_fd);
+            ::close(dst_fd);
+            std::filesystem::remove(tmp, ec);
+            return std::unexpected(Error {
+                Error::Kind::Io,
+                "install: failed to read '" + src.generic_string() + "': " + why,
+                src,
+            });
+        }
+        if (n == 0)
+            break;
+        std::size_t off = 0;
+        while (off < static_cast<std::size_t>(n)) {
+            const ssize_t w = ::write(dst_fd, buf + off, static_cast<std::size_t>(n) - off);
+            if (w < 0) {
+                if (errno == EINTR)
+                    continue;
+                const std::string why = std::strerror(errno);
+                ::close(src_fd);
+                ::close(dst_fd);
+                std::filesystem::remove(tmp, ec);
+                return std::unexpected(Error {
+                    Error::Kind::Io,
+                    "install: failed to write '" + dst.generic_string() + "': " + why,
+                    dst,
+                });
+            }
+            off += static_cast<std::size_t>(w);
+        }
+    }
+    ::close(src_fd);
+
+    if (::fchmod(dst_fd, mode) != 0) {
         const std::string why = std::strerror(errno);
+        ::close(dst_fd);
         std::filesystem::remove(tmp, ec);
         return std::unexpected(Error {
             Error::Kind::Io,
             "install: failed to set permissions on '" + dst.generic_string() + "': " + why,
+            dst,
+        });
+    }
+    if (::close(dst_fd) != 0) {
+        const std::string why = std::strerror(errno);
+        std::filesystem::remove(tmp, ec);
+        return std::unexpected(Error {
+            Error::Kind::Io,
+            "install: failed to close '" + dst.generic_string() + "': " + why,
             dst,
         });
     }
@@ -125,19 +192,37 @@ Result<void> run_install(const std::filesystem::path& cwd,
                          bool dry_run,
                          std::span<const InstallItem> items) {
     const std::filesystem::path root = inst_resolve_prefix(cwd, prefix_opt);
+    const std::filesystem::path manifest_path = build_dir / "install_manifest.txt";
     std::vector<std::string> manifest_lines;
+
+    /* Flush every file already landed so a mid-run failure (disk full, strip
+     * error, EPERM) never orphans installed files from `./truss uninstall`. */
+    auto flush_manifest = [&]() -> Result<void> {
+        if (dry_run || manifest_lines.empty())
+            return {};
+        std::ranges::sort(manifest_lines);
+        manifest_lines.erase(std::ranges::unique(manifest_lines).begin(), manifest_lines.end());
+        std::string manifest_text = "# prefix=" + root.generic_string() + "\n";
+        for (const auto& line : manifest_lines) {
+            manifest_text += line;
+            manifest_text += '\n';
+        }
+        return detail::write_file(manifest_path, manifest_text);
+    };
 
     for (const auto& item : items) {
         const Target& t = *item.target;
         if (t.is_installed() && !item.output.empty()) {
             const std::filesystem::path src(item.output);
             std::error_code ec;
-            if (!dry_run && !std::filesystem::is_regular_file(src, ec))
+            if (!dry_run && !std::filesystem::is_regular_file(src, ec)) {
+                static_cast<void>(flush_manifest());
                 return std::unexpected(Error {
                     Error::Kind::Io,
                     "install: built artifact not found at '" + src.generic_string() + "'",
                     src,
                 });
+            }
 
             std::string subdir = t.install_subdir();
             if (subdir.empty())
@@ -148,15 +233,21 @@ Result<void> run_install(const std::filesystem::path& cwd,
             if (dry_run) {
                 log::info("dry run: would install " + dst.generic_string());
             } else {
-                if (auto r = inst_copy_file_mode(src, dst, mode); !r)
+                if (auto r = inst_copy_file_mode(src, dst, mode); !r) {
+                    static_cast<void>(flush_manifest());
                     return r;
+                }
+                manifest_lines.push_back(dst.generic_string());
                 if (strip && (t.kind() == TargetKind::Executable || t.kind() == TargetKind::SharedLibrary)) {
-                    if (auto r = inst_strip_file(dst, t.kind()); !r)
+                    if (auto r = inst_strip_file(dst, t.kind()); !r) {
+                        static_cast<void>(flush_manifest());
                         return r;
+                    }
                 }
                 log::info("installed " + dst.generic_string());
             }
-            manifest_lines.push_back(dst.generic_string());
+            if (dry_run)
+                manifest_lines.push_back(dst.generic_string());
         }
 
         for (const auto& hi : t.installed_headers()) {
@@ -164,12 +255,14 @@ Result<void> run_install(const std::filesystem::path& cwd,
                                                       ? std::filesystem::path(hi.dir)
                                                       : (cwd / hi.dir);
             std::error_code ec;
-            if (!std::filesystem::is_directory(src_dir, ec))
+            if (!std::filesystem::is_directory(src_dir, ec)) {
+                static_cast<void>(flush_manifest());
                 return std::unexpected(Error {
                     Error::Kind::Config,
                     "target '" + t.name() + "': install_headers('" + hi.dir + "') directory not found",
                     src_dir,
                 });
+            }
 
             std::filesystem::path dst_base = root / "include";
             if (!hi.subdir.empty())
@@ -203,8 +296,10 @@ Result<void> run_install(const std::filesystem::path& cwd,
                 if (dry_run) {
                     log::info("dry run: would install " + dst.generic_string());
                 } else {
-                    if (auto r = inst_copy_file_mode(f, dst, 0644); !r)
+                    if (auto r = inst_copy_file_mode(f, dst, 0644); !r) {
+                        static_cast<void>(flush_manifest());
                         return r;
+                    }
                 }
                 manifest_lines.push_back(dst.generic_string());
             }
@@ -214,21 +309,16 @@ Result<void> run_install(const std::filesystem::path& cwd,
     if (dry_run)
         return {};
 
-    std::ranges::sort(manifest_lines);
-    manifest_lines.erase(std::ranges::unique(manifest_lines).begin(), manifest_lines.end());
-    std::string manifest_text;
-    for (const auto& line : manifest_lines) {
-        manifest_text += line;
-        manifest_text += '\n';
-    }
-    const std::filesystem::path manifest_path = build_dir / "install_manifest.txt";
-    if (auto r = detail::write_file(manifest_path, manifest_text); !r)
+    if (auto r = flush_manifest(); !r)
         return r;
     log::success("installed " + std::to_string(manifest_lines.size()) + " file(s) into " + root.generic_string());
     return {};
 }
 
-Result<void> run_uninstall(const std::filesystem::path& build_dir, bool dry_run) {
+Result<void> run_uninstall(const std::filesystem::path& cwd,
+                           const std::filesystem::path& build_dir,
+                           const std::optional<std::filesystem::path>& prefix_opt,
+                           bool dry_run) {
     const std::filesystem::path manifest_path = build_dir / "install_manifest.txt";
     std::error_code ec;
     if (!std::filesystem::is_regular_file(manifest_path, ec))
@@ -243,8 +333,17 @@ Result<void> run_uninstall(const std::filesystem::path& build_dir, bool dry_run)
     if (!text)
         return std::unexpected(text.error());
 
-    std::size_t removed = 0;
+    const auto has_control_chars = [](std::string_view s) {
+        return std::ranges::any_of(s, [](char c) {
+            const unsigned char uc = static_cast<unsigned char>(c);
+            return uc < 0x20 || uc == 0x7f;
+        });
+    };
+
+    std::optional<std::filesystem::path> manifest_prefix;
+    std::vector<std::string_view> lines;
     std::size_t pos = 0;
+    bool first_line = true;
     while (pos < text->size()) {
         std::size_t nl = text->find('\n', pos);
         if (nl == std::string::npos)
@@ -255,7 +354,69 @@ Result<void> run_uninstall(const std::filesystem::path& build_dir, bool dry_run)
         pos = nl + 1;
         if (line.empty())
             continue;
-        const std::filesystem::path p(line);
+        if (first_line && line.starts_with("# prefix=")) {
+            first_line = false;
+            const std::string_view pfx = line.substr(9);
+            if (!pfx.empty() && !has_control_chars(pfx))
+                manifest_prefix = std::filesystem::path(pfx).lexically_normal();
+            continue;
+        }
+        first_line = false;
+        if (line.front() == '#')
+            continue;
+        lines.push_back(line);
+    }
+
+    const bool explicit_root = prefix_opt.has_value()
+                               || (os::env("DESTDIR").has_value() && !os::env("DESTDIR")->empty());
+    const std::filesystem::path allowed_root =
+        (!explicit_root && manifest_prefix.has_value())
+            ? *manifest_prefix
+            : inst_resolve_prefix(cwd, prefix_opt);
+    std::string root_str = allowed_root.lexically_normal().generic_string();
+    while (root_str.size() > 1 && root_str.back() == '/')
+        root_str.pop_back();
+    if (root_str.empty() || root_str == "/")
+        return std::unexpected(Error {
+            Error::Kind::Config,
+            "uninstall: refusing to operate with empty or root ('/') install prefix",
+            manifest_path,
+        });
+    const std::string root_prefix = root_str + "/";
+
+    /* Validate every entry before deleting anything: a tampered manifest under
+     * build/ must never delete files outside the install prefix. */
+    std::vector<std::filesystem::path> targets;
+    targets.reserve(lines.size());
+    for (const std::string_view line : lines) {
+        if (has_control_chars(line))
+            return std::unexpected(Error {
+                Error::Kind::Config,
+                "uninstall: manifest entry contains control characters",
+                manifest_path,
+            });
+        const std::filesystem::path raw(line);
+        for (const auto& part : raw) {
+            if (part == "..")
+                return std::unexpected(Error {
+                    Error::Kind::Config,
+                    "uninstall: refusing manifest entry with '..': '" + std::string(line) + "'",
+                    raw,
+                });
+        }
+        const std::filesystem::path norm = raw.lexically_normal();
+        const std::string norm_str = norm.generic_string();
+        if (!norm_str.starts_with(root_prefix))
+            return std::unexpected(Error {
+                Error::Kind::Config,
+                "uninstall: refusing to remove '" + norm_str + "' (outside install prefix '" + root_str + "')",
+                norm,
+            });
+        targets.push_back(norm);
+    }
+
+    std::size_t removed = 0;
+    for (const auto& p : targets) {
         if (dry_run) {
             log::info("dry run: would remove " + p.generic_string());
             ++removed;

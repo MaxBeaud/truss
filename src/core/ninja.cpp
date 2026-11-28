@@ -103,6 +103,10 @@ void NinjaWriter::build(const Edge& e) {
         buf_ += " |";
         append_paths(buf_, e.implicit_ins);
     }
+    if (!e.order_only_ins.empty()) {
+        buf_ += " ||";
+        append_paths(buf_, e.order_only_ins);
+    }
     buf_ += '\n';
     for (const auto& [k, v] : e.vars)
         append_binding(buf_, k, v, true);

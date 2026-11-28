@@ -20,8 +20,9 @@ module;
 #include <system_error>
 #include <vector>
 
-#include <unistd.h>
 #include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 module truss;
 import :api;
@@ -79,7 +80,10 @@ void expand_braces(std::string_view pattern, std::vector<std::string>& out, size
 bool glob_match(std::string_view pattern, std::string_view text) {
     const std::size_t m = pattern.size();
     const std::size_t n = text.size();
-    std::vector<std::uint8_t> dp(n + 1, 0);
+    /* reuse the DP row across match attempts on the same thread (glob_batch is
+     * single-threaded per walk, avoiding a heap allocation per file x pattern) */
+    thread_local std::vector<std::uint8_t> dp;
+    dp.assign(n + 1, 0);
     dp[0] = 1;
     for (std::size_t i = 0; i < m;) {
         const char c = pattern[i];
@@ -128,15 +132,6 @@ bool glob_match(std::string_view pattern, std::string_view text) {
         }
     }
     return dp[n] != 0;
-}
-
-bool is_hidden(const std::filesystem::path& rel) {
-    for (const auto& part : rel) {
-        const auto& s = part.native(); /* reference: no per-component copy */
-        if (!s.empty() && s.front() == '.' && s != "." && s != "..")
-            return true;
-    }
-    return false;
 }
 
 struct PatternPlan {
@@ -410,11 +405,17 @@ Result<std::vector<std::vector<std::filesystem::path>>> glob_groups_impl(
                 const bool is_sym = it->is_symlink(entry_ec);
                 const bool is_dir = !is_sym && it->is_directory(entry_ec);
 
-                // check hiddenness only on components BELOW the literal prefix:
-                // explicit ../vendor/*.cpp or .gen/*.cpp prefixes stay valid
-                // while wildcard-discovered dotfiles/dotdirs are skipped
-                const std::filesystem::path under_base = it->path().lexically_relative(w.base);
-                if (is_hidden(under_base) || (!w.skip_rel.empty() && under_base == w.skip_rel)) {
+                // Hidden ancestor directories are already pruned by
+                // disable_recursion_pending(), so only the current entry's
+                // basename can newly be hidden below the literal prefix.
+                const std::string fname = it->path().filename().generic_string();
+                const bool hidden = !fname.empty() && fname.front() == '.';
+                if (hidden) {
+                    if (is_dir)
+                        it.disable_recursion_pending();
+                    continue;
+                }
+                if (!w.skip_rel.empty() && it->path().lexically_relative(w.base) == w.skip_rel) {
                     if (is_dir)
                         it.disable_recursion_pending();
                     continue;
@@ -427,16 +428,17 @@ Result<std::vector<std::vector<std::filesystem::path>>> glob_groups_impl(
                 if (!is_sym && !it->is_regular_file(entry_ec))
                     continue;
 
-                const std::filesystem::path& rel = base_is_dot ? under_base : it->path();
-                if (rel.empty())
+                std::string rel_str = path_str(it->path());
+                if (base_is_dot && rel_str.starts_with("./"))
+                    rel_str.erase(0, 2);
+                if (rel_str.empty())
                     continue;
-                const std::string rel_str = path_str(rel);
                 for (const auto& consumer : w.consumers) {
                     if (!consumer.sub_prefix.empty() && !rel_str.starts_with(consumer.sub_prefix))
                         continue;
                     for (const auto& pat : consumer.patterns) {
                         if (glob_match(pat, rel_str)) {
-                            results[consumer.group_idx].push_back(rel);
+                            results[consumer.group_idx].emplace_back(rel_str);
                             break;
                         }
                     }
@@ -542,7 +544,10 @@ Result<std::string> read_file(const std::filesystem::path& p) {
     return s;
 }
 
-Result<void> write_file(const std::filesystem::path& p, std::string_view data) {
+namespace {
+
+Result<void> write_file_impl(const std::filesystem::path& p, std::string_view data,
+                             std::optional<mode_t> explicit_mode) {
     std::error_code ec;
     if (p.has_parent_path())
         std::filesystem::create_directories(p.parent_path(), ec);
@@ -557,11 +562,12 @@ Result<void> write_file(const std::filesystem::path& p, std::string_view data) {
     static std::atomic<unsigned> tmp_seq {0};
     std::filesystem::path tmp;
     int fd = -1;
+    const mode_t open_mode = explicit_mode ? mode_t {0600} : mode_t {0666};
     for (int attempt = 0; attempt < 64; ++attempt) {
         tmp = p;
         tmp += ".truss-tmp." + std::to_string(getpid()) + "."
              + std::to_string(tmp_seq.fetch_add(1, std::memory_order_relaxed));
-        fd = ::open(tmp.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0666);
+        fd = ::open(tmp.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, open_mode);
         if (fd != -1 || errno != EEXIST)
             break;
     }
@@ -580,6 +586,11 @@ Result<void> write_file(const std::filesystem::path& p, std::string_view data) {
             }
             written += static_cast<std::size_t>(n);
         }
+        if (explicit_mode && ::fchmod(fd, *explicit_mode) != 0) {
+            ::close(fd);
+            std::filesystem::remove(tmp, ec);
+            return std::unexpected(Error {Error::Kind::Io, "failed to set file permissions", p});
+        }
         if (::close(fd) != 0) {
             std::filesystem::remove(tmp, ec);
             return std::unexpected(Error {Error::Kind::Io, "failed to close file after writing", p});
@@ -592,6 +603,16 @@ Result<void> write_file(const std::filesystem::path& p, std::string_view data) {
         return std::unexpected(err);
     }
     return {};
+}
+
+} // namespace
+
+Result<void> write_file(const std::filesystem::path& p, std::string_view data) {
+    return write_file_impl(p, data, std::nullopt);
+}
+
+Result<void> write_file_mode(const std::filesystem::path& p, std::string_view data, unsigned mode) {
+    return write_file_impl(p, data, static_cast<mode_t>(mode));
 }
 
 /* write only when content differs: keeps mtimes stable so generated build
@@ -752,6 +773,7 @@ struct Sha256Ctx {
 
 std::string sha256_bytes(std::string_view data) {
     Sha256Ctx ctx;
+    /* reinterpret_cast: char* -> const uint8_t* (byte-aliasing safe per [basic.lval]) */
     ctx.update(reinterpret_cast<const std::uint8_t*>(data.data()), data.size());
     return ctx.final_hex();
 }
@@ -929,6 +951,7 @@ Result<std::string> sha256_file(const std::filesystem::path& p) {
     while (in) {
         in.read(chunk.data(), static_cast<std::streamsize>(chunk.size()));
         if (const std::streamsize got = in.gcount(); got > 0)
+            /* reinterpret_cast: char* -> const uint8_t* (byte-aliasing safe per [basic.lval]) */
             ctx.update(reinterpret_cast<const std::uint8_t*>(chunk.data()),
                        static_cast<std::size_t>(got));
     }

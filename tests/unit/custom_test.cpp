@@ -116,9 +116,10 @@ TEST_CASE("custom command e2e: for_host gen tool -> generated header -> app comp
     CHECK(contains(manifest, "build build/debug/gen/generated/out.h: custom_command"));
     CHECK(contains(manifest, gen_exe));
     CHECK(contains(manifest, "command = " + gen_exe + " -o build/debug/gen/generated/out.h"));
-    /* the app's compile edge takes the generated header as an implicit input
-     * and its directory as an include dir */
-    CHECK(contains(manifest, "app/main.cpp | build/debug/gen/generated/out.h"));
+    /* the app's compile edge takes the generated header as an order-only input
+     * (so unrelated TUs do not recompile when codegen reruns; the depfile
+     * tracks actual #includes) and its directory as an include dir */
+    CHECK(contains(manifest, "app/main.cpp || build/debug/gen/generated/out.h"));
     CHECK(contains(manifest, "-I\"build/debug/gen/generated\""));
 
     /* the app runs green (it compiled against the generated header) */

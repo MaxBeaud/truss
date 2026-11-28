@@ -48,6 +48,17 @@ bool opt_valid_name(std::string_view s) {
     return true;
 }
 
+bool opt_valid_scope(std::string_view s) {
+    if (s.empty() || s.front() == '.' || s.back() == '.')
+        return false;
+    for (const char c : s) {
+        const unsigned char uc = static_cast<unsigned char>(c);
+        if (uc < 0x20 || uc == 0x7f || c == '=' || c == ' ' || c == '\t')
+            return false;
+    }
+    return true;
+}
+
 bool opt_valid_c_ident(std::string_view s) {
     if (s.empty())
         return false;
@@ -180,7 +191,13 @@ void Project::load_options_cache() {
         const std::size_t eq = line.find('=');
         if (eq == std::string_view::npos || eq == 0)
             continue;
-        cached_options_.emplace_back(std::string(line.substr(0, eq)), std::string(line.substr(eq + 1)));
+        const std::string_view key = line.substr(0, eq);
+        const std::size_t dot = key.rfind('.');
+        if (dot == std::string_view::npos
+            || !opt_valid_scope(key.substr(0, dot))
+            || !opt_valid_name(key.substr(dot + 1)))
+            continue;
+        cached_options_.emplace_back(std::string(key), std::string(line.substr(eq + 1)));
     }
 }
 
@@ -196,6 +213,8 @@ std::string Project::register_option_value(std::string_view scope, const OptionS
             options_error_ = Error {Error::Kind::Config, std::move(msg)};
     };
 
+    if (!opt_valid_scope(sc))
+        set_err("invalid option scope '" + sc + "' (must be non-empty without spaces, '=', or control chars)");
     if (!opt_valid_name(spec.name))
         set_err("invalid option name '" + spec.name + "' (must be non-empty without spaces, '=', or '.')");
     if (spec.kind == OptionSpec::Kind::Choice) {

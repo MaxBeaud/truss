@@ -9,12 +9,16 @@ module;
 #include <charconv>
 #include <cstdint>
 #include <filesystem>
+#include <map>
+#include <mutex>
 #include <optional>
 #include <span>
 #include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
+
+#include <sys/stat.h>
 
 module truss;
 import :api;
@@ -33,14 +37,13 @@ std::atomic<std::size_t> g_cold {0};
 std::atomic<std::size_t> g_skipped {0};
 
 ScanSourceStat stat_of(const std::filesystem::path& p) {
-    std::error_code ec;
-    const auto mtime = std::filesystem::last_write_time(p, ec);
-    if (ec)
+    struct stat st {};
+    if (::stat(p.c_str(), &st) != 0)
         return {};
-    const auto size = std::filesystem::file_size(p, ec);
-    if (ec)
-        return {};
-    return {static_cast<std::int64_t>(mtime.time_since_epoch().count()), size, true};
+    const std::int64_t mtime =
+        static_cast<std::int64_t>(st.st_mtim.tv_sec) * 1'000'000'000LL
+        + static_cast<std::int64_t>(st.st_mtim.tv_nsec);
+    return {mtime, static_cast<std::uintmax_t>(st.st_size), true};
 }
 
 /* the compiler binary's identity: an in-place upgrade (same path) must not
@@ -51,6 +54,36 @@ ScanSourceStat compiler_stat(std::string_view compiler) {
     if (auto found = os::find_program(exe); found.has_value())
         return stat_of(*found);
     return {}; /* bare name not on PATH: the key still carries the name */
+}
+
+struct ToolchainIdentity {
+    ScanSourceStat cc;
+    ScanSourceStat scanner;
+};
+
+/* Memoize toolchain binary identity per process: compiler and clang-scan-deps
+ * binaries do not change mid-run, so statting them once per compiler string
+ * avoids 4-6 syscalls per module-mentioning TU. */
+ToolchainIdentity toolchain_identity(const std::string& compiler) {
+    static std::mutex mu;
+    static std::map<std::string, ToolchainIdentity, std::less<>> cache;
+    {
+        std::scoped_lock lock(mu);
+        if (const auto it = cache.find(compiler); it != cache.end())
+            return it->second;
+    }
+    ToolchainIdentity id {};
+    id.cc = compiler_stat(compiler);
+    const std::string_view exe = std::string_view(compiler).substr(0, compiler.find(' '));
+    const std::string exe_base = std::filesystem::path(exe).filename().string();
+    const bool zig = exe_base == "zig" || exe_base == "zig.exe";
+    if (family_from_compiler_name(compiler) == CompilerFamily::Clang && !zig) {
+        if (auto found = find_clang_scan_deps(compiler); found.has_value())
+            id.scanner = stat_of(*found);
+    }
+    std::scoped_lock lock(mu);
+    cache.try_emplace(compiler, id);
+    return id;
 }
 
 template <class T>
@@ -82,17 +115,9 @@ void scan_cache_note_skipped() { g_skipped.fetch_add(1, std::memory_order_relaxe
 
 std::string scan_cache_key(const std::string& cwd, const std::string& compiler,
                            std::string_view compile_flags, const std::string& source) {
-    const ScanSourceStat cc = compiler_stat(compiler);
-    /* the scanner is a separate binary for clang: its version matters too
-     * (zig drives clang-scan-deps not at all, so it is not part of its key) */
-    const std::string_view exe = std::string_view(compiler).substr(0, compiler.find(' '));
-    const std::string exe_base = std::filesystem::path(exe).filename().string();
-    const bool zig = exe_base == "zig" || exe_base == "zig.exe";
-    ScanSourceStat scanner {};
-    if (family_from_compiler_name(compiler) == CompilerFamily::Clang && !zig) {
-        if (auto found = find_clang_scan_deps(compiler); found.has_value())
-            scanner = stat_of(*found);
-    }
+    const ToolchainIdentity id = toolchain_identity(compiler);
+    const ScanSourceStat cc = id.cc;
+    const ScanSourceStat scanner = id.scanner;
 
     std::string material;
     material.reserve(cwd.size() + source.size() + compile_flags.size() + compiler.size() + 128);

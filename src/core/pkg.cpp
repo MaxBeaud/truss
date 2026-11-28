@@ -46,9 +46,9 @@ std::filesystem::path staging_path(const std::filesystem::path& p) {
  * sidecar lockfile under build/ that is never unlinked or renamed, so
  * write_lockfile()'s atomic temp+rename over truss.lock never drops exclusion.
  * POSIX only; a no-op elsewhere. */
-class lockfile_guard {
+class LockfileGuard {
 public:
-    explicit lockfile_guard(const std::filesystem::path& file, int wait_seconds = 120) {
+    explicit LockfileGuard(const std::filesystem::path& file, int wait_seconds = 120) {
 #if !defined(_WIN32)
         if (file.has_parent_path()) {
             std::error_code dir_ec;
@@ -85,9 +85,9 @@ public:
         }
 #endif
     }
-    lockfile_guard(const lockfile_guard&) = delete;
-    lockfile_guard& operator=(const lockfile_guard&) = delete;
-    ~lockfile_guard() {
+    LockfileGuard(const LockfileGuard&) = delete;
+    LockfileGuard& operator=(const LockfileGuard&) = delete;
+    ~LockfileGuard() {
 #if !defined(_WIN32)
         if (fd_ != -1) {
             ::flock(fd_, LOCK_UN);
@@ -230,6 +230,7 @@ Result<void> tarball_fetch(const std::string& pkg_name, const std::string& url,
     }
     log::info("fetching " + pkg_name + " (" + url + ")");
     const std::filesystem::path tmp = staging_path(cache_file);
+    std::filesystem::remove_all(tmp, ec); /* clear any pre-existing file or symlink before curl -o */
     /* -s would silence the progress meter too: on a terminal the bar is the
      * point, so only -f (fail on HTTP errors) and -L (follow redirects) apply */
     std::vector<std::string> curl {"curl", progress_to_terminal() ? "-fL" : "-fsSL", "--retry", "2",
@@ -276,6 +277,30 @@ Result<void> tarball_fetch(const std::string& pkg_name, const std::string& url,
  * target lands outside dest; same check for the directories the tree
  * exposes (dangling dir links catch at target resolution, this catches at
  * fetch time with the package named). */
+/* True when symlink `link_path` -> `target` escapes canonical `root_str`
+ * (or cannot be resolved). Shared by extraction and copy_tree so both enforce
+ * the exact same fetch security invariant. */
+bool link_escapes(std::string_view root_str, const std::filesystem::path& link_path,
+                  const std::filesystem::path& target) {
+    const auto within = [&](const std::string& resolved) {
+        return resolved == root_str
+            || (resolved.size() > root_str.size() && resolved.starts_with(root_str)
+                && resolved[root_str.size()] == '/');
+    };
+    std::error_code ec;
+    if (target.is_absolute()) {
+        const auto canon = std::filesystem::weakly_canonical(target, ec);
+        return ec || !within(canon.generic_string());
+    }
+    /* compare like with like: canonicalize the link's parent too, or a
+     * symlinked project path (e.g. /tmp -> /private/tmp) would flag every
+     * package-internal link */
+    const auto parent = std::filesystem::weakly_canonical(link_path.parent_path(), ec);
+    if (ec)
+        return true; /* cannot resolve: refuse the package */
+    return !within((parent / target).lexically_normal().generic_string());
+}
+
 Result<void> verify_no_escaping_links(const std::filesystem::path& dest) {
     std::error_code ec;
     const std::string dest_str = std::filesystem::weakly_canonical(dest, ec).generic_string();
@@ -297,27 +322,7 @@ Result<void> verify_no_escaping_links(const std::filesystem::path& dest) {
                 it_err = it->path();
                 break;
             }
-            const auto within = [&](const std::string& resolved) {
-                return resolved == dest_str || resolved.starts_with(dest_str + "/");
-            };
-            const bool escapes = target.is_absolute() ?
-                                     /* absolute link target: escapes unless it stays inside */
-                                     !within(std::filesystem::weakly_canonical(target, ec).generic_string()) :
-                                     [&] {
-                                         /* compare like with like: canonicalize the link's
-                                          * parent too, or a symlinked project path (macOS
-                                          * /tmp) would flag every package-internal link */
-                                         std::error_code pc;
-                                         const auto parent = std::filesystem::weakly_canonical(
-                                             it->path().parent_path(), pc);
-                                         if (pc)
-                                             return true; /* cannot resolve: refuse the package */
-                                         return !within(std::filesystem::path((parent / target).lexically_normal())
-                                                            .generic_string());
-                                     }();
-            if (ec)
-                return std::unexpected(Error {Error::Kind::Io, "cannot read symlink in package", it->path()});
-            if (escapes)
+            if (link_escapes(dest_str, it->path(), target))
                 return std::unexpected(Error {
                     Error::Kind::Fetch,
                     "refusing package: '" + it->path().lexically_relative(dest).generic_string() +
@@ -429,13 +434,7 @@ Result<void> copy_tree(const std::filesystem::path& from, const std::filesystem:
             auto target = std::filesystem::read_symlink(it->path(), ec);
             if (ec)
                 return std::unexpected(Error {Error::Kind::Io, "cannot read symlink", it->path()});
-            std::error_code pc;
-            const auto parent = std::filesystem::weakly_canonical(it->path().parent_path(), pc);
-            const std::string resolved =
-                pc ? std::string {}
-                   : (parent / target).lexically_normal().generic_string();
-            const bool inside = !pc && (resolved == from_str || resolved.starts_with(from_str + "/"));
-            if (!inside)
+            if (link_escapes(from_str, it->path(), target))
                 return std::unexpected(Error {
                     Error::Kind::Fetch,
                     "refusing package: '" + rel.generic_string() +
@@ -679,7 +678,7 @@ Result<std::vector<Package>> Project::fetch_all(std::vector<std::pair<std::strin
      * write_lockfile()'s atomic rename over truss.lock cannot break exclusion
      * and offline/empty runs never create an empty truss.lock in the repo */
     const std::filesystem::path sidecar_lock = build_dir() / ".truss-fetch.lock";
-    const lockfile_guard lock_guard(sidecar_lock);
+    const LockfileGuard lock_guard(sidecar_lock);
     if (!lock_guard.locked())
         return std::unexpected(Error {
             Error::Kind::Io,

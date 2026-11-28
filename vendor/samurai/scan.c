@@ -40,6 +40,9 @@ scanerror(struct scanner *s, const char *fmt, ...)
 	vfprintf(stderr, fmt, ap);
 	va_end(ap);
 	putc('\n', stderr);
+	/* truss patch: route scanerror through fatal_jmp when driven by shim.c */
+	if (truss_samu_fatal_jmp)
+		longjmp(*truss_samu_fatal_jmp, 1);
 	exit(1);
 }
 

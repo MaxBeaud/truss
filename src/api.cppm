@@ -2151,7 +2151,7 @@ public:
         const auto val = lookup_option_value(scope, name, expected);
         if (!val)
             return T {};
-        return parse_option_value<T>(*val);
+        return parse_option_value<T>(*val, name);
     }
 
 private:
@@ -2176,12 +2176,21 @@ private:
     }
 
     template <class T>
-    static T parse_option_value(std::string_view s) {
+    T parse_option_value(std::string_view s, std::string_view opt_name) const {
         if constexpr (std::same_as<T, bool>) {
             return s == "true" || s == "1" || s == "on" || s == "yes" || s == "y";
         } else if constexpr (std::integral<T>) {
             T out {};
-            std::from_chars(s.data(), s.data() + s.size(), out);
+            const auto [ptr, ec] = std::from_chars(s.data(), s.data() + s.size(), out);
+            if (ec != std::errc {} || ptr != s.data() + s.size()) {
+                if (!options_error_)
+                    options_error_ = Error {
+                        Error::Kind::Config,
+                        "option '" + std::string(opt_name) + "' value '" + std::string(s)
+                            + "' is out of range for its integer type",
+                    };
+                return T {};
+            }
             return out;
         } else {
             return std::string(s);
@@ -2196,7 +2205,7 @@ private:
         resolved.reserve(specs.size());
         for (const auto& s : specs)
             resolved.push_back(register_option_value(scope, s));
-        return std::tuple<Ts...>(parse_option_value<Ts>(resolved[Is])...);
+        return std::tuple<Ts...>(parse_option_value<Ts>(resolved[Is], specs[Is].name)...);
     }
 
     std::string register_option_value(std::string_view scope, const OptionSpec& spec);
@@ -2365,6 +2374,7 @@ public:
             result_ = TargetRef(const_cast<Target&>(target));
         return *this;
     }
+    DepChain& fallback(const Target&&) = delete;
 
     /// Direct fallback from another `DepChain`.
     DepChain& fallback(const DepChain& other) {

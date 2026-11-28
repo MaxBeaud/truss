@@ -35,7 +35,9 @@ public:
     RawTerminalGuard() {
         if (::tcgetattr(STDIN_FILENO, &orig_) == 0) {
             termios raw = orig_;
-            raw.c_lflag &= ~static_cast<tcflag_t>(ICANON | ECHO);
+            /* Clear ISIG so Ctrl-C arrives as 0x03 (mapped to Escape) and
+             * unwinds RawTerminalGuard cleanly instead of dying mid-alt-screen. */
+            raw.c_lflag &= ~static_cast<tcflag_t>(ICANON | ECHO | ISIG);
             raw.c_iflag &= ~static_cast<tcflag_t>(IXON | ICRNL);
             raw.c_cc[VMIN] = 1;
             raw.c_cc[VTIME] = 0;

@@ -17,3 +17,5 @@ void buildreset(void);
 void buildadd(struct node *);
 /* execute rules to build the scheduled targets */
 void build(void);
+/* truss patch: restore signal dispositions and close sigfd pipe */
+void buildcleanup(void);

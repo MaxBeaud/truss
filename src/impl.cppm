@@ -49,9 +49,14 @@ Result<std::string> read_file(const std::filesystem::path& p);
 /// pinning uses, applied to a string).
 /// \ingroup grp_internals
 std::string sha256_bytes(std::string_view data);
-/// Write a whole file, creating parent directories as needed.
+/// Write a whole file atomically via an O_EXCL|O_NOFOLLOW sibling temp + rename,
+/// creating parent directories as needed.
 /// \ingroup grp_internals
 Result<void> write_file(const std::filesystem::path& p, std::string_view data);
+/// Write a whole file atomically like `write_file` and apply an explicit POSIX
+/// permission mode via `fchmod` before renaming into place.
+/// \ingroup grp_internals
+Result<void> write_file_mode(const std::filesystem::path& p, std::string_view data, unsigned mode);
 /// Write only when content differs: keeps mtimes stable so generated build
 /// inputs (unity TUs, the manifest) do not trigger spurious work.
 /// \ingroup grp_internals
@@ -405,9 +410,10 @@ public:
         std::string rule;                       ///< rule name
         std::vector<std::string> inputs;        ///< explicit inputs
         std::vector<std::string> implicit_ins;  ///< after `|` on the input side
+        std::vector<std::string> order_only_ins; ///< after `||` on the input side
         std::vector<std::pair<std::string, std::string>> vars; ///< per-edge variables
     };
-    /// Emit `build outs | implicit_outs: rule ins | implicit_ins` + vars.
+    /// Emit `build outs | implicit_outs: rule ins | implicit_ins || order_only_ins` + vars.
     void build(const Edge& e);
     /// Phony target grouping inputs (the `all` target).
     void phony(std::string_view name, std::vector<std::string> ins);
@@ -535,7 +541,10 @@ Result<void> run_install(const std::filesystem::path& cwd,
 
 /// Remove every file listed in `build/<mode>/install_manifest.txt` and delete the manifest.
 /// \ingroup grp_internals
-Result<void> run_uninstall(const std::filesystem::path& build_dir, bool dry_run);
+Result<void> run_uninstall(const std::filesystem::path& cwd,
+                           const std::filesystem::path& build_dir,
+                           const std::optional<std::filesystem::path>& prefix_opt,
+                           bool dry_run);
 
 } // namespace truss::detail
 
