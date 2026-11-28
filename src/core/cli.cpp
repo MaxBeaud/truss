@@ -65,19 +65,25 @@ std::optional<Error> refresh_build_script(std::span<char* const> argv, bool dry_
     if (ec)
         return std::nullopt;
 
-    /* truss.d (written by bootstrap.sh / `setup.sh build` via -MMD) lists the
-     * headers truss.cpp includes plus the truss BMIs/libtruss.a it was built
-     * against; without it (older projects) only truss.cpp itself is compared. */
+    /* build/truss.d (written by bootstrap.sh / `setup.sh build` via -MMD;
+     * falls back to legacy root truss.d) lists the headers truss.cpp includes
+     * plus the truss BMIs/libtruss.a it was built against; without it, only
+     * truss.cpp itself is compared. */
     std::filesystem::path changed;
     if (script_time > exe_time)
         changed = script;
-    if (auto deps = detail::read_file(dir / "truss.d"); deps && changed.empty()) {
-        for (const auto& dep : detail::parse_depfile(*deps)) {
-            std::error_code dep_ec;
-            const auto dep_time = std::filesystem::last_write_time(dir / dep, dep_ec);
-            if (!dep_ec && dep_time > exe_time) {
-                changed = dir / dep;
-                break;
+    if (changed.empty()) {
+        auto deps = detail::read_file(dir / "build" / "truss.d");
+        if (!deps)
+            deps = detail::read_file(dir / "truss.d");
+        if (deps) {
+            for (const auto& dep : detail::parse_depfile(*deps)) {
+                std::error_code dep_ec;
+                const auto dep_time = std::filesystem::last_write_time(dir / dep, dep_ec);
+                if (!dep_ec && dep_time > exe_time) {
+                    changed = dir / dep;
+                    break;
+                }
             }
         }
     }
